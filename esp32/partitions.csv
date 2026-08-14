@@ -1,0 +1,7 @@
+# ESPView M6-B: 4 MiB flash, single factory app 2 MiB, no OTA.
+# Offsets keep nvs/phy_init at their historical positions so existing
+# calibration data is preserved; factory grows from 1 MiB to 2 MiB.
+# Name,   Type, SubType, Offset,  Size,     Flags
+nvs,      data, nvs,     0x9000,  0x6000,
+phy_init, data, phy,     0xf000,  0x1000,
+factory,  app,  factory, 0x10000, 0x200000,

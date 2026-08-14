@@ -1,0 +1,130 @@
+menu "ESPView"
+
+choice ESPVIEW_TRANSPORT
+    prompt "Protocol transport"
+    default ESPVIEW_TRANSPORT_UART
+    help
+        M6-A 引入编译期 Transport 选择（§二十）：UART（M1-1 baseline）或
+        Wi-Fi STA + TCP（M6-A）。上层（ProtocolEndpoint / LVGL / InputManager）
+        完全不知道 Transport 类型（§十八）。
+
+config ESPVIEW_TRANSPORT_UART
+    bool "UART (M1-1 baseline, 115200)"
+
+config ESPVIEW_TRANSPORT_TCP
+    bool "Wi-Fi STA + TCP (M6-A)"
+
+endchoice
+
+config ESPVIEW_UART_PORT
+    int "Protocol UART port number (ESP32: 0/1/2)"
+    default 0
+    range 0 2
+
+config ESPVIEW_UART_TX_GPIO
+    int "Protocol UART TX GPIO number (-1 = keep driver default)"
+    default 1
+    range -1 39
+
+config ESPVIEW_UART_RX_GPIO
+    int "Protocol UART RX GPIO number (-1 = keep driver default)"
+    default 3
+    range -1 39
+
+config ESPVIEW_UART_BAUD
+    int "Protocol UART baud rate"
+    default 115200
+
+config ESPVIEW_UART_RX_BUF
+    int "Protocol UART RX ring buffer size (bytes)"
+    default 8192
+
+config ESPVIEW_UART_TX_BUF
+    int "Protocol UART TX ring buffer size (bytes)"
+    default 8192
+
+config ESPVIEW_WIFI_SSID
+    string "Wi-Fi SSID (development LAN; local credentials only)"
+    default ""
+    depends on ESPVIEW_TRANSPORT_TCP
+    help
+        本地开发网络凭据：只通过 menuconfig / 未跟踪 sdkconfig 注入
+        （sdkconfig 已被 .gitignore 排除）。禁止写入源码 / DESIGN.md / 日志。
+
+config ESPVIEW_WIFI_PASSWORD
+    string "Wi-Fi password (development LAN; local credentials only)"
+    default ""
+    depends on ESPVIEW_TRANSPORT_TCP
+    help
+        本地开发网络凭据：只通过 menuconfig / 未跟踪 sdkconfig 注入。
+
+config ESPVIEW_TCP_SERVER_IP
+    string "PC TCP server IPv4 address (local test config)"
+    default "192.168.1.100"
+    depends on ESPVIEW_TRANSPORT_TCP
+
+config ESPVIEW_TCP_SERVER_PORT
+    int "PC TCP server port"
+    default 8765
+    range 1024 65535
+    depends on ESPVIEW_TRANSPORT_TCP
+
+config ESPVIEW_TCP_CONNECT_TIMEOUT_MS
+    int "TCP connect timeout (ms)"
+    default 10000
+    range 100 60000
+    depends on ESPVIEW_TRANSPORT_TCP
+
+config ESPVIEW_TCP_RECONNECT_DELAY_MS
+    int "TCP reconnect delay (ms)"
+    default 3000
+    range 100 60000
+    depends on ESPVIEW_TRANSPORT_TCP
+
+config ESPVIEW_TCP_RX_BUF
+    int "TCP RX chunk size (bytes)"
+    default 4096
+    range 512 16384
+    depends on ESPVIEW_TRANSPORT_TCP
+
+config ESPVIEW_WIFI_PS_NONE
+    bool "Disable Wi-Fi power save (experimental; lower latency)"
+    default n
+    depends on ESPVIEW_TRANSPORT_TCP
+    help
+        实验性延迟优化（§二十五）：默认保持 ESP-IDF power save baseline；
+        实时性测试可临时启用，不作为生产默认。
+
+config ESPVIEW_LVGL_FLUSH_WAIT_MS
+    int "LVGL flush wait budget (ms; UART pacing baseline)"
+    default 3000
+    range 50 30000
+    help
+        M6-C §十二：LVGL flush_cb 在队列满/上一帧未结束时的有界等待预算。
+        UART（paced）保持 3000ms 节流基线（115200 下 FULL 帧需 ~13.5s）；
+        TCP（unpaced）运行时使用 250ms（LAN 大帧远快于此，超时则整帧
+        丢弃 + FULL resync）。运行时由 main.cpp 按 Transport capabilities
+        换算，本项只定义 UART 基线。
+
+config ESPVIEW_TEST_TRANSPORT_SWITCH
+    bool "F12 test-only runtime transport switch hook (M6-D)"
+    default n
+    help
+        M6-E §19：生产默认 OFF。F12（HID 0x45）输入 → debugTransportSwitch() 的
+        编译期 test-only 钩子，仅测试固件通过本地（未跟踪）sdkconfig 置
+        CONFIG_ESPVIEW_TEST_TRANSPORT_SWITCH=y 启用（运行时 UART↔TCP 切换验收与
+        压力测试）。正式入口是 PC 侧 Transport UI（ConnectionManager.switchTransport），
+        协议层不做切换命令，wire format 未修改。
+
+config ESPVIEW_TCP_TX_SND_BUF
+    int "TCP TX socket send buffer (bytes; LWIP TCP_SND_BUF_DEFAULT)"
+    default 24576
+    range 5760 65536
+    depends on ESPVIEW_TRANSPORT_TCP
+    help
+        M6-C §十：TCP 大帧吞吐的发送缓冲建议值。ESP-IDF LWIP 不支持运行时
+        修改 TCP sndbuf（仅 TCP_NODELAY），实际生效值 = 构建时
+        CONFIG_LWIP_TCP_SND_BUF_DEFAULT（sdkconfig / sdkconfig.defaults
+        已同步为 24576）。本项仅作文档/验收基准，编译期不引用。
+
+endmenu

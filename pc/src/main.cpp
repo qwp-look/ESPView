@@ -1,0 +1,920 @@
+// ESPView M2/M4 — Qt 6 Virtual Display 入口（Windows / MSYS2 MinGW64 / Qt 6.11.1）。
+//
+// 规范来源：docs/DESIGN.md M2/M4 节 + spec §4/§5/§6/§7/§19/§20。
+//
+// 启动流程：
+//   QApplication → MainWindow → ConnectionManager.start(COM4, 115200) / startTcp
+//   → SerialWorker（独立线程）打开串口/TCP 监听 → 等 HELLO → CONNECTED
+//   → 等 FULL → FrameAssembler commit → DisplayFrame (queued) → VirtualScreenWidget。
+// M6-D：正式 Transport 选择 UI（TCP/UART + Apply）→ ConnectionManager.switchTransport
+//   → TRANSPORT SWITCHING → DISCONNECTED → CONNECTING → HANDSHAKE → FULL RESYNC →
+//   CONNECTED；QSettings 持久化（transport / uart port+baud / tcp port / 窗口大小，
+//   绝不保存 Wi-Fi 凭据）。
+//
+// M4 状态面板（四域 + 诊断列表，spec §三/§四/§十九/§二十）：
+//   Connection：Transport 状态 + Protocol Session 状态分层显示、重连计数；
+//   Display：分辨率/格式/提交与作废帧/帧率/最近作废原因；
+//   Protocol：RX/TX 字节与吞吐、Packet/Message 计数、错误分类（CRC/seq/session）；
+//   Heartbeat：PING/PONG 计数、超时、RTT（无测量显示 N/A，不显示 0ms）；
+//   Input：sent / dropped / unsupported / ignoredAutoRepeat；
+//   诊断列表：最近 50 条（timestamp + severity + source + message），分级着色。
+//
+// CLI（显式参数覆盖 QSettings；无 QSettings 时默认 TCP / COM4 / 115200 / 0.0.0.0:8765）：
+//   --transport uart|tcp  传输类型（默认：QSettings，否则 tcp）
+//   --port COM4           串口名（默认：QSettings，否则 COM4；UART 模式）
+//   --baud 115200         波特率（默认 115200；UART 模式）
+//   --tcp-bind <ip>       TCP Server 监听地址（默认 0.0.0.0；TCP 模式）
+//   --tcp-port 8765       TCP Server 端口（默认 8765；TCP 模式）
+//   --dump-png <dir> 调试：每个新 FULL commit 保存 full_<frameId>.png 到目录
+//   --autoclose-ms N 调试：N ms 后自动 close（clean-exit 测试）
+
+#include <QAction>
+#include <QApplication>
+#include <QColor>
+#include <QCloseEvent>
+#include <QDateTime>
+#include <QDir>
+#include <QFile>
+#include <QFileDialog>
+#include <QTextStream>
+#include <QFormLayout>
+#include <QGridLayout>
+#include <QKeySequence>
+#include <QComboBox>
+#include <QEventLoop>
+#include <QHBoxLayout>
+#include <QIntValidator>
+#include <QLineEdit>
+#include <QPushButton>
+#include <QSettings>
+#include <QLabel>
+#include <QListWidget>
+#include <QListWidgetItem>
+#include <QMainWindow>
+#include <QMenuBar>
+#include <QMessageBox>
+#include <QStatusBar>
+#include <QTimer>
+#include <QVBoxLayout>
+
+#include <chrono>
+#include <cstdint>
+#include <cstdio>
+#include <string>
+#include <vector>
+
+#include "connection_manager.h"
+#include "display_frame.h"
+#include "frame_assembler.h"  // proto::toString(FrameDiscardReason)（状态面板）
+#include "input_controller.h"
+#include "input_event.h"       // makeKeyEvent（M6-D：F12 远端切换协助）
+#include "serial_worker.h"
+#include "transport_config.h"  // TransportConfig / validateTransportConfig（M6-D）
+#include "virtual_screen_widget.h"
+
+namespace {
+
+void printUsage(const char* argv0) {
+    std::printf(
+        "ESPView Virtual Display (M2/M4/M6-A/M6-D)\n"
+        "Usage: %s [options]\n"
+        "  --transport uart|tcp   transport type (default: QSettings, else tcp)\n"
+        "  --port COM4            COM port (UART; default: QSettings, else COM4)\n"
+        "  --baud 115200          baud rate (UART; default 115200)\n"
+        "  --tcp-bind <ip>        TCP server bind address (default 0.0.0.0)\n"
+        "  --tcp-port 8765        TCP server port (default 8765)\n"
+        "  --dump-png <dir>       debug: save each new FULL frame to <dir>/full_<frameId>.png\n"
+        "  --diag-log <file>       debug: append peer/session diag lines to file\n"
+        "  --autoclose-ms N       debug: auto-close the window after N ms (clean-exit test)\n"
+        "  --no-reset             M6-C test-only: skip UART DTR/RTS reset pulse\n",
+        argv0);
+}
+
+// M4：诊断 severity → 显示名称/颜色（spec §十九：INFO/WARNING/ERROR/CRITICAL）。
+QString severityName(int severity) {
+    switch (severity) {
+        case 0:
+            return QStringLiteral("INFO");
+        case 1:
+            return QStringLiteral("WARNING");
+        case 2:
+            return QStringLiteral("ERROR");
+        case 3:
+            return QStringLiteral("CRITICAL");
+    }
+    return QStringLiteral("?");
+}
+
+QString severityColor(int severity) {
+    switch (severity) {
+        case 0:
+            return QStringLiteral("#37474f");  // INFO 深灰
+        case 1:
+            return QStringLiteral("#e65100");  // WARNING 橙
+        case 2:
+            return QStringLiteral("#b71c1c");  // ERROR 红
+        case 3:
+            return QStringLiteral("#880e4f");  // CRITICAL 深红
+    }
+    return QStringLiteral("#000000");
+}
+
+// M6-D：切换耗时统计用单调时钟（与 Worker 的 steady clock 同一基）。
+uint64_t steadyMs() {
+    return static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
+                                     std::chrono::steady_clock::now().time_since_epoch())
+                                     .count());
+}
+
+}  // namespace
+
+namespace espview {
+namespace pc {
+
+class MainWindow : public QMainWindow {
+    Q_OBJECT
+public:
+    MainWindow(const TransportConfig& initialCfg, const QString& pngDumpDir,
+               QWidget* parent = nullptr)
+        : QMainWindow(parent), currentCfg_(initialCfg) {
+        setWindowTitle(QStringLiteral("ESPView Virtual Display — 320x240"));
+        resize(720, 560);
+        // M6-D §二十一：恢复上次窗口大小（QSettings）。
+        const QSize savedSize =
+            settings_.value(QStringLiteral("window/size"), QSize(720, 560)).toSize();
+        if (savedSize.width() >= 480 && savedSize.height() >= 400) {
+            resize(savedSize);
+        }
+
+        screen_ = new VirtualScreenWidget(this);
+        buildTransportPanel();  // M6-D §二：正式 Transport 选择 UI（TCP/UART）
+        buildStatusPanel();
+
+        auto* central = new QWidget(this);
+        auto* layout = new QVBoxLayout(central);
+        layout->setContentsMargins(6, 6, 6, 6);
+        layout->setSpacing(6);
+        layout->addLayout(transportGrid_);  // M6-D：Transport UI 置于虚拟屏上方
+        layout->addWidget(screen_, 1);
+        layout->addLayout(statusGrid_);
+        layout->addWidget(diagList_, 1);
+        setCentralWidget(central);
+
+        buildMenu();
+
+        // M3：InputController（GUI 线程）— 接 widget 事件 + 转发到 Worker 队列
+        inputController_ = new InputController(this);
+        screen_->setInputController(inputController_);
+        inputController_->setSendFn([this](const espview::input::InputEvent& e) {
+            manager_.sendInput(e);
+        });
+
+        // 信号接线（Worker → Manager → GUI，全部 queued，GUI 线程独占 widget）
+        connect(&manager_, &ConnectionManager::frameReady, this,
+                [this](const DisplayFrame& f) { onFrameReady(f); });
+        connect(&manager_, &ConnectionManager::statusChanged, this,
+                [this](WorkerStatus s, const QString& text) { onStatusChanged(s, text); });
+        connect(&manager_, &ConnectionManager::statsChanged, this,
+                [this](const WorkerStats& st) { onStatsChanged(st); });
+        connect(&manager_, &ConnectionManager::diagAdded, this,
+                [this](quint64 ts, int sev, const QString& src, const QString& msg) {
+                    onDiagAdded(ts, sev, src, msg);
+                });
+
+        // M6-D：切换看门狗 —— FULL 未在时限内提交 → Switch failed（§五，不无限循环）。
+        switchWatchdog_ = new QTimer(this);
+        switchWatchdog_->setInterval(500);
+        connect(switchWatchdog_, &QTimer::timeout, this, &MainWindow::onSwitchWatchdog);
+
+        if (!pngDumpDir.isEmpty()) {
+            if (QDir().mkpath(pngDumpDir)) {
+                screen_->setPngDumpDir(pngDumpDir);
+                statusBar()->showMessage(QStringLiteral("PNG dump dir: %1").arg(pngDumpDir), 5000);
+            } else {
+                statusBar()->showMessage(
+                    QStringLiteral("Cannot create dump dir: %1").arg(pngDumpDir), 5000);
+            }
+        }
+
+        // M6-D：应用初始配置（CLI / QSettings 合并结果）并启动 Worker。
+        applyConfigToUi(currentCfg_);
+        updatePortLabels();
+        startTransport(currentCfg_);
+    }
+
+    ~MainWindow() override {
+        manager_.stop();  // join Worker 线程；确保无 COM 句柄泄漏
+    }
+
+    // M6-D 调试：--diag-log 目标文件（peer/session 诊断追加）
+    void setDiagLogPath(const QString& p) { diagLogPath_ = p; }
+
+protected:
+
+    void closeEvent(QCloseEvent* event) override {
+        saveSettings();  // M6-D §二十一：退出时持久化配置
+        manager_.stop();
+        event->accept();
+    }
+
+private slots:
+    void onFrameReady(const DisplayFrame& frame) {
+        screen_->setFrame(frame);
+        // M3：鼠标坐标 clamp 上界跟随对端分辨率
+        inputController_->setDisplaySize(frame.width, frame.height);
+        resLabel_->setText(QStringLiteral("%1x%2").arg(frame.width).arg(frame.height));
+        formatLabel_->setText(frame.pixelFormat == 0 ? QStringLiteral("RGB565")
+                                                     : QStringLiteral("0x%1")
+                                                           .arg(frame.pixelFormat, 2, 16, QLatin1Char('0')));
+        // M6-D §五：切换完成判定 —— 新 Transport 收到 FULL commit 才算 CONNECTED。
+        if (frame.frameType == 0 && switchPendingFull_) {
+            lastSwitchMs_ = steadyMs() - switchStartMs_;
+            switchPendingFull_ = false;
+            switchWatchdog_->stop();
+            switching_ = false;
+            applyBtn_->setEnabled(true);
+            switchStateLabel_->setText(QStringLiteral("CONNECTED (FULL resync done)"));
+            switchStateLabel_->setStyleSheet(QStringLiteral("color:#1b5e20;font-weight:bold;"));
+            ++switchSuccesses_;
+            updateSwitchStatsLabel();
+            statusBar()->showMessage(
+                QStringLiteral("Transport switch OK (%1 ms)").arg(lastSwitchMs_), 5000);
+        }
+    }
+
+    void onStatusChanged(WorkerStatus status, const QString& text) {
+        switch (status) {
+            case WorkerStatus::Connected:
+                connLabel_->setText(QStringLiteral("Transport ✓ / Session CONNECTED"));
+                connLabel_->setStyleSheet(QStringLiteral("color:#1b5e20;font-weight:bold;"));
+                break;
+            case WorkerStatus::Connecting:
+                connLabel_->setText(QStringLiteral("Transport ✓ / Session CONNECTING"));
+                connLabel_->setStyleSheet(QStringLiteral("color:#e65100;font-weight:bold;"));
+                break;
+            case WorkerStatus::Disconnected:
+                connLabel_->setText(QStringLiteral("DISCONNECTED"));
+                connLabel_->setStyleSheet(QStringLiteral("color:#b71c1c;font-weight:bold;"));
+                screen_->clearDisplay();  // 断线：清空/隐藏旧画面
+                resLabel_->setText(QStringLiteral("—"));
+                formatLabel_->setText(QStringLiteral("—"));
+                break;
+            case WorkerStatus::Error:
+                connLabel_->setText(QStringLiteral("ERROR"));
+                connLabel_->setStyleSheet(QStringLiteral("color:#b71c1c;font-weight:bold;"));
+                screen_->clearDisplay();
+                if (switching_) {
+                    // M6-D §五：切换期间 Worker 报错（如 TCP bind 失败 / COM 占用）
+                    // → 立即判失败，不等待看门狗。
+                    abortSwitch(text);
+                }
+                break;
+        }
+        statusBar()->showMessage(text);
+    }
+
+    // Port/Baud 显示（M6-D：来自当前配置；TCP 显示监听地址，UART 显示 COM/波特率）。
+    void updatePortLabels() {
+        if (currentCfg_.kind == TransportKind::kUart) {
+            portLabel_->setText(QString::fromStdString(currentCfg_.uartPort));
+            baudLabel_->setText(QString::number(currentCfg_.uartBaud));
+        } else {
+            portLabel_->setText(QStringLiteral("TCP %1:%2")
+                                    .arg(QString::fromStdString(currentCfg_.tcpBind))
+                                    .arg(currentCfg_.tcpPort));
+            baudLabel_->setText(QStringLiteral("TCP"));
+        }
+    }
+
+    void onStatsChanged(const WorkerStats& st) {
+        // Connection?Transport ??????????Session ??????
+        const char* ssName = "?";
+        switch (st.sessionState) {
+            case 0: ssName = "Disconnected"; break;
+            case 1: ssName = "Connecting"; break;
+            case 2: ssName = "Handshake"; break;
+            case 3: ssName = "Connected"; break;
+        }
+        // M6-C：显示 Transport 类型（UART/TCP）；TCP 连接后追加对端地址。
+        const QString kindName = st.transportKind == 1 ? QStringLiteral("TCP") : QStringLiteral("UART");
+        QString detail = QStringLiteral("Transport %1  ·  Session %2  ·  Reconnects %3")
+                             .arg(kindName)
+                             .arg(ssName)
+                             .arg(st.reconnectCount);
+        if (st.transportKind == 1 && st.transportPeer[0] != '\0') {
+            detail += QStringLiteral("  ·  Peer %1").arg(QString::fromUtf8(st.transportPeer));
+        }
+        connDetailLabel_->setText(detail);
+        updatePortLabels();  // 切换后配置可能变化（M6-D）
+
+        // M6-D §十/§十六：Peer 与 Client 显示（TCP 单客户端；UART 无 peer）。
+        // 不把「server 监听地址」与「对端 peer 地址」混淆（§二）。
+        if (st.transportKind == 1) {
+            peerLabel_->setText(st.transportPeer[0] != '\0'
+                                    ? QStringLiteral("Peer: %1")
+                                          .arg(QString::fromUtf8(st.transportPeer))
+                                    : QStringLiteral("Peer: —"));
+            clientLabel_->setText(QStringLiteral("Client: 1 / 1 (single)"));
+        } else {
+            peerLabel_->setText(QStringLiteral("Peer: —"));
+            clientLabel_->setText(QStringLiteral("Client: —"));
+        }
+
+        // Display
+        framesLabel_->setText(QStringLiteral("%1 / %2")
+                                  .arg(st.committedFrames)
+                                  .arg(st.discardedFrames));
+        fpsLabel_->setText(QStringLiteral("%1 fps · last id=%2 %3")
+                               .arg(st.effectiveFps, 0, 'f', 1)
+                               .arg(st.lastFrameId)
+                               .arg(st.lastFrameType == 0 ? QStringLiteral("FULL")
+                                                          : QStringLiteral("PARTIAL")));
+        if (st.discardedFrames > 0) {
+            discardLabel_->setText(
+                QStringLiteral("%1 @ %2 ms")
+                    .arg(QString::fromLatin1(proto::toString(
+                             static_cast<proto::FrameDiscardReason>(st.lastDiscardReason))))
+                    .arg(st.lastDiscardTimeMs));
+        } else {
+            discardLabel_->setText(QStringLiteral("—"));
+        }
+        if (resLabel_->text() == QStringLiteral("—") && st.peerWidth > 0 &&
+            st.peerHeight > 0) {
+            resLabel_->setText(QStringLiteral("%1x%2").arg(st.peerWidth).arg(st.peerHeight));
+        }
+        if (formatLabel_->text() == QStringLiteral("—") && st.peerPixelFormat == 0) {
+            formatLabel_->setText(QStringLiteral("RGB565"));
+        }
+
+        // Protocol
+        rxLabel_->setText(QStringLiteral("%1 B (↑ %2 B/s)")
+                              .arg(st.rxBytes)
+                              .arg(st.rxBytesPerSec, 0, 'f', 0));
+        txLabel_->setText(QStringLiteral("%1 B (↑ %2 B/s)")
+                              .arg(st.txBytes)
+                              .arg(st.txBytesPerSec, 0, 'f', 0));
+        pktLabel_->setText(QStringLiteral("pkts %1 · rxMsg %2 · txMsg %3")
+                               .arg(st.packetsRx)
+                               .arg(st.rxMessages)
+                               .arg(st.txMessages));
+        errLabel_->setText(QStringLiteral("decode %1 · CRC %2 · seqGap %3 · session %4")
+                               .arg(st.decoderErrors)
+                               .arg(st.crcErrors)
+                               .arg(st.seqGaps)
+                               .arg(st.sessionErrors));
+
+        // Heartbeat
+        hbLabel_->setText(QStringLiteral("PING sent %1 / recv %2 · PONG sent %3 / recv %4 · timeouts %5")
+                              .arg(st.pingSent)
+                              .arg(st.pingReceived)
+                              .arg(st.pongSent)
+                              .arg(st.pongReceived)
+                              .arg(st.heartbeatTimeouts));
+        if (st.rttValid) {
+            rttLabel_->setText(QStringLiteral("%1 ms (min %2 / avg %3 / max %4, n=%5)")
+                                   .arg(st.rttMs)
+                                   .arg(st.rttMinMs)
+                                   .arg(st.rttAvgMs)
+                                   .arg(st.rttMaxMs)
+                                   .arg(st.rttSamples));
+        } else {
+            rttLabel_->setText(QStringLiteral("N/A"));  // 无测量 ≠ 0ms
+        }
+
+        // Input
+        const InputController::Stats& is = inputController_->stats();
+        inputLabel_->setText(QStringLiteral("%1 / %2 / %3 / %4")
+                                 .arg(st.inputSent)
+                                 .arg(st.inputDropped)
+                                 .arg(is.unsupported)
+                                 .arg(is.ignoredAutoRepeat));
+    }
+
+    void onDiagAdded(quint64 ts, int severity, const QString& source, const QString& msg) {
+        // 最近 50 条（与 Worker 侧 DiagnosticsRing 容量一致）。
+        while (diagList_->count() >= 50) {
+            delete diagList_->takeItem(0);
+        }
+        const QString line = QStringLiteral("[%1] %2 %3: %4")
+                                 .arg(QDateTime::fromMSecsSinceEpoch(
+                                          static_cast<qint64>(ts))
+                                          .toLocalTime()
+                                          .toString(QStringLiteral("HH:mm:ss.zzz")))
+                                 .arg(severityName(severity), -8)
+                                 .arg(source)
+                                 .arg(msg);
+        // M6-D 调试：追加到 --diag-log 文件（完整 ERROR 文本通道，不受 50 条 ring 限制）
+        if (!diagLogPath_.isEmpty()) {
+            QFile df(diagLogPath_);
+            if (df.open(QIODevice::Append | QIODevice::Text)) {
+                QTextStream tsout(&df);
+                tsout << line << Qt::endl;
+            }
+        }
+        auto* item = new QListWidgetItem(line, diagList_);
+        item->setForeground(QColor(severityColor(severity)));
+        if (severity >= 2) {
+            QFont f = item->font();
+            f.setBold(true);
+            item->setFont(f);
+        }
+        diagList_->addItem(item);
+        diagList_->scrollToBottom();
+    }
+
+    void saveSnapshot() {
+        if (!screen_->hasImage()) {
+            statusBar()->showMessage(QStringLiteral("No image to save yet"), 3000);
+            return;
+        }
+        const QString path = QFileDialog::getSaveFileName(
+            this, tr("Save current display"), QStringLiteral("espview_snapshot.png"),
+            tr("PNG image (*.png)"));
+        if (path.isEmpty()) {
+            return;
+        }
+        if (screen_->savePng(path)) {
+            statusBar()->showMessage(QStringLiteral("Saved %1").arg(path), 5000);
+        } else {
+            statusBar()->showMessage(QStringLiteral("Failed to save %1").arg(path), 5000);
+        }
+    }
+
+private:
+    // ---- M6-D：正式 Transport 选择 UI（§二/§四/§五/§七）----
+    void buildTransportPanel() {
+        transportGrid_ = new QGridLayout(this);
+        transportGrid_->setHorizontalSpacing(8);
+        transportGrid_->setVerticalSpacing(4);
+
+        auto* title = new QLabel(QStringLiteral("<b>Transport</b>"), this);
+        transportGrid_->addWidget(title, 0, 0);
+        transportCombo_ = new QComboBox(this);
+        transportCombo_->addItem(QStringLiteral("TCP"));
+        transportCombo_->addItem(QStringLiteral("UART"));
+        transportGrid_->addWidget(transportCombo_, 0, 1);
+        connect(transportCombo_, qOverload<int>(&QComboBox::currentIndexChanged), this,
+                &MainWindow::onTransportComboChanged);
+
+        applyBtn_ = new QPushButton(QStringLiteral("Apply"), this);
+        transportGrid_->addWidget(applyBtn_, 0, 2);
+        connect(applyBtn_, &QPushButton::clicked, this, &MainWindow::onApplyTransport);
+
+        switchStateLabel_ = new QLabel(QStringLiteral("—"), this);
+        switchStateLabel_->setStyleSheet(QStringLiteral("font-weight:bold;"));
+        transportGrid_->addWidget(switchStateLabel_, 0, 3, 1, 3);
+
+        // UART 配置行（§二/§七：COM4 / 115200 默认）。
+        uartCfgWidget_ = new QWidget(this);
+        auto* uartLay = new QHBoxLayout(uartCfgWidget_);
+        uartLay->setContentsMargins(0, 0, 0, 0);
+        uartLay->setSpacing(6);
+        uartLay->addWidget(new QLabel(QStringLiteral("UART Port:"), uartCfgWidget_));
+        uartPortEdit_ = new QLineEdit(uartCfgWidget_);
+        uartPortEdit_->setMaximumWidth(110);
+        uartLay->addWidget(uartPortEdit_);
+        uartLay->addWidget(new QLabel(QStringLiteral("Baud:"), uartCfgWidget_));
+        uartBaudEdit_ = new QLineEdit(uartCfgWidget_);
+        uartBaudEdit_->setMaximumWidth(100);
+        uartBaudEdit_->setValidator(new QIntValidator(1, 4000000, uartBaudEdit_));
+        uartLay->addWidget(uartBaudEdit_);
+        uartLay->addStretch(1);
+        transportGrid_->addWidget(uartCfgWidget_, 1, 0, 1, 6);
+
+        // TCP 配置行（§二：Local server = 监听地址；Peer 地址单列显示，
+        // 绝不把 server 地址与 peer 地址混淆）。
+        tcpCfgWidget_ = new QWidget(this);
+        auto* tcpLay = new QHBoxLayout(tcpCfgWidget_);
+        tcpLay->setContentsMargins(0, 0, 0, 0);
+        tcpLay->setSpacing(6);
+        tcpLay->addWidget(new QLabel(QStringLiteral("Local server:"), tcpCfgWidget_));
+        tcpBindEdit_ = new QLineEdit(tcpCfgWidget_);
+        tcpBindEdit_->setMaximumWidth(150);
+        tcpLay->addWidget(tcpBindEdit_);
+        tcpLay->addWidget(new QLabel(QStringLiteral("Port:"), tcpCfgWidget_));
+        tcpPortEdit_ = new QLineEdit(tcpCfgWidget_);
+        tcpPortEdit_->setMaximumWidth(80);
+        tcpPortEdit_->setValidator(new QIntValidator(1, 65535, tcpPortEdit_));
+        tcpLay->addWidget(tcpPortEdit_);
+        tcpLay->addStretch(1);
+        transportGrid_->addWidget(tcpCfgWidget_, 2, 0, 1, 6);
+
+        peerLabel_ = new QLabel(QStringLiteral("Peer: —"), this);
+        transportGrid_->addWidget(peerLabel_, 3, 0, 1, 3);
+        clientLabel_ = new QLabel(QStringLiteral("Client: —"), this);
+        transportGrid_->addWidget(clientLabel_, 3, 3, 1, 3);
+
+        switchStatsLabel_ =
+            new QLabel(QStringLiteral("Switches 0 · OK 0 · Fail 0 · Last —"), this);
+        transportGrid_->addWidget(switchStatsLabel_, 4, 0, 1, 6);
+
+        onTransportComboChanged(transportCombo_->currentIndex());
+    }
+
+    // 初始启动（构造期）：按合并后的配置启动 Worker（UART 保持复位脉冲语义；
+    // TCP 为 Server 监听）。运行时切换走 onApplyTransport → switchTransport。
+    void startTransport(const TransportConfig& cfg) {
+        if (cfg.kind == TransportKind::kUart) {
+            manager_.start(QString::fromStdString(cfg.uartPort), cfg.uartBaud, cfg.uartNoReset);
+        } else {
+            manager_.startTcp(cfg.tcpPort, QString::fromStdString(cfg.tcpBind));
+        }
+    }
+
+    void applyConfigToUi(const TransportConfig& cfg) {
+        transportCombo_->setCurrentIndex(cfg.kind == TransportKind::kUart ? 1 : 0);
+        uartPortEdit_->setText(QString::fromStdString(cfg.uartPort));
+        uartBaudEdit_->setText(QString::number(cfg.uartBaud));
+        tcpBindEdit_->setText(QString::fromStdString(cfg.tcpBind));
+        tcpPortEdit_->setText(QString::number(cfg.tcpPort));
+    }
+
+    TransportConfig readConfigFromUi() const {
+        TransportConfig cfg;
+        cfg.kind = transportCombo_->currentIndex() == 1 ? TransportKind::kUart
+                                                        : TransportKind::kTcp;
+        cfg.uartPort = uartPortEdit_->text().trimmed().toStdString();
+        cfg.uartBaud = static_cast<quint32>(uartBaudEdit_->text().toUInt());
+        cfg.tcpBind = tcpBindEdit_->text().trimmed().toStdString();
+        cfg.tcpPort = static_cast<quint16>(tcpPortEdit_->text().toUInt());
+        // 运行时切换：跳过 UART 复位脉冲（M6-C --no-reset 语义 —— 对端会话已由
+        // F12 test hook 建立，复位会打断其当前 Transport）。
+        cfg.uartNoReset = true;
+        return cfg;
+    }
+
+    void onTransportComboChanged(int index) {
+        uartCfgWidget_->setVisible(index == 1);
+        tcpCfgWidget_->setVisible(index == 0);
+    }
+
+    // §五：Apply 行为 —— 防重复点击 / 本地校验 / SWITCHING / 等 FULL / CONNECTED。
+    void onApplyTransport() {
+        if (switching_) {
+            return;  // §五.1：disable duplicate clicks
+        }
+        const TransportConfig target = readConfigFromUi();
+        const std::string verr = validateTransportConfig(target);
+        if (!verr.empty()) {
+            abortSwitch(QString::fromStdString(verr));  // 本地非法配置（不切换）
+            return;
+        }
+        // 幂等：Worker 存活且配置相同 → 无操作（已运行中）。失败态（lastSwitchFailed_）
+        // 允许重新 Apply 重试，不陷入“已运行”死循环。
+        if (!lastSwitchFailed_ && manager_.isRunning() && target == currentCfg_) {
+            statusBar()->showMessage(
+                QStringLiteral("Already running this transport configuration"), 3000);
+            return;
+        }
+        beginSwitch(target);
+    }
+
+    void beginSwitch(const TransportConfig& target) {
+        switching_ = true;
+        lastSwitchFailed_ = false;
+        applyBtn_->setEnabled(false);
+        ++switchCount_;
+        lastSwitchError_.clear();
+        switchStateLabel_->setText(QStringLiteral("TRANSPORT SWITCHING ..."));
+        switchStateLabel_->setStyleSheet(QStringLiteral("color:#e65100;font-weight:bold;"));
+        updateSwitchStatsLabel();
+        // §十二：切换后不保留旧 Transport 的 stale 画面；等新 FULL 再恢复。
+        screen_->clearDisplay();
+
+        // §九：远端切换协助（test-only）—— 经旧 Transport 发送 F12（HID 0x45），
+        // 命令 ESP32 CONFIG_ESPVIEW_TEST_TRANSPORT_SWITCH 钩子切换 UART↔TCP。
+        // 生产固件无该钩子时该按键被忽略，PC 侧切换照常进行（UI 不依赖 F12）。
+        const bool kindChange = target.kind != currentCfg_.kind;
+        if (kindChange && manager_.isRunning()) {
+            sendRemoteSwitchF12();
+            // 短暂驻留：等 ESP32 sessionLoop（200ms tick）消费切换请求后再停旧会话。
+            QEventLoop loop;
+            QTimer::singleShot(450, &loop, &QEventLoop::quit);
+            loop.exec();
+        }
+
+        const uint64_t t0 = steadyMs();
+        const bool ok = manager_.switchTransport(target);
+        lastSwitchMs_ = steadyMs() - t0;
+        currentCfg_ = target;
+        if (!ok) {
+            abortSwitch(QStringLiteral("invalid transport config (switch not performed)"));
+            return;
+        }
+        // 异步完成判定：新 Transport 收到 FULL commit（onFrameReady）→ CONNECTED。
+        switchPendingFull_ = true;
+        switchStartMs_ = steadyMs();
+        switchWatchdog_->start();
+        updateSwitchStatsLabel();
+        saveSettings();
+    }
+
+    void abortSwitch(const QString& reason) {
+        switching_ = false;
+        switchPendingFull_ = false;
+        switchWatchdog_->stop();
+        applyBtn_->setEnabled(true);
+        lastSwitchFailed_ = true;
+        ++switchFailures_;
+        lastSwitchError_ = reason;
+        switchStateLabel_->setText(QStringLiteral("Switch failed: %1").arg(reason));
+        switchStateLabel_->setStyleSheet(QStringLiteral("color:#b71c1c;font-weight:bold;"));
+        updateSwitchStatsLabel();
+    }
+
+    void sendRemoteSwitchF12() {
+        // F12 = USB HID usage 0x45（KeyboardMapper：Qt::Key_F12 → 0x45，M6-C 钩子）。
+        const auto down = espview::input::makeKeyEvent(espview::input::InputType::kKeyDown,
+                                                       0x45u, 0u, 0u);
+        const auto up = espview::input::makeKeyEvent(espview::input::InputType::kKeyUp,
+                                                     0x45u, 0u, 0u);
+        manager_.sendInput(down);
+        manager_.sendInput(up);
+    }
+
+    void onSwitchWatchdog() {
+        if (!switchPendingFull_) {
+            return;
+        }
+        const uint64_t elapsed = steadyMs() - switchStartMs_;
+        // UART FULL ≈13.2s；TCP ≈250ms；30s 上限足够，避免无限等待（§五）。
+        if (elapsed >= 30000) {
+            abortSwitch(QStringLiteral("timeout: no FULL commit within 30s"));
+        }
+    }
+
+    void updateSwitchStatsLabel() {
+        switchStatsLabel_->setText(
+            QStringLiteral("Switches %1 · OK %2 · Fail %3 · Last %4 ms · LastErr %5")
+                .arg(switchCount_)
+                .arg(switchSuccesses_)
+                .arg(switchFailures_)
+                .arg(lastSwitchMs_)
+                .arg(lastSwitchError_.isEmpty() ? QStringLiteral("—") : lastSwitchError_));
+    }
+
+    // M6-D §二十一：QSettings 持久化（transport / uart port+baud / tcp port / 窗口大小；
+    // 绝不保存 Wi-Fi 密码或任何 ESP32 凭据）。
+    void saveSettings() {
+        // M6-E §24.11-12：只写 persistedSettingsKeys() 白名单键（绝不保存凭据）。
+        for (const std::string& k : espview::pc::persistedSettingsKeys()) {
+            const QString key = QString::fromStdString(k);
+            if (key == QStringLiteral("transport/type")) {
+                settings_.setValue(key, transportCombo_->currentIndex() == 1
+                                            ? QStringLiteral("uart")
+                                            : QStringLiteral("tcp"));
+            } else if (key == QStringLiteral("uart/port")) {
+                settings_.setValue(key, uartPortEdit_->text());
+            } else if (key == QStringLiteral("uart/baud")) {
+                settings_.setValue(key, uartBaudEdit_->text().toUInt());
+            } else if (key == QStringLiteral("tcp/port")) {
+                settings_.setValue(key, tcpPortEdit_->text().toUInt());
+            } else if (key == QStringLiteral("window/size")) {
+                settings_.setValue(key, size());
+            }
+        }
+    }
+
+    // M4：四域状态面板（Connection / Display / Protocol / Heartbeat / Input）。
+    void buildStatusPanel() {
+        statusGrid_ = new QGridLayout(this);
+        statusGrid_->setHorizontalSpacing(14);
+        statusGrid_->setVerticalSpacing(2);
+
+        auto addGroupHeader = [this](const QString& text, int row) {
+            auto* label = new QLabel(QStringLiteral("<b>%1</b>").arg(text), this);
+            statusGrid_->addWidget(label, row, 0, 1, 2);
+        };
+
+        int row = 0;
+        addGroupHeader(tr("Connection"), row++);
+        statusGrid_->addWidget(new QLabel(tr("State"), this), row, 0);
+        connLabel_ = new QLabel(QStringLiteral("—"), this);
+        statusGrid_->addWidget(connLabel_, row, 1);
+        ++row;
+        statusGrid_->addWidget(new QLabel(tr("Detail"), this), row, 0);
+        connDetailLabel_ = new QLabel(QStringLiteral("—"), this);
+        statusGrid_->addWidget(connDetailLabel_, row, 1);
+        ++row;
+        statusGrid_->addWidget(new QLabel(tr("Port / Baud"), this), row, 0);
+        portLabel_ = new QLabel(QStringLiteral("—"), this);
+        baudLabel_ = new QLabel(QStringLiteral("—"), this);
+        statusGrid_->addWidget(portLabel_, row, 1);
+        statusGrid_->addWidget(baudLabel_, row, 2);
+
+        ++row;
+        addGroupHeader(tr("Display"), row++);
+        statusGrid_->addWidget(new QLabel(tr("Resolution"), this), row, 0);
+        resLabel_ = new QLabel(QStringLiteral("—"), this);
+        statusGrid_->addWidget(resLabel_, row, 1);
+        ++row;
+        statusGrid_->addWidget(new QLabel(tr("Format"), this), row, 0);
+        formatLabel_ = new QLabel(QStringLiteral("—"), this);
+        statusGrid_->addWidget(formatLabel_, row, 1);
+        ++row;
+        statusGrid_->addWidget(new QLabel(tr("Frames (commit/discard)"), this), row, 0);
+        framesLabel_ = new QLabel(QStringLiteral("0 / 0"), this);
+        statusGrid_->addWidget(framesLabel_, row, 1);
+        ++row;
+        statusGrid_->addWidget(new QLabel(tr("FPS / last"), this), row, 0);
+        fpsLabel_ = new QLabel(QStringLiteral("—"), this);
+        statusGrid_->addWidget(fpsLabel_, row, 1);
+        ++row;
+        statusGrid_->addWidget(new QLabel(tr("Last discard"), this), row, 0);
+        discardLabel_ = new QLabel(QStringLiteral("—"), this);
+        statusGrid_->addWidget(discardLabel_, row, 1);
+
+        ++row;
+        addGroupHeader(tr("Protocol"), row++);
+        statusGrid_->addWidget(new QLabel(tr("RX"), this), row, 0);
+        rxLabel_ = new QLabel(QStringLiteral("0 B"), this);
+        statusGrid_->addWidget(rxLabel_, row, 1);
+        ++row;
+        statusGrid_->addWidget(new QLabel(tr("TX"), this), row, 0);
+        txLabel_ = new QLabel(QStringLiteral("0 B"), this);
+        statusGrid_->addWidget(txLabel_, row, 1);
+        ++row;
+        statusGrid_->addWidget(new QLabel(tr("Packets/Messages"), this), row, 0);
+        pktLabel_ = new QLabel(QStringLiteral("—"), this);
+        statusGrid_->addWidget(pktLabel_, row, 1);
+        ++row;
+        statusGrid_->addWidget(new QLabel(tr("Errors (decode/CRC/seq/session)"), this), row, 0);
+        errLabel_ = new QLabel(QStringLiteral("0  0  0  0"), this);
+        statusGrid_->addWidget(errLabel_, row, 1);
+
+        ++row;
+        addGroupHeader(tr("Heartbeat"), row++);
+        statusGrid_->addWidget(new QLabel(tr("PING/PONG"), this), row, 0);
+        hbLabel_ = new QLabel(QStringLiteral("—"), this);
+        statusGrid_->addWidget(hbLabel_, row, 1, 1, 2);
+        ++row;
+        statusGrid_->addWidget(new QLabel(tr("RTT"), this), row, 0);
+        rttLabel_ = new QLabel(QStringLiteral("N/A"), this);
+        statusGrid_->addWidget(rttLabel_, row, 1);
+
+        ++row;
+        addGroupHeader(tr("Input (sent/dropped/unsup/ignored)"), row++);
+        inputLabel_ = new QLabel(QStringLiteral("0 / 0 / 0 / 0"), this);
+        statusGrid_->addWidget(inputLabel_, row, 0, 1, 3);
+
+        // M4：诊断列表（最近 50 条，分级着色）
+        diagList_ = new QListWidget(this);
+        diagList_->setMaximumHeight(140);
+        QFont mono(QStringLiteral("Consolas"), 8);
+        mono.setStyleHint(QFont::Monospace);
+        diagList_->setFont(mono);
+        diagList_->setHorizontalScrollBarPolicy(Qt::ScrollBarAsNeeded);
+    }
+
+    void buildMenu() {
+        QMenu* fileMenu = menuBar()->addMenu(tr("&File"));
+        QAction* saveAction =
+            fileMenu->addAction(tr("Save PNG..."), this, &MainWindow::saveSnapshot);
+        saveAction->setShortcut(QKeySequence::Save);
+        fileMenu->addSeparator();
+        fileMenu->addAction(tr("&Quit"), QKeySequence::Quit, this, &QWidget::close);
+    }
+
+    VirtualScreenWidget* screen_ = nullptr;
+    QGridLayout* statusGrid_ = nullptr;
+    QListWidget* diagList_ = nullptr;
+    QLabel* connLabel_ = nullptr;
+    QLabel* connDetailLabel_ = nullptr;
+    QLabel* portLabel_ = nullptr;
+    QLabel* baudLabel_ = nullptr;
+    QLabel* resLabel_ = nullptr;
+    QLabel* formatLabel_ = nullptr;
+    QLabel* framesLabel_ = nullptr;
+    QLabel* fpsLabel_ = nullptr;
+    QLabel* discardLabel_ = nullptr;
+    QLabel* rxLabel_ = nullptr;
+    QLabel* txLabel_ = nullptr;
+    QLabel* pktLabel_ = nullptr;
+    QLabel* errLabel_ = nullptr;
+    QLabel* hbLabel_ = nullptr;
+    QLabel* rttLabel_ = nullptr;
+    QLabel* inputLabel_ = nullptr;
+    InputController* inputController_ = nullptr;  // GUI 线程；MainWindow 拥有
+    ConnectionManager manager_;
+
+    // ---- M6-D：Transport UI / 切换状态 ----
+    QGridLayout* transportGrid_ = nullptr;
+    QComboBox* transportCombo_ = nullptr;
+    QPushButton* applyBtn_ = nullptr;
+    QLineEdit* uartPortEdit_ = nullptr;
+    QLineEdit* uartBaudEdit_ = nullptr;
+    QLineEdit* tcpBindEdit_ = nullptr;
+    QLineEdit* tcpPortEdit_ = nullptr;
+    QWidget* uartCfgWidget_ = nullptr;
+    QWidget* tcpCfgWidget_ = nullptr;
+    QLabel* switchStateLabel_ = nullptr;
+    QLabel* switchStatsLabel_ = nullptr;
+    QLabel* peerLabel_ = nullptr;
+    QLabel* clientLabel_ = nullptr;
+    QTimer* switchWatchdog_ = nullptr;
+
+    TransportConfig currentCfg_;      // 当前已应用配置（Worker 实际运行）
+    bool switching_ = false;          // Apply 处理中（§五.1：防重复点击）
+    bool switchPendingFull_ = false;  // 等待新 Transport 的 FULL commit
+    bool lastSwitchFailed_ = false;   // 上一次切换失败（允许重新 Apply 重试）
+    uint64_t switchStartMs_ = 0;
+    uint64_t switchCount_ = 0;
+    uint64_t switchSuccesses_ = 0;
+    uint64_t switchFailures_ = 0;
+    uint64_t lastSwitchMs_ = 0;
+    QString lastSwitchError_;
+    QSettings settings_;  // org/app name 在 main() 设置（M6-D §二十一）
+    QString diagLogPath_;  // --diag-log：peer/session 诊断追加到文件（M6-D 调试）
+};
+
+}  // namespace pc
+}  // namespace espview
+
+int main(int argc, char** argv) {
+    // queued signal 需要运行时注册的自定义类型（Q_DECLARE_METATYPE 之上）
+    qRegisterMetaType<espview::pc::DisplayFrame>("espview::pc::DisplayFrame");
+    qRegisterMetaType<espview::pc::DisplayRect>("espview::pc::DisplayRect");
+    qRegisterMetaType<espview::pc::WorkerStats>("espview::pc::WorkerStats");
+    qRegisterMetaType<espview::pc::WorkerStatus>("espview::pc::WorkerStatus");
+
+    QApplication app(argc, argv);
+    app.setApplicationName(QStringLiteral("espview_virtual_display"));
+    app.setOrganizationName(QStringLiteral("espview"));
+
+    // M6-D §六/§七/§二十一：默认值 = QSettings（有则用之）→ 建议默认
+    //（Transport TCP / UART COM4 115200 / TCP bind 0.0.0.0:8765）；
+    // CLI 显式参数覆盖 QSettings。绝不保存 Wi-Fi 密码 / ESP32 凭据。
+    espview::pc::TransportConfig cfg;
+    {
+        // M6-E §24.11-12：只读 persistedSettingsKeys() 白名单键（绝不加载凭据）。
+        QSettings settings;
+        for (const std::string& k : espview::pc::persistedSettingsKeys()) {
+            const QString key = QString::fromStdString(k);
+            if (key == QStringLiteral("transport/type")) {
+                if (settings.value(key, QStringLiteral("tcp")).toString() ==
+                    QStringLiteral("uart")) {
+                    cfg.kind = espview::pc::TransportKind::kUart;
+                }
+            } else if (key == QStringLiteral("uart/port")) {
+                cfg.uartPort = settings.value(key, QStringLiteral("COM4"))
+                                   .toString()
+                                   .toStdString();
+            } else if (key == QStringLiteral("uart/baud")) {
+                cfg.uartBaud = settings.value(key, 115200).toUInt();
+            } else if (key == QStringLiteral("tcp/port")) {
+                cfg.tcpPort = static_cast<quint16>(
+                    settings.value(key, 8765).toUInt());
+            }
+            // window/size 由 MainWindow 构造读取（保持现状）。
+        }
+    }
+
+    QString pngDumpDir;
+    QString diagLogPath;
+    int autocloseMs = 0;
+
+    const QStringList args = app.arguments();
+    // M6-E §18：transport 参数统一交给 applyCliOverrides（CLI > QSettings > default）；
+    // 非 transport 参数仍在下方原样解析（--dump-png/--diag-log/--no-reset/
+    // --autoclose-ms/--help）。
+    {
+        std::vector<std::string> cliArgs;
+        for (int i = 1; i < args.size(); ++i) {
+            cliArgs.emplace_back(args[i].toStdString());
+        }
+        std::string cliErr;
+        if (!espview::pc::applyCliOverrides(cfg, cliArgs, &cliErr)) {
+            std::fprintf(stderr, "%s\n", cliErr.c_str());
+            return 1;
+        }
+    }
+    for (int i = 1; i < args.size(); ++i) {
+        if (args[i] == QStringLiteral("--dump-png") && i + 1 < args.size()) {
+            pngDumpDir = args[++i];
+        } else if (args[i] == QStringLiteral("--diag-log") && i + 1 < args.size()) {
+            diagLogPath = args[++i];
+        } else if (args[i] == QStringLiteral("--no-reset")) {
+            cfg.uartNoReset = true;
+        } else if (args[i] == QStringLiteral("--autoclose-ms") && i + 1 < args.size()) {
+            bool ok = false;
+            const int v = args[++i].toInt(&ok);
+            if (ok && v > 0) {
+                autocloseMs = v;
+            }
+        } else if (args[i] == QStringLiteral("--help") || args[i] == QStringLiteral("-h")) {
+            printUsage(argv[0]);
+            return 0;
+        }
+    }
+
+    espview::pc::MainWindow window(cfg, pngDumpDir);
+    window.setDiagLogPath(diagLogPath);
+    window.show();
+    if (autocloseMs > 0) {
+        // 调试：走真实 closeEvent → ConnectionManager.stop() → join Worker 的路径
+        QTimer::singleShot(autocloseMs, &window, &QWidget::close);
+    }
+    return app.exec();
+}
+
+#include "main.moc"

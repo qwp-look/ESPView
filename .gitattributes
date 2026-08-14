@@ -1,0 +1,6 @@
+# Normalize line endings for text files (LF in repo, CRLF on Windows checkout)
+* text=auto
+
+# Binary assets
+*.png binary
+*.bin binary

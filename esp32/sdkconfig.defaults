@@ -1,0 +1,27 @@
+# ESPView M1-2：协议 UART = UART0（板载 CH340 -> COM3）。
+# 调试输出：禁用 console UART（GPIO9/10 不再被占用）。
+#   - 当前板子 flash 为 DIO 模式：GPIO9/10 未被 flash 占用（QIO 模式下才会占用）；
+#   - 但 GPIO9 是 strapping pin（启动时采样），且 Espressif 文档明确 GPIO9/10
+#     属 flash 相关引脚，不应被普通外设占用；
+#   - M1-2 协议验收由 PC 脚本读取协议字节完成，不依赖 console 日志；
+#     选择"零占用"路径，彻底消除对启动/flash 的干扰风险。
+CONFIG_ESP_CONSOLE_NONE=y
+
+# 目标芯片：经典 ESP32-D0WDQ6（rev v1.1）
+CONFIG_IDF_TARGET="esp32"
+
+# 实验：921600 下 PC 侧丢字节，对照 115200
+CONFIG_ESPVIEW_UART_BAUD=115200
+
+# M5-A：默认应用 = LVGL demo（TestPattern 供硬件回归工具切换）
+CONFIG_ESPVIEW_APP_LVGL=y
+
+# M6-B：4 MiB flash，custom partition table（single factory app = 2 MiB，no OTA）。
+CONFIG_ESPTOOLPY_FLASHSIZE_4MB=y
+CONFIG_PARTITION_TABLE_CUSTOM=y
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
+
+# M6-C：TCP 大帧吞吐（5760 -> 24576；代价 ~19KB RAM）。
+CONFIG_LWIP_TCP_SND_BUF_DEFAULT=24576
+# M6-E §19：生产 profile 默认禁用 F12 transport-switch test hook（=y 仅存在于本地未跟踪 sdkconfig）。
+CONFIG_ESPVIEW_TEST_TRANSPORT_SWITCH=n

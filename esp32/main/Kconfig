@@ -1,0 +1,25 @@
+menu "ESPView Application"
+
+choice ESPVIEW_APP
+    prompt "ESP32 demo application"
+    default ESPVIEW_APP_LVGL
+    help
+        M5-A 引入两个可编译的 ESP32 演示应用：
+        LVGL（默认）与 TestPattern（M1-3C/M2/M3/M4 硬件回归工具依赖）。
+
+config ESPVIEW_APP_LVGL
+    bool "LVGL demo UI (M5-A)"
+    help
+        LVGL 真实 UI（background + button + label + 1Hz counter），
+        dirty rect 经 RemoteDisplay → 协议 → PC VirtualScreenWidget。
+        需要 LVGL 组件（component manager 自动获取 lvgl/lvgl ^8.3.0）。
+
+config ESPVIEW_APP_TESTPATTERN
+    bool "TestPattern frames (M1-3C/M2/M3/M4 regression)"
+    help
+        M1-3C 确定性帧脚本（small/large FULL + PARTIAL 序列），
+        com3_frame_test / input_send_test 硬件验收工具依赖。
+
+endchoice
+
+endmenu
