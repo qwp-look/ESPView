@@ -78,6 +78,16 @@ GUI 参数：`--transport uart|tcp`、`--port <COM>`、`--baud`、`--tcp-bind`�
 `--dump-png <dir>`（每个新 FULL commit 保存 `full_<frameId>.png`）、`--diag-log <file>`、
 `--autoclose-ms N`、`--no-reset`。更多见 `espview_virtual_display.exe --help`。
 
+## 界面截图（PC GUI）
+
+`espview_virtual_display.exe` 运行界面：左侧为 VirtualScreen（320×240 等比缩放），
+下方状态面板显示传输类型、连接状态与帧/输入统计。
+
+| 模式 | 截图 |
+| --- | --- |
+| TCP 模式（PC = Server `0.0.0.0:8765`，ESP32 = Client，已连接） | ![tcp mode](docs/images/tcp_mode.png) |
+| UART 模式（COM4 / 115200） | ![uart mode](docs/images/uart_mode.png) |
+
 ## 测试截图（真实硬件验收）
 
 以下画面由 ESP32 LVGL demo（背景 + 按钮 + 1Hz 计数器）经真实链路渲染到 PC Virtual Display，
