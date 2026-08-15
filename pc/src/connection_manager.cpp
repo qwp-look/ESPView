@@ -12,6 +12,7 @@ ConnectionManager::ConnectionManager(QObject* parent) : QObject(parent) {
     connect(&worker_, &SerialWorker::statusChanged, this, &ConnectionManager::statusChanged);
     connect(&worker_, &SerialWorker::statsChanged, this, &ConnectionManager::statsChanged);
     connect(&worker_, &SerialWorker::diagAdded, this, &ConnectionManager::diagAdded);
+    connect(&worker_, &SerialWorker::displayModeAck, this, &ConnectionManager::displayModeAck);
 }
 
 ConnectionManager::~ConnectionManager() {
@@ -40,6 +41,10 @@ bool ConnectionManager::isRunning() const {
 
 void ConnectionManager::sendInput(const espview::input::InputEvent& ev) {
     worker_.sendInput(ev);
+}
+
+void ConnectionManager::sendDisplayMode(uint8_t mode) {
+    worker_.sendDisplayMode(mode);
 }
 
 }  // namespace pc

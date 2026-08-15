@@ -137,8 +137,14 @@ inline bool applyCliOverrides(TransportConfig& cfg, const std::vector<std::strin
 // 唯一允许持久化的键。结构性保证：绝不保存 Wi-Fi SSID/密码/凭据
 // （TransportConfig 本身也不含任何凭据字段；凭据只存在于 ESP32 本地
 // 未跟踪 sdkconfig）。
+// M7-C3：新增 display/mode（Display Mode UI）、ui/language（i18n）、
+// split/drawerVisible + split/drawerWidth（Split Drawer 布局）——均为
+// 非凭据 UI 状态键，与任务书 §十五 一致。
 inline std::vector<std::string> persistedSettingsKeys() {
-    return {"transport/type", "uart/port", "uart/baud", "tcp/port", "window/size"};
+    return {"transport/type",  "uart/port",       "uart/baud",
+            "tcp/port",        "window/size",     "display/mode",
+            "ui/language",     "split/drawerVisible",
+            "split/drawerWidth"};
 }
 }  // namespace pc
 }  // namespace espview

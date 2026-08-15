@@ -159,6 +159,13 @@ public:
     // input_codec + ProtocolEndpoint::sendMessage 送出；未连接时丢弃并计数。
     void sendInput(const espview::input::InputEvent& ev);
 
+    // M7-C3：GUI 线程调用，把 Display Mode 交给 Worker 线程异步发送。
+    // 与 sendInput 同线程安全模式：内部只入队（互斥保护），Worker 在 pumpLoop
+    // 中 drain 并经 proto::makeSetMode + ProtocolEndpoint::sendMessage 送出
+    // （makeSetMode 自动置 ACK_REQ，sendMessage 自动登记 pending ACK）；
+    // 未连接时丢弃并计数，不发送（ACK 结果经 displayModeAck 回 GUI，queued）。
+    void sendDisplayMode(uint8_t mode);
+
 signals:
     void frameReady(const DisplayFrame& frame);  // 已提交帧（queued 投递 GUI）
     void statusChanged(WorkerStatus status, const QString& text);
@@ -167,6 +174,9 @@ signals:
     // 纯基本类型信号，无需额外 metatype 注册；GUI 侧维护最近 50 条。
     void diagAdded(quint64 timestampMs, int severity, const QString& source,
                    const QString& message);
+    // M7-C3：SET_MODE 的 ACK 结果（ok=true 设备已应用；false = ACK ERR /
+    // 重试耗尽）。由 Worker 线程 emit，QueuedConnection 投递 GUI。
+    void displayModeAck(bool ok);
 
 private:
     void runLoop();  // Worker 线程入口
@@ -175,8 +185,10 @@ private:
     void pumpLoop(uint64_t openAtMs);
     void drainAndTick();
     void drainInputQueue();  // 仅 Worker 线程：编码并发送队列中的 InputEvent
+    void drainDisplayModeQueue();  // 仅 Worker 线程：发送队列中的 Display Mode
     void resetSessionCounters();  // M6-D：切换后清会话级统计（仅 stop() join 后调用）
     void clearInputQueue();       // M6-D：清空 GUI→Worker 输入队列（切换前调用）
+    void clearDisplayModeQueue(); // M7-C3：清空 Display Mode 队列（切换前调用）
     void emitStatus(WorkerStatus status, const QString& text);
     void emitStats();
     void pushDiag(proto::Severity severity, std::string source, std::string message);
@@ -231,6 +243,12 @@ private:
     std::vector<espview::input::InputEvent> inputQueue_;
     uint64_t inputSent_ = 0;
     uint64_t inputDropped_ = 0;
+
+    // Display Mode 队列（GUI → Worker；互斥保护，与输入队列独立）。
+    std::mutex modeMutex_;
+    std::vector<uint8_t> displayModeQueue_;
+    uint64_t modeSent_ = 0;
+    uint64_t modeDropped_ = 0;
 };
 
 }  // namespace pc

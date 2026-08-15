@@ -1,0 +1,117 @@
+// ESPView M7-C3 — DisplayUiState：Display Mode UI 纯模型（纯 C++17，零 Qt / 零平台依赖）。
+//
+// 规范来源：M7-C 任务书 §二十二（1-10）+ docs/DESIGN.md AA 节（四种模式语义 /
+// 降级 / FULL resync）。本文件只做 UI 状态机，不接触协议 wire、不持有传输。
+//
+// 职责：
+//   - 持有 UI 可展示/可编辑的显示模式状态（选择 / 已应用 / 路由状态 /
+//     capability 门控 / 会话 / 切换 / FULL resync / Apply 可用性 / 错误）；
+//   - 提供确定性转移方法（applyRequested / onSwitchStart / onAck /
+//     onConnected / onDisconnected / onFullCommit / onPhysicalAvailable /
+//     onPhysicalDegraded），供 GUI 与主控接线调用；
+//   - 与 shared/display/display_router.h 的 DisplayRouteMode / RouterState
+//     语义对齐（只读 include，见下）。
+//
+// 冻结语义（M7-C1/C2，禁止推翻）：
+//   - DisplayRouteMode：0=VirtualOnly / 1=PhysicalOnly / 2=Mirror / 3=Split；
+//   - wire SET_MODE payload 仍为 [0] mode（1 byte），发送经
+//     proto::makeSetMode(DisplayMode)，本模型不生成 wire。
+//
+// 状态转移规则（任务书 §二十二）：
+//   - 断开时允许改变选择；此时 Apply 进入 "Waiting for connection" 标记，
+//     不进入切换、不改 appliedMode、不假装成功；
+//   - Apply 防重复：switchingInProgress=true 期间 applyEnabled=false，
+//     applyRequested() 直接拒绝；
+//   - ACK ok → appliedMode=本次实际发送的模式 + fullResyncPending=true
+//     （设备已应用，PC 侧等新 FULL resync 帧）；
+//   - ACK fail → 回退选择到 appliedMode，保留错误文本，恢复 Apply；
+//   - 新会话（onConnected）→ fullResyncPending=true；FULL 帧提交
+//     （onFullCommit）→ 清 pending，状态收敛到 kConnected / kDegraded；
+//   - capability 门控：physicalAvailable=false → PhysicalOnly/Mirror/Split
+//     不可选（setSelectedMode 拒绝 + 显示 Unavailable），选择回退 VirtualOnly。
+
+#pragma once
+
+#include <cstdint>
+#include <string>
+
+#include "display_router.h"  // DisplayRouteMode / RouterState（只读头，纯 C++17）
+
+namespace espview {
+namespace display {
+
+// UI 层路由状态视图：前 4 个值与 DisplayRouter::RouterState 数值一致
+// （kIdle=0 / kSwitching=1 / kConnected=2 / kDegraded=3），追加
+// kUnavailable=4（capability 缺失或会话断开时的 UI 展示状态）。
+enum class UiRouterState : uint8_t {
+    kIdle = 0,
+    kSwitching = 1,
+    kConnected = 2,
+    kDegraded = 3,
+    kUnavailable = 4,
+};
+
+// RouterState → UiRouterState 1:1 映射（前 4 值相等，见上）。
+inline UiRouterState toUiRouterState(RouterState s) {
+    return static_cast<UiRouterState>(static_cast<uint8_t>(s));
+}
+
+// 该模式是否需要物理 sink（PhysicalOnly / Mirror / Split）。
+inline bool modeRequiresPhysical(DisplayRouteMode m) {
+    return m == DisplayRouteMode::kPhysicalOnly || m == DisplayRouteMode::kMirror ||
+           m == DisplayRouteMode::kSplit;
+}
+
+// M7-C3 — Display Mode UI 状态模型（GUI 线程独占；纯值对象 + 转移方法）。
+class DisplayUiState {
+public:
+    DisplayUiState() { refreshActive(); }
+
+    // ---- 状态字段（public：GUI 只读展示 / 测试断言；转移请走方法）----
+    DisplayRouteMode selectedMode = DisplayRouteMode::kVirtualOnly;  // 用户选择（0..3）
+    DisplayRouteMode appliedMode = DisplayRouteMode::kVirtualOnly;   // 设备已确认的模式
+    UiRouterState routerState = UiRouterState::kIdle;                // UI 视图状态
+    bool physicalAvailable = false;   // capability 门控（canPhysical）
+    bool virtualActive = true;        // 按 selectedMode 派生的激活标志
+    bool physicalActive = false;      // 按 selectedMode 派生的激活标志
+    bool sessionConnected = false;    // 会话（HELLO 握手）是否已建立
+    bool switchingInProgress = false; // SET_MODE 已发、ACK 未回
+    bool fullResyncPending = false;   // 重连/切换后等待新 FULL 帧
+    bool applyEnabled = true;         // switching 期间 false
+    bool waitingForConnection = false;// 断开时点了 Apply → "Waiting for connection"
+    std::string lastError;            // 最近一次错误（空 = 无错误）
+
+    // ---- 转移方法 ----
+    // 选择模式（0..3；capability 不足时拒绝并保留 lastError）。断开/切换中均可改。
+    bool setSelectedMode(DisplayRouteMode mode);
+    // Apply：校验（applyEnabled / 会话 / capability）后进入切换。
+    // 返回 true = 调用方应发送 wire SET_MODE；false = 未发送
+    // （断开 → waitingForConnection；切换中/能力不足 → lastError）。
+    bool applyRequested();
+    // wire 发送已开始（幂等；外部接线在真实 dispatch 后可调用）。
+    void onSwitchStart();
+    // SET_MODE ACK 结果（ok=true 设备已应用 → appliedMode + FULL resync pending）。
+    void onAck(bool ok);
+    // 会话建立（HELLO done）→ 需要 FULL resync。
+    void onConnected();
+    // 会话断开 → kUnavailable；Apply 允许点击（进入 waiting）。
+    void onDisconnected();
+    // FULL 帧提交 → 重同步完成，状态收敛（kConnected / kDegraded）。
+    void onFullCommit();
+    // capability 门控变化：false → 物理相关模式不可选/Unavailable。
+    void onPhysicalAvailable(bool available);
+    // 运行时物理 sink 不可用（OLED 未 kReady 等）→ 相关模式 kDegraded。
+    void onPhysicalDegraded(bool degraded);
+    void clearError() { lastError.clear(); }
+
+private:
+    // 按 appliedMode + 会话 + capability + 降级收敛路由状态（不含切换）。
+    UiRouterState convergedState() const;
+    void refreshActive();  // 按 selectedMode 派生 virtualActive / physicalActive
+
+    bool physicalDegraded_ = false;
+    DisplayRouteMode pendingApplyMode_ = DisplayRouteMode::kVirtualOnly;  // 本次实际发送的模式
+};
+
+}  // namespace display
+}  // namespace espview

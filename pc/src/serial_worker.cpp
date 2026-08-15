@@ -9,6 +9,7 @@
 #include <protocol_endpoint.h>
 
 #include "input_codec.h"  // InputEvent → INPUT_* Message
+#include "message.h"      // M7-C3：makeSetMode（SET_MODE payload [0] mode，自动 ACK_REQ）
 
 namespace espview {
 namespace pc {
@@ -68,6 +69,7 @@ bool SerialWorker::switchTransport(const TransportConfig& cfg) {
     // 2) Input / RX 残留清理（M6-D §十三：切换期间清 pending input；
     //    §十二：不保留旧 Transport 残留字节，避免 stale 解析）。
     clearInputQueue();
+    clearDisplayModeQueue();
     {
         std::lock_guard<std::mutex> lk(rxMutex_);
         rxBuf_.clear();
@@ -115,6 +117,8 @@ void SerialWorker::resetSessionCounters() {
     reconnectCount_ = 0;
     inputSent_ = 0;
     inputDropped_ = 0;
+    modeSent_ = 0;
+    modeDropped_ = 0;
     diag_.clear();
     statsWindowMs_ = 0;
     lastRxBytes_ = 0;
@@ -337,6 +341,17 @@ void SerialWorker::runLoop() {
                  "ERROR code=" + std::to_string(static_cast<unsigned>(code)) + ": " +
                      msg.toStdString());
     };
+    // M7-C3：SET_MODE 是 v0.1 唯一 ACK_REQ 控制消息，因此所有 ACK 结果都是
+    // Display Mode 的 ACK。onAckTimeout（重试耗尽）同样按失败上报。
+    cb.onAck = [this](uint16_t ackSeq, uint8_t status, proto::ErrorCode errorCode) {
+        (void)ackSeq;
+        (void)errorCode;
+        emit displayModeAck(status == 0);
+    };
+    cb.onAckTimeout = [this](uint16_t lastSeq) {
+        (void)lastSeq;
+        emit displayModeAck(false);
+    };
 
     ep_ = std::make_unique<proto::ProtocolEndpoint>(cfg, sink, cb, steadyMs);
 
@@ -513,6 +528,7 @@ void SerialWorker::pumpLoop(uint64_t openAtMs) {
         // M3：输入队列（GUI → Worker）在此 drain；与 RX/心跳同一线程，天然串行，
         // 不引入额外锁。发送走 endpoint.sendMessage（sendMutex_ 原子整消息）。
         drainInputQueue();
+        drainDisplayModeQueue();  // M7-C3：Display Mode（SET_MODE）队列同线程 drain
 
         if (now - lastStatsMs >= 500) {
             lastStatsMs = now;
@@ -575,6 +591,49 @@ void SerialWorker::drainInputQueue() {
             ++inputSent_;
         } else {
             ++inputDropped_;
+        }
+    }
+}
+
+void SerialWorker::sendDisplayMode(uint8_t mode) {
+    std::lock_guard<std::mutex> lk(modeMutex_);
+    displayModeQueue_.push_back(mode);
+}
+
+void SerialWorker::clearDisplayModeQueue() {
+    std::lock_guard<std::mutex> lk(modeMutex_);
+    displayModeQueue_.clear();
+}
+
+void SerialWorker::drainDisplayModeQueue() {
+    std::vector<uint8_t> queue;
+    {
+        std::lock_guard<std::mutex> lk(modeMutex_);
+        if (displayModeQueue_.empty()) {
+            return;
+        }
+        queue.swap(displayModeQueue_);
+    }
+    if (!ep_) {
+        modeDropped_ += queue.size();
+        return;
+    }
+    for (const uint8_t mode : queue) {
+        // 未连接时整包丢弃并计数（同 sendInput 语义）；ACK 不会发出，
+        // GUI 侧 DisplayUiState 已处于 "Waiting for connection" 标记。
+        if (!ep_->isConnected()) {
+            ++modeDropped_;
+            continue;
+        }
+        // payload 仍为 [0] mode（1 byte，冻结语义）；makeSetMode 自动置
+        // ACK_REQ，sendMessage 自动登记 pending ACK（超时重试 2 次后
+        // onAckTimeout → displayModeAck(false)）。
+        const proto::Message msg =
+            proto::makeSetMode(static_cast<proto::DisplayMode>(mode));
+        if (ep_->sendMessage(msg) == proto::SendResult::kOk) {
+            ++modeSent_;
+        } else {
+            ++modeDropped_;
         }
     }
 }

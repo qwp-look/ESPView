@@ -53,6 +53,7 @@
 #include <QMainWindow>
 #include <QMenuBar>
 #include <QMessageBox>
+#include <QSplitter>
 #include <QStatusBar>
 #include <QTimer>
 #include <QVBoxLayout>
@@ -61,14 +62,22 @@
 #include <cstdint>
 #include <cstdio>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "connection_manager.h"
+#include "display_mode_widget.h"
+#include "display_router.h"  // DisplayRouteMode（M7-C3 模式 UI 状态）
+#include "display_status_panel.h"
 #include "display_frame.h"
 #include "frame_assembler.h"  // proto::toString(FrameDiscardReason)（状态面板）
+#include "i18n.h"             // trText / UiLang（M7-C3 双语）
 #include "input_controller.h"
 #include "input_event.h"       // makeKeyEvent（M6-D：F12 远端切换协助）
+#include "language_selector.h"
+#include "physical_status.h"   // parsePhysicalStatusLine（M7-C3 遥测）
 #include "serial_worker.h"
+#include "split_drawer.h"
 #include "transport_config.h"  // TransportConfig / validateTransportConfig（M6-D）
 #include "virtual_screen_widget.h"
 
@@ -137,26 +146,35 @@ public:
     MainWindow(const TransportConfig& initialCfg, const QString& pngDumpDir,
                QWidget* parent = nullptr)
         : QMainWindow(parent), currentCfg_(initialCfg) {
-        setWindowTitle(QStringLiteral("ESPView Virtual Display — 320x240"));
-        resize(720, 560);
+        setWindowTitle(tr_("ESPView") + QStringLiteral(" ") + tr_("Virtual Display") +
+                       QStringLiteral(" — 320x240"));
+        resize(1160, 720);
         // M6-D §二十一：恢复上次窗口大小（QSettings）。
         const QSize savedSize =
-            settings_.value(QStringLiteral("window/size"), QSize(720, 560)).toSize();
+            settings_.value(QStringLiteral("window/size"), QSize(1160, 720)).toSize();
         if (savedSize.width() >= 480 && savedSize.height() >= 400) {
             resize(savedSize);
         }
 
         screen_ = new VirtualScreenWidget(this);
         buildTransportPanel();  // M6-D §二：正式 Transport 选择 UI（TCP/UART）
+        buildModePanel();       // M7-C3：Display Mode UI + 语言选择
+        buildSplitDrawer();     // M7-C3：Split Drawer（screen_ 移入 QSplitter）
         buildStatusPanel();
+        statusPanel_ = new DisplayStatusPanel(this);  // M7-C3：显示状态面板
 
         auto* central = new QWidget(this);
         auto* layout = new QVBoxLayout(central);
         layout->setContentsMargins(6, 6, 6, 6);
         layout->setSpacing(6);
         layout->addLayout(transportGrid_);  // M6-D：Transport UI 置于虚拟屏上方
-        layout->addWidget(screen_, 1);
-        layout->addLayout(statusGrid_);
+        layout->addLayout(modeGrid_);        // M7-C3：Display Mode UI + Language
+        layout->addWidget(screenSplitter_, 1);  // M7-C3：screen_ | drawer_
+        auto* bottomRow = new QHBoxLayout;   // M7-C3：状态面板 | M4 状态面板
+        bottomRow->setSpacing(8);
+        bottomRow->addWidget(statusPanel_, 3);
+        bottomRow->addLayout(statusGrid_);
+        layout->addLayout(bottomRow);
         layout->addWidget(diagList_, 1);
         setCentralWidget(central);
 
@@ -180,11 +198,39 @@ public:
                 [this](quint64 ts, int sev, const QString& src, const QString& msg) {
                     onDiagAdded(ts, sev, src, msg);
                 });
+        // M7-C3：Display Mode 发送与 ACK（独立于 Transport 切换，保留会话）。
+        connect(modeWidget_, &DisplayModeWidget::applyRequested, this,
+                [this](int mode) {
+                    screen_->clearDisplay();  // §五：切换先清陈旧镜像（旧模式帧不残留）
+                    manager_.sendDisplayMode(static_cast<uint8_t>(mode));
+                    modeSwitchStartMs_ = steadyMs();
+                    modeWatchdog_->start();
+                    syncModeStateToUi();
+                });
+        connect(&manager_, &ConnectionManager::displayModeAck, this,
+                [this](bool ok) {
+                    modeWatchdog_->stop();
+                    modeWidget_->onAck(ok);
+                    syncModeStateToUi();
+                    statusBar()->showMessage(
+                        ok ? tr_("Success") + QStringLiteral(": SET_MODE")
+                           : tr_("Failure") + QStringLiteral(": SET_MODE"),
+                        3000);
+                });
+        // M7-C3：语言切换（只改文案，不触碰 transport / display / framebuffer）。
+        connect(langSel_, &LanguageSelector::languageChanged, this,
+                &MainWindow::onLanguageChanged);
 
         // M6-D：切换看门狗 —— FULL 未在时限内提交 → Switch failed（§五，不无限循环）。
         switchWatchdog_ = new QTimer(this);
         switchWatchdog_->setInterval(500);
         connect(switchWatchdog_, &QTimer::timeout, this, &MainWindow::onSwitchWatchdog);
+
+        // M7-C3：Display Mode ACK 看门狗 —— ACK 丢失/发送被丢弃时回退模型，
+        // 避免 Apply 永久禁用（Agent F §S2.4）。
+        modeWatchdog_ = new QTimer(this);
+        modeWatchdog_->setInterval(500);
+        connect(modeWatchdog_, &QTimer::timeout, this, &MainWindow::onModeWatchdog);
 
         if (!pngDumpDir.isEmpty()) {
             if (QDir().mkpath(pngDumpDir)) {
@@ -200,6 +246,10 @@ public:
         applyConfigToUi(currentCfg_);
         updatePortLabels();
         startTransport(currentCfg_);
+
+        // M7-C3：恢复持久化 UI 状态（语言恢复在最后，触发一次全量重翻译）。
+        restoreDisplayModeFromSettings();
+        langSel_->setLanguage(settings_.value(QStringLiteral("ui/language"), 0).toInt());
     }
 
     ~MainWindow() override {
@@ -219,6 +269,17 @@ protected:
 
 private slots:
     void onFrameReady(const DisplayFrame& frame) {
+        // M7-C3：模式切换 / 重连后的 FULL resync 门控 ——
+        //   - switchingInProgress：模式切换中，旧模式帧不得上屏（只记录到达）；
+        //   - fullResyncPending：等待新 FULL 期间 PARTIAL 不显示（重同步语义，
+        //     PhysicalOnly 下虚拟输出永久保持清屏占位）。
+        const auto& ms = modeWidget_->state();
+        if (ms.switchingInProgress) {
+            return;  // 切换中：不写屏、不更新 res/format（首个新 FULL 才恢复）
+        }
+        if (ms.fullResyncPending && frame.frameType != 0) {
+            return;  // 重同步未完成：只接受 FULL
+        }
         screen_->setFrame(frame);
         // M3：鼠标坐标 clamp 上界跟随对端分辨率
         inputController_->setDisplaySize(frame.width, frame.height);
@@ -239,6 +300,13 @@ private slots:
             updateSwitchStatsLabel();
             statusBar()->showMessage(
                 QStringLiteral("Transport switch OK (%1 ms)").arg(lastSwitchMs_), 5000);
+        }
+        // M7-C3：FULL 帧提交 → Display Mode 模型 FULL resync 收敛。
+        if (frame.frameType == 0) {
+            auto s = modeWidget_->state();
+            s.onFullCommit();
+            modeWidget_->setUiState(s);
+            syncModeStateToUi();
         }
     }
 
@@ -270,6 +338,30 @@ private slots:
                 }
                 break;
         }
+        // M7-C3：状态面板 + Display Mode 模型跟随会话状态。
+        statusPanel_->setWorkerStatus(status, text);
+        auto s = modeWidget_->state();
+        if (status == WorkerStatus::Connected) {
+            // 断线期间 Apply 过（waitingForConnection）且选择未应用 → 自动补发
+            // 一次 SET_MODE（单飞行 + 看门狗，失败回退选择，不重试循环）。
+            const bool needsAutoSend =
+                s.waitingForConnection && s.selectedMode != s.appliedMode;
+            s.onConnected();  // 新会话 → fullResyncPending
+            if (needsAutoSend) {
+                s.onSwitchStart();  // 锁定本次实际发送模式
+            }
+            modeWidget_->setUiState(s);
+            if (needsAutoSend) {
+                manager_.sendDisplayMode(static_cast<uint8_t>(s.selectedMode));
+                modeSwitchStartMs_ = steadyMs();
+                modeWatchdog_->start();
+            }
+        } else if (status == WorkerStatus::Disconnected || status == WorkerStatus::Error) {
+            s.onDisconnected();
+            modeWidget_->setUiState(s);
+            drawer_->clearStatus();  // 会话失联 → 抽屉物理状态清空（不伪造）
+        }
+        syncModeStateToUi();
         statusBar()->showMessage(text);
     }
 
@@ -420,6 +512,28 @@ private slots:
         }
         diagList_->addItem(item);
         diagList_->scrollToBottom();
+
+        // M7-C3：ESP32 ERROR 文本遥测 → PhysicalStatus（worker 在 stats 行前
+        // 追加了 "stats: " 前缀，此处剥离后再解析）。
+        QString text = msg;
+        if (text.startsWith(QStringLiteral("stats: "))) {
+            text = text.mid(7);
+        }
+        espview::display::PhysicalStatus parsed = physSnapshot_;
+        if (espview::display::parsePhysicalStatusLine(text.toStdString(), parsed)) {
+            physSnapshot_ = parsed;
+            statusPanel_->setPhysicalStatus(physSnapshot_);
+            drawer_->setPhysicalStatus(physSnapshot_);
+            // capability 推断：OLED 遥测 ok=1 是当前 wire 唯一真实可观测源
+            // （模式只读；HELLO mode_mask 为编译期常量，不得作为物理可用证明）。
+            if (!physicalSeen_ && physSnapshot_.oledValid && physSnapshot_.oledOk) {
+                physicalSeen_ = true;
+                auto s = modeWidget_->state();
+                s.onPhysicalAvailable(true);
+                modeWidget_->setUiState(s);
+                syncModeStateToUi();
+            }
+        }
     }
 
     void saveSnapshot() {
@@ -428,8 +542,8 @@ private slots:
             return;
         }
         const QString path = QFileDialog::getSaveFileName(
-            this, tr("Save current display"), QStringLiteral("espview_snapshot.png"),
-            tr("PNG image (*.png)"));
+            this, tr_("Save current display"), QStringLiteral("espview_snapshot.png"),
+            QStringLiteral("PNG image (*.png)"));
         if (path.isEmpty()) {
             return;
         }
@@ -441,22 +555,119 @@ private slots:
     }
 
 private:
+    // ---- M7-C3：Display Mode UI / Split Drawer / 状态面板 / i18n ----
+    QString tr_(const char* key) const {
+        return QString::fromUtf8(trText(lang_, key));
+    }
+    // 注册静态文案标签（key = i18n 目录 key；语言切换时统一重刷）。
+    void registerLabel(QLabel* label, const char* key) {
+        retranslateLabels_.emplace_back(label, key);
+    }
+    void buildModePanel() {
+        modeGrid_ = new QGridLayout(this);
+        modeGrid_->setHorizontalSpacing(8);
+        modeGrid_->setVerticalSpacing(4);
+        modeWidget_ = new DisplayModeWidget(this);
+        modeGrid_->addWidget(modeWidget_, 0, 0, 1, 4);
+        auto* langLabel = new QLabel(tr_("Language"), this);
+        registerLabel(langLabel, "Language");
+        modeGrid_->addWidget(langLabel, 0, 4);
+        langSel_ = new LanguageSelector(this);
+        modeGrid_->addWidget(langSel_, 0, 5);
+        modeGrid_->setColumnStretch(6, 1);
+    }
+    void buildSplitDrawer() {
+        screenSplitter_ = new QSplitter(Qt::Horizontal, this);
+        drawer_ = new SplitDrawer(&settings_, this);
+        screenSplitter_->addWidget(screen_);
+        screenSplitter_->addWidget(drawer_);
+        screenSplitter_->setStretchFactor(0, 1);
+        screenSplitter_->setStretchFactor(1, 0);
+        drawer_->loadSettings();  // 恢复 split/drawerVisible + split/drawerWidth
+    }
+    void restoreDisplayModeFromSettings() {
+        const int saved = settings_.value(QStringLiteral("display/mode"), 0).toInt();
+        if (saved <= 0 || saved > 3) {
+            return;  // capability 未知前仅 VirtualOnly 可恢复（物理模式等遥测）。
+        }
+        auto s = modeWidget_->state();
+        if (s.setSelectedMode(static_cast<espview::display::DisplayRouteMode>(saved))) {
+            modeWidget_->setUiState(s);
+        }
+    }
+    // 把模式模型的最新状态推给状态面板；Split 选中时自动打开抽屉。
+    void syncModeStateToUi() {
+        const auto& s = modeWidget_->state();
+        statusPanel_->setModeState(static_cast<int>(s.selectedMode),
+                                   static_cast<int>(s.routerState),
+                                   s.fullResyncPending);
+        if (s.selectedMode == espview::display::DisplayRouteMode::kSplit) {
+            drawer_->open();
+        }
+    }
+    void onModeWatchdog() {
+        if (!modeWidget_->state().switchingInProgress) {
+            modeWatchdog_->stop();
+            return;
+        }
+        if (steadyMs() - modeSwitchStartMs_ >= 30000) {
+            modeWatchdog_->stop();
+            modeWidget_->onAck(false);  // 超时 → 回退选择 + 错误（不无限等待）
+            syncModeStateToUi();
+            statusBar()->showMessage(
+                tr_("Failure") + QStringLiteral(": SET_MODE timeout"), 5000);
+        }
+    }
+    void onLanguageChanged(int lang) {
+        lang_ = static_cast<UiLang>(lang);
+        retranslateUi();
+        settings_.setValue(QStringLiteral("ui/language"), lang);
+    }
+    void retranslateUi() {
+        setWindowTitle(tr_("ESPView") + QStringLiteral(" ") + tr_("Virtual Display") +
+                       QStringLiteral(" — 320x240"));
+        for (const auto& entry : retranslateLabels_) {
+            if (entry.first != nullptr && entry.second != nullptr) {
+                entry.first->setText(tr_(entry.second));
+            }
+        }
+        transportCombo_->setItemText(0, tr_("TCP"));
+        transportCombo_->setItemText(1, tr_("UART"));
+        applyBtn_->setText(tr_("Apply"));
+        uartPortTitle_->setText(tr_("UART") + QStringLiteral(" ") + tr_("Port") +
+                                QStringLiteral(":"));
+        uartBaudTitle_->setText(tr_("Baud") + QStringLiteral(":"));
+        tcpBindTitle_->setText(tr_("Local server") + QStringLiteral(":"));
+        tcpPortTitle_->setText(tr_("Port") + QStringLiteral(":"));
+        if (saveAction_ != nullptr) {
+            saveAction_->setText(tr_("Save PNG..."));
+        }
+        if (quitAction_ != nullptr) {
+            quitAction_->setText(tr_("Quit"));
+        }
+        modeWidget_->setUiLanguage(static_cast<int>(lang_));
+        statusPanel_->setUiLanguage(static_cast<int>(lang_));
+        drawer_->setUiLanguage(static_cast<int>(lang_));
+        syncModeStateToUi();
+    }
+
     // ---- M6-D：正式 Transport 选择 UI（§二/§四/§五/§七）----
     void buildTransportPanel() {
         transportGrid_ = new QGridLayout(this);
         transportGrid_->setHorizontalSpacing(8);
         transportGrid_->setVerticalSpacing(4);
 
-        auto* title = new QLabel(QStringLiteral("<b>Transport</b>"), this);
+        auto* title = new QLabel(tr_("Transport"), this);
+        registerLabel(title, "Transport");
         transportGrid_->addWidget(title, 0, 0);
         transportCombo_ = new QComboBox(this);
-        transportCombo_->addItem(QStringLiteral("TCP"));
-        transportCombo_->addItem(QStringLiteral("UART"));
+        transportCombo_->addItem(tr_("TCP"));
+        transportCombo_->addItem(tr_("UART"));
         transportGrid_->addWidget(transportCombo_, 0, 1);
         connect(transportCombo_, qOverload<int>(&QComboBox::currentIndexChanged), this,
                 &MainWindow::onTransportComboChanged);
 
-        applyBtn_ = new QPushButton(QStringLiteral("Apply"), this);
+        applyBtn_ = new QPushButton(tr_("Apply"), this);
         transportGrid_->addWidget(applyBtn_, 0, 2);
         connect(applyBtn_, &QPushButton::clicked, this, &MainWindow::onApplyTransport);
 
@@ -469,11 +680,16 @@ private:
         auto* uartLay = new QHBoxLayout(uartCfgWidget_);
         uartLay->setContentsMargins(0, 0, 0, 0);
         uartLay->setSpacing(6);
-        uartLay->addWidget(new QLabel(QStringLiteral("UART Port:"), uartCfgWidget_));
+        uartPortTitle_ =
+            new QLabel(tr_("UART") + QStringLiteral(" ") + tr_("Port") +
+                           QStringLiteral(":"),
+                       uartCfgWidget_);
+        uartLay->addWidget(uartPortTitle_);
         uartPortEdit_ = new QLineEdit(uartCfgWidget_);
         uartPortEdit_->setMaximumWidth(110);
         uartLay->addWidget(uartPortEdit_);
-        uartLay->addWidget(new QLabel(QStringLiteral("Baud:"), uartCfgWidget_));
+        uartBaudTitle_ = new QLabel(tr_("Baud") + QStringLiteral(":"), uartCfgWidget_);
+        uartLay->addWidget(uartBaudTitle_);
         uartBaudEdit_ = new QLineEdit(uartCfgWidget_);
         uartBaudEdit_->setMaximumWidth(100);
         uartBaudEdit_->setValidator(new QIntValidator(1, 4000000, uartBaudEdit_));
@@ -487,11 +703,14 @@ private:
         auto* tcpLay = new QHBoxLayout(tcpCfgWidget_);
         tcpLay->setContentsMargins(0, 0, 0, 0);
         tcpLay->setSpacing(6);
-        tcpLay->addWidget(new QLabel(QStringLiteral("Local server:"), tcpCfgWidget_));
+        tcpBindTitle_ =
+            new QLabel(tr_("Local server") + QStringLiteral(":"), tcpCfgWidget_);
+        tcpLay->addWidget(tcpBindTitle_);
         tcpBindEdit_ = new QLineEdit(tcpCfgWidget_);
         tcpBindEdit_->setMaximumWidth(150);
         tcpLay->addWidget(tcpBindEdit_);
-        tcpLay->addWidget(new QLabel(QStringLiteral("Port:"), tcpCfgWidget_));
+        tcpPortTitle_ = new QLabel(tr_("Port") + QStringLiteral(":"), tcpCfgWidget_);
+        tcpLay->addWidget(tcpPortTitle_);
         tcpPortEdit_ = new QLineEdit(tcpCfgWidget_);
         tcpPortEdit_->setMaximumWidth(80);
         tcpPortEdit_->setValidator(new QIntValidator(1, 65535, tcpPortEdit_));
@@ -671,8 +890,16 @@ private:
                 settings_.setValue(key, tcpPortEdit_->text().toUInt());
             } else if (key == QStringLiteral("window/size")) {
                 settings_.setValue(key, size());
+            } else if (key == QStringLiteral("display/mode")) {
+                settings_.setValue(key,
+                                   static_cast<int>(modeWidget_->state().selectedMode));
+            } else if (key == QStringLiteral("ui/language")) {
+                settings_.setValue(key, static_cast<int>(lang_));
             }
+            // split/drawerVisible + split/drawerWidth：由 SplitDrawer::saveSettings
+            // 统一管理（去抖 + 显式保存），此处不重复写。
         }
+        drawer_->saveSettings();
     }
 
     // M4：四域状态面板（Connection / Display / Protocol / Heartbeat / Input）。
@@ -681,79 +908,102 @@ private:
         statusGrid_->setHorizontalSpacing(14);
         statusGrid_->setVerticalSpacing(2);
 
-        auto addGroupHeader = [this](const QString& text, int row) {
-            auto* label = new QLabel(QStringLiteral("<b>%1</b>").arg(text), this);
-            statusGrid_->addWidget(label, row, 0, 1, 2);
-        };
-
         int row = 0;
-        addGroupHeader(tr("Connection"), row++);
-        statusGrid_->addWidget(new QLabel(tr("State"), this), row, 0);
+        auto* connHeader = new QLabel(tr_("Connection"), this);
+        registerLabel(connHeader, "Connection");
+        statusGrid_->addWidget(connHeader, row, 0, 1, 2);
+        ++row;
+        registerLabel(new QLabel(tr_("State"), this), "State");
+        statusGrid_->addWidget(retranslateLabels_.back().first, row, 0);
         connLabel_ = new QLabel(QStringLiteral("—"), this);
         statusGrid_->addWidget(connLabel_, row, 1);
         ++row;
-        statusGrid_->addWidget(new QLabel(tr("Detail"), this), row, 0);
+        registerLabel(new QLabel(tr_("Detail"), this), "Detail");
+        statusGrid_->addWidget(retranslateLabels_.back().first, row, 0);
         connDetailLabel_ = new QLabel(QStringLiteral("—"), this);
         statusGrid_->addWidget(connDetailLabel_, row, 1);
         ++row;
-        statusGrid_->addWidget(new QLabel(tr("Port / Baud"), this), row, 0);
+        registerLabel(new QLabel(tr_("Port / Baud"), this), "Port / Baud");
+        statusGrid_->addWidget(retranslateLabels_.back().first, row, 0);
         portLabel_ = new QLabel(QStringLiteral("—"), this);
         baudLabel_ = new QLabel(QStringLiteral("—"), this);
         statusGrid_->addWidget(portLabel_, row, 1);
         statusGrid_->addWidget(baudLabel_, row, 2);
 
         ++row;
-        addGroupHeader(tr("Display"), row++);
-        statusGrid_->addWidget(new QLabel(tr("Resolution"), this), row, 0);
+        registerLabel(new QLabel(tr_("Display"), this), "Display");
+        statusGrid_->addWidget(retranslateLabels_.back().first, row, 0, 1, 2);
+        ++row;
+        registerLabel(new QLabel(tr_("Resolution"), this), "Resolution");
+        statusGrid_->addWidget(retranslateLabels_.back().first, row, 0);
         resLabel_ = new QLabel(QStringLiteral("—"), this);
         statusGrid_->addWidget(resLabel_, row, 1);
         ++row;
-        statusGrid_->addWidget(new QLabel(tr("Format"), this), row, 0);
+        registerLabel(new QLabel(tr_("Format"), this), "Format");
+        statusGrid_->addWidget(retranslateLabels_.back().first, row, 0);
         formatLabel_ = new QLabel(QStringLiteral("—"), this);
         statusGrid_->addWidget(formatLabel_, row, 1);
         ++row;
-        statusGrid_->addWidget(new QLabel(tr("Frames (commit/discard)"), this), row, 0);
+        registerLabel(new QLabel(tr_("Frames (commit/discard)"), this),
+                      "Frames (commit/discard)");
+        statusGrid_->addWidget(retranslateLabels_.back().first, row, 0);
         framesLabel_ = new QLabel(QStringLiteral("0 / 0"), this);
         statusGrid_->addWidget(framesLabel_, row, 1);
         ++row;
-        statusGrid_->addWidget(new QLabel(tr("FPS / last"), this), row, 0);
+        registerLabel(new QLabel(tr_("FPS / last"), this), "FPS / last");
+        statusGrid_->addWidget(retranslateLabels_.back().first, row, 0);
         fpsLabel_ = new QLabel(QStringLiteral("—"), this);
         statusGrid_->addWidget(fpsLabel_, row, 1);
         ++row;
-        statusGrid_->addWidget(new QLabel(tr("Last discard"), this), row, 0);
+        registerLabel(new QLabel(tr_("Last discard"), this), "Last discard");
+        statusGrid_->addWidget(retranslateLabels_.back().first, row, 0);
         discardLabel_ = new QLabel(QStringLiteral("—"), this);
         statusGrid_->addWidget(discardLabel_, row, 1);
 
         ++row;
-        addGroupHeader(tr("Protocol"), row++);
-        statusGrid_->addWidget(new QLabel(tr("RX"), this), row, 0);
+        registerLabel(new QLabel(tr_("Protocol"), this), "Protocol");
+        statusGrid_->addWidget(retranslateLabels_.back().first, row, 0, 1, 2);
+        ++row;
+        registerLabel(new QLabel(tr_("RX"), this), "RX");
+        statusGrid_->addWidget(retranslateLabels_.back().first, row, 0);
         rxLabel_ = new QLabel(QStringLiteral("0 B"), this);
         statusGrid_->addWidget(rxLabel_, row, 1);
         ++row;
-        statusGrid_->addWidget(new QLabel(tr("TX"), this), row, 0);
+        registerLabel(new QLabel(tr_("TX"), this), "TX");
+        statusGrid_->addWidget(retranslateLabels_.back().first, row, 0);
         txLabel_ = new QLabel(QStringLiteral("0 B"), this);
         statusGrid_->addWidget(txLabel_, row, 1);
         ++row;
-        statusGrid_->addWidget(new QLabel(tr("Packets/Messages"), this), row, 0);
+        registerLabel(new QLabel(tr_("Packets/Messages"), this), "Packets/Messages");
+        statusGrid_->addWidget(retranslateLabels_.back().first, row, 0);
         pktLabel_ = new QLabel(QStringLiteral("—"), this);
         statusGrid_->addWidget(pktLabel_, row, 1);
         ++row;
-        statusGrid_->addWidget(new QLabel(tr("Errors (decode/CRC/seq/session)"), this), row, 0);
+        registerLabel(new QLabel(tr_("Errors (decode/CRC/seq/session)"), this),
+                      "Errors (decode/CRC/seq/session)");
+        statusGrid_->addWidget(retranslateLabels_.back().first, row, 0);
         errLabel_ = new QLabel(QStringLiteral("0  0  0  0"), this);
         statusGrid_->addWidget(errLabel_, row, 1);
 
         ++row;
-        addGroupHeader(tr("Heartbeat"), row++);
-        statusGrid_->addWidget(new QLabel(tr("PING/PONG"), this), row, 0);
+        registerLabel(new QLabel(tr_("Heartbeat"), this), "Heartbeat");
+        statusGrid_->addWidget(retranslateLabels_.back().first, row, 0, 1, 2);
+        ++row;
+        registerLabel(new QLabel(tr_("PING/PONG"), this), "PING/PONG");
+        statusGrid_->addWidget(retranslateLabels_.back().first, row, 0);
         hbLabel_ = new QLabel(QStringLiteral("—"), this);
         statusGrid_->addWidget(hbLabel_, row, 1, 1, 2);
         ++row;
-        statusGrid_->addWidget(new QLabel(tr("RTT"), this), row, 0);
+        registerLabel(new QLabel(tr_("RTT"), this), "RTT");
+        statusGrid_->addWidget(retranslateLabels_.back().first, row, 0);
         rttLabel_ = new QLabel(QStringLiteral("N/A"), this);
         statusGrid_->addWidget(rttLabel_, row, 1);
 
         ++row;
-        addGroupHeader(tr("Input (sent/dropped/unsup/ignored)"), row++);
+        registerLabel(new QLabel(tr_("Input (sent/dropped/unsup/ignored)"), this),
+                      "Input (sent/dropped/unsup/ignored)");
+        statusGrid_->addWidget(retranslateLabels_.back().first, row, 0, 1, 3);
+        ++row;
         inputLabel_ = new QLabel(QStringLiteral("0 / 0 / 0 / 0"), this);
         statusGrid_->addWidget(inputLabel_, row, 0, 1, 3);
 
@@ -767,12 +1017,13 @@ private:
     }
 
     void buildMenu() {
-        QMenu* fileMenu = menuBar()->addMenu(tr("&File"));
-        QAction* saveAction =
-            fileMenu->addAction(tr("Save PNG..."), this, &MainWindow::saveSnapshot);
-        saveAction->setShortcut(QKeySequence::Save);
+        QMenu* fileMenu = menuBar()->addMenu(tr_("File"));
+        saveAction_ = fileMenu->addAction(tr_("Save PNG..."), this,
+                                          &MainWindow::saveSnapshot);
+        saveAction_->setShortcut(QKeySequence::Save);
         fileMenu->addSeparator();
-        fileMenu->addAction(tr("&Quit"), QKeySequence::Quit, this, &QWidget::close);
+        quitAction_ = fileMenu->addAction(tr_("Quit"), QKeySequence::Quit, this,
+                                          &QWidget::close);
     }
 
     VirtualScreenWidget* screen_ = nullptr;
@@ -825,6 +1076,26 @@ private:
     QString lastSwitchError_;
     QSettings settings_;  // org/app name 在 main() 设置（M6-D §二十一）
     QString diagLogPath_;  // --diag-log：peer/session 诊断追加到文件（M6-D 调试）
+
+    // ---- M7-C3：Display Mode UI / Split Drawer / 状态面板 / i18n ----
+    QGridLayout* modeGrid_ = nullptr;
+    DisplayModeWidget* modeWidget_ = nullptr;
+    LanguageSelector* langSel_ = nullptr;
+    DisplayStatusPanel* statusPanel_ = nullptr;
+    SplitDrawer* drawer_ = nullptr;
+    QSplitter* screenSplitter_ = nullptr;
+    QTimer* modeWatchdog_ = nullptr;
+    UiLang lang_ = UiLang::kEnglish;
+    espview::display::PhysicalStatus physSnapshot_;  // 最近遥测快照（GUI 线程）
+    bool physicalSeen_ = false;  // 已收到 OLED ok=1 遥测 → physicalAvailable
+    uint64_t modeSwitchStartMs_ = 0;
+    std::vector<std::pair<QLabel*, const char*>> retranslateLabels_;  // i18n 重刷
+    QLabel* uartPortTitle_ = nullptr;
+    QLabel* uartBaudTitle_ = nullptr;
+    QLabel* tcpBindTitle_ = nullptr;
+    QLabel* tcpPortTitle_ = nullptr;
+    QAction* saveAction_ = nullptr;
+    QAction* quitAction_ = nullptr;
 };
 
 }  // namespace pc

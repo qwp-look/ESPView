@@ -1873,3 +1873,124 @@ M7-C2 把 M7-A/B 的 OLED 从"独立诊断显示"提升为正式 Physical Displa
   scene 映射 3/0→Diagnostics、1/2→Application 全部正确；HELLO/PING 0 CRC/0 seq。
 - 边界声明：本阶段不实现 Qt 四模式 UI / Wi-Fi wizard / 双语 / build tooling /
   OTA / Touch / 压缩 / 协议重设计；wire format 仅 additive kSplit=3。
+## AB. M7-C3 Qt 多显示 UI / Split Drawer / 双语界面（2026-08-15 实测；wire format 未修改）
+
+### AB.1 定位
+
+M7-C3 在冻结的 C1/C2 架构上补齐 Qt 侧 UX：四种显示模式（VirtualOnly/PhysicalOnly/
+Mirror/Split）的可视化选择与 Apply、Split Drawer（ESP32 物理/诊断侧栏）、中英双语、
+Display state 可视化面板、transport-aware display configuration。wire format 零改动
+（SET_MODE payload 仍为 [0] mode；无新增 Message；无 OLED framebuffer uplink）。
+
+### AB.2 Display Mode UI 与 0..3 语义（冻结）
+
+- 下拉四模式：Virtual Only(0) / Physical Only(1) / Mirror(2) / Split(3)，用户可见
+  文案为模式名，绝不显示 0/1/2/3。
+- 语义沿用 AA.7：VirtualOnly=Virtual:Application / Physical:Disabled（OLED 继续
+  独立 system diagnostics，不冒充 Physical Application）；PhysicalOnly=Virtual:
+  Disabled / Physical:Application（Qt 仍是控制器/状态面板，不关闭）；Mirror=双
+  Application（同一逻辑源，不要求像素级一致）；Split=Virtual:Application /
+  Physical:Diagnostics（绝不用 "Both" 掩盖语义差异）。
+- Apply → SET_MODE（ACK_REQ）→ ACK ok → appliedMode 更新 + FULL resync pending →
+  新 FULL 帧 → READY。ACK fail / 超时（30s 看门狗）→ 回退选择到 appliedMode +
+  错误提示，不无限重试。
+- 断开时允许改变选择，Apply 进入 "Waiting for connection"（不假装成功）；重连且
+  FULL 后若 selected != applied 自动补发一次 SET_MODE（单飞行 + 看门狗），失败回退。
+
+### AB.3 Capability-driven UI（PC 侧推断，无 wire 上行）
+
+- 协议无 capability 上行：HELLO mode_mask 是固件编译期常量（0b1111），不得作为
+  物理可用证明；SET_MODE ACK ok 只证明"请求被接受"，不证明物理可用。
+- PC 侧唯一真实可观测源 = ERROR 文本遥测 `oled a=... c=... err=... ok=`（3s 周期）：
+  收到 `ok=1` → physicalAvailable=true → PhysicalOnly/Mirror/Split 可选；未收到 →
+  三个物理模式不可选并显示 "(Unavailable)"。默认允许选择全部模式，但状态标签
+  一律以遥测为准（无遥测 → Unknown/—，禁显示 OK）。
+
+### AB.4 Safe Switch（复用 M6-D，不重新设计）
+
+- Apply → SWITCHING（Apply 禁用，防重复）→ clear stale display → SET_MODE → ACK
+  → FULL resync → 新 FULL COMMIT → READY。30s 看门狗复用 M6-D 机制。
+- Display Mode 切换与 Transport 切换正交：模式切换走独立 sendDisplayMode 队列
+  （ConnectionManager::sendDisplayMode → SerialWorker 互斥队列 → pumpLoop drain →
+  makeSetMode + sendMessage），保留会话，绝不复用 switchTransport（不 stop/join）。
+- 模式切换期间（switchingInProgress / fullResyncPending）onFrameReady 不写屏：
+  旧模式帧 / 重同步前的 PARTIAL 一律不上屏；首个新 FULL 才恢复显示并收敛状态。
+  PhysicalOnly 下无虚拟帧 → 画面保持清屏占位（"虚拟输出关闭"语义）。
+- ACK 丢失/发送被丢弃（未连接）→ modeWatchdog 30s 超时回退，Apply 永不永久禁用。
+
+### AB.5 Split Drawer（UI 层布局，非第二套 framebuffer）
+
+- QSplitter(screen_ | drawer_)：VirtualScreenWidget 保持 320x240 逻辑分辨率不变
+  （实际 widget 缩放），drawer 宽度 [200, 560]（SplitState 常量，手柄驱动）。
+- 第一版只显示 Physical Diagnostics/Status 文本（RSSI/CH/Heap/Frame/Errors/
+  Transport/OLED addr/Scene/Availability），数据来自 ERROR 文本遥测 → PhysicalStatus
+  解析；绝不在 drawer 伪造 OLED framebuffer —— 当前 wire format 没有 Physical
+  framebuffer uplink（协议 gap，第一版明确不实现；未来若需像素级镜像须新增 wire
+  Message，属 C4+ 范围）。
+- 开合/宽度持久化：split/drawerVisible + split/drawerWidth（300ms 去抖 + 显式保存）；
+  Split 选中自动 open()，用户可手动开合（不触发连接/清屏/模式操作）。
+- 无数据规则：任何 *Valid==false 字段显示 "—"，禁止用 0/"0.0" 伪造。
+
+### AB.6 状态面板（DisplayStatusPanel）
+
+- 分组：Transport / Session / Display Mode / Virtual / Physical / Router / Errors /
+  FULL resync；状态区分 Unavailable / Degraded / Disabled / Active（红/橙/灰/绿）。
+- 数据源：Worker statusChanged / statsChanged / diagAdded（解析后喂入）/ 模式模型
+  （selectedMode + routerState + fullResyncPending）。GUI 线程只读消费，不改底层
+  WorkerStats 结构。
+
+### AB.7 i18n（English + 简体中文）
+
+- 最小目录机制（不用 .ts/.qm）：`i18n.h/.cpp` 提供 trText(UiLang, key)，key 即英文
+  原文（msgid 风格），未命中回退英文；LanguageSelector 下拉（English/中文）。
+- 语言切换只重刷 UI 文案（registerLabel + retranslateUi + 各 widget setUiLanguage），
+  不触碰 ConnectionManager/SerialWorker、不触发重连、不清 framebuffer、不重建 widget。
+- 诊断行/动态状态细节保持 ASCII（日志稳定）；UI 框架词（Transport/Display/模式名/
+  Apply/状态面板分组等）双语覆盖。持久化键 ui/language（白名单内）。
+
+### AB.8 QSettings 扩展（白名单统一管理）
+
+- persistedSettingsKeys() 9 键：transport/type, uart/port, uart/baud, tcp/port,
+  window/size, display/mode, ui/language, split/drawerVisible, split/drawerWidth。
+- 绝对禁止保存 Wi-Fi SSID/密码/PSK/凭据（结构性保证：白名单键名不含
+  wifi/ssid/password/psk/credential；TransportConfig 无凭据字段）。
+
+### AB.9 Wi-Fi Wizard 边界
+
+- 本阶段只预留入口语义：Settings → Wi-Fi Setup 提示 "将在 M7-C5 实现"；只展示
+  当前 Wi-Fi 状态（RSSI/CH/trx 遥测）。禁止实现 PC 下发 SSID/Password/TCP server
+  IP/Port —— 协议无对应 Message；发现需新控制消息即报告 PROTOCOL GAP，不得自改。
+
+### AB.10 线程模型 / 大帧
+
+- GUI 线程：Widget/布局/翻译/状态展示/模型（DisplayUiState/SplitState 纯 C++17，
+  零锁）；Worker 线程：Transport/Protocol/FrameAssembler/遥测文本上行解析边界。
+- 大帧 153600B 仍只在 Worker 组装 + queued 投递；GUI 每帧一次 blit+paint；
+  drawer/状态面板纯 label 赋值，无第二份整帧转换（禁止 GUI 侧再拷贝 153KB 级缓冲）。
+
+### AB.11 Host 测试（M7-C3）
+
+- display_ui_state_test（139 checks）：四模式 / physical unavailable / degraded /
+  disconnected / switching / FULL resync pending / apply disabled during switching。
+- physical_status_test（158 checks）：六类遥测行解析、混合合并、坏行忽略、clamp。
+- split_state_test（68 checks）：开合 / 夹取 200..560 / 键值往返 / 非法值容错。
+- i18n_test（744 checks，独立可执行）：English/Chinese/纯函数/全 key 双语非空 +
+  必需词条钉死。
+- transport_config_test 白名单 5→9 键断言更新。全量 224,501 checks / 0 failures
+  （协议套件）+ 91（transport_config）+ 744（i18n）；verify_host.bat ALL PASS。
+
+### AB.12 Qt 构建 / 实测（2026-08-15 真实硬件，UART transport，COM4 @ 115200）
+
+- verify_qt.bat ALL PASS；espview_virtual_display.exe 全量 clean build 零警告
+  （-Wall -Wextra -Wpedantic）。
+- 实测：UART HELLO 320x240 握手 PASS；FULL 帧渲染（PNG dump 验证 LVGL 画面）；
+  OLED 遥测 `a=0x3C c=SSD1306 err=0 ok=1` 持续解析（physicalAvailable=true）；
+  F11 模式循环 2→3→0→1→2，mod 行 st/scene 与 AA.3 映射一致
+  （3/0→Diagnostics、1/2→Application）；中英文启动（ui/language=0/1）exit 0。
+- 回归：M0..M7-C2 全部 host 测试通过；verify_host/verify_qt 通过。
+
+### AB.13 边界声明
+
+- 未实现：OLED 像素级镜像（wire gap，需新增 ESP32→PC Message，属 C4+）、Wi-Fi
+  credential 传输（C5）、C5 wizard、OTA/Touch/压缩。本阶段不修改 wire format、
+  不改 OLED renderer、不重新实现 PhysicalDisplaySink。

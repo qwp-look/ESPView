@@ -15,6 +15,9 @@ add_executable(espview_protocol_tests
     runtime_stats_test.cpp
     ../../display/tests/remote_display_test.cpp
     ../../display/tests/display_router_test.cpp
+    ../../display/tests/display_ui_state_test.cpp
+    ../../display/tests/physical_status_test.cpp
+    ../../display/tests/split_state_test.cpp
     ../../transport/tests/transport_manager_test.cpp
     ../../transport/tests/transport_sink_test.cpp
     ../../transport/tests/transport_pipeline_test.cpp

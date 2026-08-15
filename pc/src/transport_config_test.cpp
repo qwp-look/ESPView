@@ -165,12 +165,13 @@ void runConfigTests() {
         CHECK(cfg == before);
     }
 
-    // ---- 13. persistedSettingsKeys：恰好 5 个白名单键；结构上无凭据键 ----
+    // ---- 13. persistedSettingsKeys：恰好 9 个白名单键；结构上无凭据键 ----
     {
         const std::vector<std::string> keys = persistedSettingsKeys();
-        CHECK_EQ(keys.size(), 5u);
+        CHECK_EQ(keys.size(), 9u);
         const std::vector<std::string> expected = {
-            "transport/type", "uart/port", "uart/baud", "tcp/port", "window/size"};
+            "transport/type", "uart/port", "uart/baud", "tcp/port", "window/size",
+            "display/mode", "ui/language", "split/drawerVisible", "split/drawerWidth"};
         for (const std::string& k : expected) {
             bool found = false;
             for (const std::string& kk : keys) {

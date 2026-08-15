@@ -13,6 +13,9 @@ set_target_properties(espview_protocol PROPERTIES EXCLUDE_FROM_ALL TRUE)
 # M3：shared/input（InputEvent / InputCodec / InputManager / KeyboardMapper /
 # CoordinateMapper / InputPolicy）—— PC 与 ESP32 共用，零平台依赖。
 add_subdirectory(../shared/input input_build)
+# M7-C3：shared/display（DisplayUiState / PhysicalStatus / SplitState 纯模型，
+# 零平台依赖；GUI 目标链接后复用同一份源码）。
+add_subdirectory(../shared/display display_build)
 
 # ------------------------------------------------------------
 # M1-3B：com3_frame_test（真实 COM3 全模式验收工具，无 Qt）
@@ -52,6 +55,16 @@ if(ESPVIEW_BUILD_QT_GUI)
         src/display_frame.h
         src/serial_worker.cpp
         src/serial_worker.h
+        src/display_mode_widget.cpp
+        src/display_mode_widget.h
+        src/display_status_panel.cpp
+        src/display_status_panel.h
+        src/i18n.cpp
+        src/i18n.h
+        src/language_selector.cpp
+        src/language_selector.h
+        src/split_drawer.cpp
+        src/split_drawer.h
         src/virtual_screen_widget.cpp
         src/virtual_screen_widget.h
         src/connection_manager.cpp
@@ -71,6 +84,7 @@ if(ESPVIEW_BUILD_QT_GUI)
     target_link_libraries(espview_virtual_display PRIVATE
         espview_protocol
         espview_input
+        espview_display
         Qt6::Widgets
         Qt6::SerialPort
     )
@@ -81,6 +95,19 @@ if(ESPVIEW_BUILD_QT_GUI)
         target_compile_options(espview_virtual_display PRIVATE -Wall -Wextra -Wpedantic)
     endif()
 endif()
+
+# ------------------------------------------------------------
+# M7-C3：i18n host test（纯 C++17，零 Qt；独立 main）
+# ------------------------------------------------------------
+add_executable(i18n_test
+    src/i18n.cpp
+    src/i18n_test.cpp
+)
+target_include_directories(i18n_test PRIVATE src)
+if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+    target_compile_options(i18n_test PRIVATE -Wall -Wextra -Wpedantic)
+endif()
+add_test(NAME i18n_test COMMAND i18n_test)
 
 # ------------------------------------------------------------
 # M3：input_mapper_test（KeyboardMapper / CoordinateMapper / InputPolicy /

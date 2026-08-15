@@ -7,6 +7,9 @@ add_library(espview_display STATIC
     display_manager.cpp
     remote_display.cpp
     display_router.cpp
+    display_ui_state.cpp
+    physical_status.cpp
+    split_state.cpp
 )
 target_include_directories(espview_display PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}
