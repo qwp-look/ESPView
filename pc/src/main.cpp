@@ -80,6 +80,7 @@
 #include "serial_worker.h"
 #include "split_drawer.h"
 #include "physical_preview_widget.h"  // M7-D2：物理预览 widget
+#include "wifi_wizard_dialog.h"  // M7-D4：Wi-Fi 配网向导
 #include "transport_config.h"  // TransportConfig / validateTransportConfig（M6-D）
 #include "virtual_screen_widget.h"
 
@@ -1121,6 +1122,15 @@ private:
         fileMenu->addSeparator();
         quitAction_ = fileMenu->addAction(tr_("Quit"), QKeySequence::Quit, this,
                                           &QWidget::close);
+        // M7-D4：Wi-Fi 配网向导（模态；内部消费 M7-D3 信号，不切换 Transport）。
+        QMenu* toolsMenu = menuBar()->addMenu(tr_("Tools"));
+        toolsMenu->addAction(tr_("Wi-Fi Wizard"), this, &MainWindow::openWifiWizard);
+    }
+
+    void openWifiWizard() {
+        WifiWizardDialog dlg(manager_, this);
+        dlg.setUiLanguage(static_cast<int>(lang_));
+        dlg.exec();
     }
 
     VirtualScreenWidget* screen_ = nullptr;

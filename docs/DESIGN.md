@@ -2445,7 +2445,104 @@ GOT_IP → TCP handoff。**凭据只经 UART bootstrap 下发，绝不经 TCP �
 - 边界：TCP 构建下 provisioning 与 WifiSta 的驱动共存采用"外部已初始化即复用"
   策略；UART bootstrap → TCP handoff 的完整运行时切换（kTcpConnecting/
   kTcpConnected 相位、WifiSta 已初始化场景的 stop/set_config 冲突处理）留待
-  D6 集成阶段验证；D4 向导（WifiWizardState + i18n + Qt 接线）尚未接入。
+  D6 集成阶段验证；D4 向导（WifiWizardState + i18n + WifiWizardDialog）已接入，
+  见 AG 节（M7-D4）；UART→TCP 运行时切换仍留待 D6。
 - 验证：host 384,104+ checks / 0 failures（新增 wifi_provisioning 套件：布局/
   校验/解析/端点分发/发送/ACK_REQ 分派）；Qt 构建通过；ESP32（UART 生产
   配置）构建通过。真实硬件扫描/配网验收见 D6。
+
+
+## AG. M7-D4 Wizard UX（Wi-Fi 配网向导，2026-08-15 冻结）
+
+### AG.1 定位
+
+M7-D4 冻结 PC 侧 Wi-Fi 配网向导：UI 状态机 `WifiWizardState`（纯 C++17，
+零 Qt / 零 wire 依赖）+ Qt 接线 `WifiWizardDialog`。wire 交互**复用 AF 族**
+（WIFI_SCAN_REQ / WIFI_SCAN_RESULT / WIFI_CONFIG / WIFI_STATUS + ACK），
+向导不新增任何协议字段。向导只做 UI 编排与本地校验，不解析 wire 字节；
+不切换 Transport（UART bootstrap → TCP handoff 属 D6 集成）。
+
+### AG.2 步骤状态机
+
+`WizardStep`（数值序即向导主序；kDone / kError 为终态）：
+
+| 值 | 步骤 | 语义 |
+|---|---|---|
+| 0 | kInit | 初始页（向导说明 / UART bootstrap 准备） |
+| 1 | kConnectUart | Step 1：连接 ESP32（观察 statusChanged=Connected 自动前进） |
+| 2 | kReadCapabilities | Step 2：读取能力（观察 capabilitiesReceived 自动前进） |
+| 3 | kScan | Step 3：扫描 Wi-Fi（WIFI_SCAN_REQ → SCAN_RESULT 列表） |
+| 4 | kSelectSsid | Step 4：选择 SSID |
+| 5 | kPassword | Step 5：密码输入（空 = 开放网络） |
+| 6 | kTcpConfig | Step 6：TCP server 配置（IP + port） |
+| 7 | kApplying | Step 7：Apply（WIFI_CONFIG ACK ok → Step 8） |
+| 8 | kConnecting | Step 8：ESP32 连接中（WIFI_STATUS phase=5 GOT_IP → Step 9） |
+| 9 | kGotIp | Step 9：GOT_IP（phase=7 TCP Connected → Step 10） |
+| 10 | kTcpConnected | Step 10：TCP Connected（等待首帧 FULL） |
+| 11 | kFullResync | Step 11：FULL resync（TCP 连后首帧 FULL commit → Done） |
+| 12 | kDone | 成功（Close） |
+| 13 | kError | 失败（Retry / Cancel） |
+
+导航规则：
+
+- `next()`：kInit..kPassword 逐步骤本地校验前进（非法留在原步并返回
+  validationError）；kTcpConfig 必须走 `beginApply()`（Step 7 Apply）。
+- `back()`：kConnectUart..kTcpConfig 回退；kInit / Apply 后 / 终态不可 back。
+- `cancel()`：编辑态 / kError 可用 → 重置 kInit 并清空全部输入（含密码）。
+- `retry()`：kError → 回 retryStep（预 Apply 步回原步；Apply/异步步回
+  kTcpConfig 重新应用）。
+- 异步推进（仅协议回调驱动，每步只认前置步骤，否则 false 不变）：kApplying
+  → kConnecting（WIFI_CONFIG ACK ok）→ kGotIp（WIFI_STATUS phase=kGotIp）
+  → kTcpConnected（phase=kTcpConnected）→ kFullResync → kDone（TCP 连后
+  首帧 FULL commit）。
+
+输入校验（本地，与 AF.2 wire 校验同规则）：
+
+- SSID：1..32 可见字节（0x20..0x7E）；
+- 密码：空（开放网络）或 8..63 字节；
+- TCP server：IPv4 点分十进制严格校验 + port 1..65535。
+
+派生标志：`hasSsid / wifiPasswordValid / wifiOpenNetwork / tcpConfigValid /
+canApply`（实时由输入计算，无存储位可被篡改）。
+
+### AG.3 安全（凭据生命周期，与 AF.4 一致）
+
+- 密码仅驻留 QLineEdit + WifiWizardState 内存；`beginApply()` 成功后、
+  对话框关闭 / 取消 / 完成时立即清零；模型不提供任何密码序列化 API。
+- `toSettingsMap()` 只导出 tcpServerIp / tcpServerPort（可选 SSID metadata，
+  默认不导出）；QSettings 白名单**不含密码键**。
+- 开放网络显式勾选（Open network (no password)），空密码才允许 Apply。
+- 探针降级（AF.3）：老固件对 WIFI_SCAN_REQ 回 ACK ERR kInvalidParam →
+  向导标记 kScanFailed 并提示"固件不支持 Wi-Fi provisioning"，**不发真实
+  凭据**。
+- 明文风险声明继承 AF.4：SSID/password 经 UART 明文下发（CRC32 仅完整性），
+  M7-D 只能做局域网开发工具用途，**不宣称安全 provisioning**。
+
+### AG.4 边界
+
+- 不修改：Packet Header、CRC、AF 族 wire、ACK 语义。
+- 本阶段不实现：Transport 自动切换（UART bootstrap → TCP handoff）、TLS、
+  NVS 持久化、"Remember this network"（默认 OFF，SSID 默认也不保存）。
+- 步骤 8..11 的推进依赖 AF 信号；断线 / 超时经 `markError()` 收敛到 kError
+  （可 Retry）；无限等待强化（看门狗）列入 D6 集成。
+
+### AG.5 已实现（M7-D4，2026-08-15）
+
+- `pc/src/wifi_wizard_state.{h,cpp}`：纯 C++17 状态机（步骤 0..13、稳定错误码
+  1..17、步骤/错误 i18n key 目录、本地校验、toSettingsMap 无密码键）。
+- host 测试：`pc/src/wifi_wizard_state_test.cpp`（step flow / SSID / 密码 /
+  TCP 校验 / Apply 锁定 / 全流程 Done / 错误恢复 / toSettingsMap 无密码 /
+  key 完整性）登记进协议套件（`shared/protocol/tests/CMakeLists.txt` +
+  `test_main.cpp`）。
+- `pc/src/i18n.cpp`：新增 51 条 M7-D4 词条（步骤标题 / 错误 / 对话框文案，
+  en+zh）；`i18n_test` kRequired 钉死中英对照。
+- `pc/src/wifi_wizard_dialog.{h,cpp}`：Qt 向导对话框（QStackedWidget 10 页：
+  Init / ConnectUart / ReadCapabilities / Scan+列表 / SelectSSID / Password /
+  TCP Config / 异步状态 / Done / Error）；Scan → `sendWifiScanRequest(0)`，
+  Apply → `sendWifiConfig()`（密码发送后清零）；消费 ConnectionManager 的
+  wifiScanResult / wifiStatus / wifiScanReqAck / wifiConfigAck /
+  capabilitiesReceived / statusChanged / frameReady（queued）。
+- `pc/src/main.cpp`：Tools 菜单 → "Wi-Fi Wizard"（模态 exec）；`pc/CMakeLists.txt`
+  登记 dialog 与 wifi_wizard_state 源文件。
+- 验证：host 384,104+ checks / 0 failures（新增 wifi_wizard_state 套件）；
+  i18n_test 通过；Qt 构建通过。真实硬件向导全流程（Step 8..11）验收见 D6。

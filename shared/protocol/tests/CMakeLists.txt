@@ -31,6 +31,8 @@ add_executable(espview_protocol_tests
     ../../oled/tests/oled_preview_test.cpp
     ../../../pc/src/physical_preview_state.cpp
     ../../../pc/src/physical_preview_state_test.cpp
+    ../../../pc/src/wifi_wizard_state.cpp
+    ../../../pc/src/wifi_wizard_state_test.cpp
 )
 target_link_libraries(espview_protocol_tests PRIVATE espview_protocol espview_input espview_display espview_transport espview_oled)
 

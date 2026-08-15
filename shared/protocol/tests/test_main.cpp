@@ -33,6 +33,7 @@ void runOledTests();
 void runOledStatusTests();
 void runPhysicalRendererTests();
 void runPhysicalPreviewStateTests();
+void runWifiWizardStateTests();
 
 int main() {
     // 无缓冲：测试名实时输出，便于定位挂起/超时位置（与 pc 测试工具一致）。
@@ -96,6 +97,8 @@ int main() {
     runPhysicalRendererTests();
     std::printf("[physical_preview_state]\n");
     runPhysicalPreviewStateTests();
+    std::printf("[wifi_wizard_state]\n");
+    runWifiWizardStateTests();
     std::printf("----\nchecks: %d, failures: %d\n", espview::proto::test::gChecks,
                 espview::proto::test::gFailures);
     return espview::proto::test::gFailures == 0 ? 0 : 1;

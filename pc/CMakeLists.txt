@@ -69,6 +69,10 @@ if(ESPVIEW_BUILD_QT_GUI)
         src/physical_preview_state.h
         src/physical_preview_widget.cpp
         src/physical_preview_widget.h
+        src/wifi_wizard_state.cpp
+        src/wifi_wizard_state.h
+        src/wifi_wizard_dialog.cpp
+        src/wifi_wizard_dialog.h
         src/virtual_screen_widget.cpp
         src/virtual_screen_widget.h
         src/connection_manager.cpp
