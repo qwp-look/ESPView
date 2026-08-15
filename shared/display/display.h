@@ -26,6 +26,7 @@ enum class DisplayMode : uint8_t {
     kWindow = 0,  // RemoteDisplay（M5-A）
     kDevice = 1,  // HardwareDisplay（未来，stub）
     kMirror = 2,  // MirrorDisplay（未来，stub）
+    kSplit = 3,   // M7-C：additive wire 扩展（SET_MODE.mode=3）；0/1/2 值不变。
 };
 
 // 平台无关状态码。0 = OK（与 esp_err_t 的 ESP_OK==0 约定一致）；负值 = 错误。

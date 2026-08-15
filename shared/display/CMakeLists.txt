@@ -6,6 +6,7 @@ cmake_minimum_required(VERSION 3.16)
 add_library(espview_display STATIC
     display_manager.cpp
     remote_display.cpp
+    display_router.cpp
 )
 target_include_directories(espview_display PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}

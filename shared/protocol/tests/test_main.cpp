@@ -17,6 +17,7 @@ void runInputTests();
 void runLvglAdapterTests();
 void runRuntimeStatsTests();
 void runRemoteDisplayTests();
+void runDisplayRouterTests();
 void runTransportManagerTests();
 void runTransportSinkTests();
 void runTransportPipelineTests();
@@ -54,6 +55,8 @@ int main() {
     runRuntimeStatsTests();
     std::printf("[remote_display]\n");
     runRemoteDisplayTests();
+    std::printf("[display_router]\n");
+    runDisplayRouterTests();
     std::printf("[transport_manager]\n");
     runTransportManagerTests();
     std::printf("[transport_sink]\n");

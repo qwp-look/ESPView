@@ -14,6 +14,7 @@ add_executable(espview_protocol_tests
     lvgl_adapter_test.cpp
     runtime_stats_test.cpp
     ../../display/tests/remote_display_test.cpp
+    ../../display/tests/display_router_test.cpp
     ../../transport/tests/transport_manager_test.cpp
     ../../transport/tests/transport_sink_test.cpp
     ../../transport/tests/transport_pipeline_test.cpp

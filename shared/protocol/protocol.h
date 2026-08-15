@@ -75,6 +75,7 @@ enum class DisplayMode : uint8_t {
     kWindow = 0,
     kDevice = 1,
     kMirror = 2,
+    kSplit = 3,  // M7-C：additive wire 扩展；0/1/2 值不变。
 };
 
 // ---- 错误码（ACK.errorCode / ERROR.errorCode，DESIGN.md 控制消息 Layout）----
