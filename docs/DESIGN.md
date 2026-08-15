@@ -2546,3 +2546,56 @@ canApply`（实时由输入计算，无存储位可被篡改）。
   登记 dialog 与 wifi_wizard_state 源文件。
 - 验证：host 384,104+ checks / 0 failures（新增 wifi_wizard_state 套件）；
   i18n_test 通过；Qt 构建通过。真实硬件向导全流程（Step 8..11）验收见 D6。
+
+
+## AH. M7-D5 Build/Flash UX（2026-08-15 冻结）
+
+### AH.1 定位
+
+M7-D5 冻结 PC 侧构建 / 烧录工作流：把原先手工执行的 verify_host /
+verify_qt / ESP-IDF PowerShell profile + `idf.py` 多条命令收敛为一条批处理
+命令，统一参数、可读错误与稳定退出码。**不修改任何固件 / 协议 / Qt 代码**，
+只新增脚本与文档。
+
+### AH.2 脚本与参数
+
+| 脚本 | 作用 |
+| --- | --- |
+| `scripts\espview_build.bat` | 一次构建 host（复用 `verify_host.bat`）+ Qt（复用 `verify_qt.bat`）+ ESP32（`idf.py -B build\<profile> build`）；不带参数默认全做；`-host` / `-qt` / `-esp32` 指定子集；`-b <profile>` 选择构建目录（默认 `uart_hw`）；`--check` 只做 preflight |
+| `scripts\espview_flash.bat` | 经 ESP-IDF 环境调用 `idf.py -p <port> flash`；`-p COMx`（默认 COM4，裸数字 `4` = COM4）；`--no-reset` 映射为 esptool `--after no-reset`；`--dry-run` 只校验不烧录 |
+| `scripts\espview_build_flash.bat` | 构建 + 烧录组合，两类参数透传；退出码 = 首个失败步骤的码 |
+
+环境变量：`MINGW64_BIN`（默认 `C:\msys64\mingw64\bin`）、`ESPIDF_PROFILE`
+（默认 `C:\Espressif\tools\Microsoft.v6.0.2.PowerShell_profile.ps1`）。
+
+### AH.3 退出码
+
+- `espview_build.bat`：0 全过 / 1 构建测试失败 / 2 参数错误 / 3 preflight 失败。
+- `espview_flash.bat`：0 通过（含 dry-run）/ 2 参数错误 / 3 ESP-IDF 不可用 /
+  4 COM 口不存在 / 5 固件 bin 不存在 / 6 烧录失败。
+- 端口存在性用 `[System.IO.Ports.SerialPort]::GetPortNames()` 检查；
+  固件路径固定为 `esp32\build\<profile>\espview_esp32.bin`。
+
+### AH.4 安全
+
+- 三个脚本**从不读取或打印 `esp32\sdkconfig`**（已被 `.gitignore` 排除；
+  Wi-Fi SSID / 密码只存在于本地未跟踪 sdkconfig），也不把任何凭据写入文件。
+- 输出只显示固件 bin 路径与 profile 名，不打印环境变量 / sdkconfig 内容。
+
+### AH.5 边界
+
+- 本阶段不修改任何 Kconfig；profile = `esp32\build\<name>` 构建目录，
+  `-b` 只选择目录（`uart_hw` 为当前现成构建：UART、`ESPVIEW_DEFAULT_MODE=2`
+  Mirror、OLED、LVGL、TEST hooks；tcp_production / dev_uart 为规划中目录）。
+- 不自动配置 Wi-Fi；不读取 .bat 之外的任何用户凭据。
+
+### AH.6 已实现（M7-D5，2026-08-15）
+
+- 新增 `scripts\espview_build.bat` / `scripts\espview_flash.bat` /
+  `scripts\espview_build_flash.bat` / `scripts\README.md`（快速上手、参数、
+  退出码、FAQ、profile 说明、凭据隐私说明）。
+- 复用既有 `scripts\verify_host.bat` / `verify_qt.bat`（M2/M3 已存在）。
+- 验证：`espview_build.bat --check` → `espview_build: PREFLIGHT OK`（MSYS2
+  MinGW64 + ESP-IDF v6.0.2 profile 探测通过）；`espview_flash.bat --dry-run`
+  → validation passed（COM4 存在 + `esp32\build\uart_hw\espview_esp32.bin`
+  存在，未实际烧录）。真实烧录验收见 D6（板载 COM4 在线）。
