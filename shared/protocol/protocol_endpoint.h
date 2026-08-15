@@ -137,6 +137,13 @@ struct SessionStats {
     uint64_t rxPhysicalPreview = 0;      // 收到并通过 parsePhysicalPreview 的消息
     uint64_t txPhysicalPreview = 0;      // 发出成功的 PHYSICAL_PREVIEW（sendPhysicalPreview）
     uint64_t physicalPreviewDropped = 0; // 收到但 payload 非法（AE.3 诊断计数）
+    // M7-D3：Wi-Fi provisioning（TYPE 0x06..0x09）会话级计数。
+    uint64_t rxWifiScanResult = 0;       // 收到并通过 parseWifiScanResult 的消息
+    uint64_t txWifiScanResult = 0;       // 发出成功的 WIFI_SCAN_RESULT（sendWifiScanResult）
+    uint64_t wifiScanResultDropped = 0;  // 收到但 payload 非法（AF.3 诊断计数）
+    uint64_t rxWifiStatus = 0;           // 收到并通过 parseWifiStatus 的消息
+    uint64_t txWifiStatus = 0;           // 发出成功的 WIFI_STATUS（sendWifiStatus）
+    uint64_t wifiStatusDropped = 0;      // 收到但 payload 非法（AF.3 诊断计数）
 
     // ---- M4 心跳可观察（spec §五/§六）----
     uint64_t lastPingTimeMs = 0;    // 最近一次 PING 发送时刻（本端时钟）
@@ -192,6 +199,10 @@ public:
         // pixels 指向 msg.payload 的 [8..1032)，回调期间有效；pixelBytes=1024。
         std::function<void(const PhysicalPreviewInfo& info, const uint8_t* pixels,
                            size_t pixelBytes)> onPhysicalPreview;
+        // 收到并解析成功的 WIFI_SCAN_RESULT（M7-D3 AF.3；fire-and-forget，无 ACK_REQ）。
+        std::function<void(const WifiScanResultInfo& result)> onWifiScanResult;
+        // 收到并解析成功的 WIFI_STATUS（M7-D3 AF.3；fire-and-forget，无 ACK_REQ）。
+        std::function<void(const WifiStatusInfo& status)> onWifiStatus;
         // 未被会话层消费的消息（INPUT_*、未知类型等；诊断用）
         // （CAPABILITIES 由 onCapabilities 消费，M7-D1。）
         std::function<void(const Message& msg)> onOtherMessage;
@@ -236,6 +247,13 @@ public:
     // 主动发 PHYSICAL_PREVIEW（M7-D2 AE.3：fire-and-forget，不带 ACK_REQ）。
     // 违规字段（makePhysicalPreview 校验失败）→ kInvalidMessage。
     SendResult sendPhysicalPreview(const PhysicalPreviewInfo& info, const uint8_t* pixels);
+    // 主动发 WIFI_SCAN_RESULT（M7-D3 AF.3：fire-and-forget，不带 ACK_REQ）。
+    // 违规字段（makeWifiScanResult 校验失败）→ kInvalidMessage。内部走
+    // tryTransmit（非阻塞）：锁忙/背压整帧丢弃（状态流无重试价值）。
+    SendResult sendWifiScanResult(const WifiScanResultInfo& result);
+    // 主动发 WIFI_STATUS（M7-D3 AF.3：fire-and-forget，不带 ACK_REQ）。
+    // 违规字段（makeWifiStatus 校验失败）→ kInvalidMessage。同样走 tryTransmit。
+    SendResult sendWifiStatus(const WifiStatusInfo& status);
 
     // ---- 心跳/超时驱动（由上层定时调用，如每 100-200ms）----
     void tick();
@@ -260,6 +278,8 @@ private:
     void handleError(const Message& msg);
     void handleCapabilities(const Message& msg);
     void handlePhysicalPreview(const Message& msg);
+    void handleWifiScanResult(const Message& msg);
+    void handleWifiStatus(const Message& msg);
     void handleAckRequest(const Message& msg);
     FrameAssembler::Callbacks makeFrameCallbacks();
     void completeHandshake();

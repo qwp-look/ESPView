@@ -379,6 +379,37 @@ SendResult ProtocolEndpoint::sendPhysicalPreview(const PhysicalPreviewInfo& info
     return r;
 }
 
+SendResult ProtocolEndpoint::sendWifiScanResult(const WifiScanResultInfo& result) {
+    const auto msg = makeWifiScanResult(result.scanSeq, (result.flags & kWifiScanResultFlagTruncated) != 0,
+                                        result.total, result.records.data(), result.records.size());
+    if (!msg.has_value()) {
+        return SendResult::kInvalidMessage;
+    }
+    // AF.3：无 ACK_REQ（fire-and-forget）；仅 CONNECTED 可发送。与 PHYSICAL_PREVIEW
+    // 同策略：tryTransmit（非阻塞 + 尽力 sink），锁忙/背压整帧丢弃，绝不让会话任务
+    // 阻塞在长流式帧后（状态流无重试价值）。
+    const SendResult r = tryTransmit(*msg, /*requireConnected=*/true, /*isRetry=*/false);
+    if (r == SendResult::kOk) {
+        ++stats_.txWifiScanResult;
+    }
+    return r;
+}
+
+SendResult ProtocolEndpoint::sendWifiStatus(const WifiStatusInfo& status) {
+    const auto msg = makeWifiStatus(status.phase, status.errorCode, status.flags, status.rssi,
+                                    status.channel, status.ip, status.serverIp,
+                                    status.serverPort, status.ssid);
+    if (!msg.has_value()) {
+        return SendResult::kInvalidMessage;
+    }
+    // AF.3：fire-and-forget；仅 CONNECTED 可发送；tryTransmit 非阻塞（同上）。
+    const SendResult r = tryTransmit(*msg, /*requireConnected=*/true, /*isRetry=*/false);
+    if (r == SendResult::kOk) {
+        ++stats_.txWifiStatus;
+    }
+    return r;
+}
+
 SendResult ProtocolEndpoint::sendCapabilities(const CapabilitiesInfo& caps) {
     const auto msg = makeCapabilities(
         caps.virtualPresent, caps.physicalPresent, caps.width, caps.height,
@@ -498,6 +529,12 @@ void ProtocolEndpoint::handleMessage(const Message& msg) {
             return;
         case MessageType::kPhysicalPreview:
             handlePhysicalPreview(msg);
+            return;
+        case MessageType::kWifiScanResult:
+            handleWifiScanResult(msg);
+            return;
+        case MessageType::kWifiStatus:
+            handleWifiStatus(msg);
             return;
         case MessageType::kFrameBegin:
         case MessageType::kFrameRect:
@@ -663,6 +700,32 @@ void ProtocolEndpoint::handlePhysicalPreview(const Message& msg) {
     if (cb_.onPhysicalPreview) {
         cb_.onPhysicalPreview(info, msg.payload.data() + kPhysicalPreviewPixelOffset,
                               kPhysicalPreviewPixelBytes);
+    }
+}
+
+void ProtocolEndpoint::handleWifiScanResult(const Message& msg) {
+    // AF.3：短包/非法 payload 仅计数丢弃，不 failSession（状态流，与 PHYSICAL_PREVIEW 一致）。
+    WifiScanResultInfo info;
+    if (!parseWifiScanResult(BytesView(msg.payload.data(), msg.payload.size()), info)) {
+        ++stats_.wifiScanResultDropped;
+        return;
+    }
+    ++stats_.rxWifiScanResult;
+    if (cb_.onWifiScanResult) {
+        cb_.onWifiScanResult(info);
+    }
+}
+
+void ProtocolEndpoint::handleWifiStatus(const Message& msg) {
+    // AF.3：短包/非法 payload 仅计数丢弃，不 failSession。WIFI_STATUS 绝无密码字段。
+    WifiStatusInfo info;
+    if (!parseWifiStatus(BytesView(msg.payload.data(), msg.payload.size()), info)) {
+        ++stats_.wifiStatusDropped;
+        return;
+    }
+    ++stats_.rxWifiStatus;
+    if (cb_.onWifiStatus) {
+        cb_.onWifiStatus(info);
     }
 }
 

@@ -168,6 +168,15 @@ public:
     // 未连接时丢弃并计数，不发送（ACK 结果经 displayModeAck 回 GUI，queued）。
     void sendDisplayMode(uint8_t mode);
 
+    // M7-D3：GUI 线程调用，把 Wi-Fi 命令交给 Worker 线程异步发送（同 sendInput/
+    // sendDisplayMode 队列模式）。WIFI_SCAN_REQ（探针/扫描）与 WIFI_CONFIG（凭据，
+    // 103B）均带 ACK_REQ；ACK 结果经 wifiScanReqAck / wifiConfigAck 回 GUI（queued）。
+    // 安全（AF.4）：password 仅驻留本队列内存副本，Worker 发送后立即清零；不落
+    // 日志/持久化/UI。serverIp 须为网络序 u32（PC 侧 htonl 转换由调用方负责）。
+    void sendWifiScanRequest(uint8_t maxEntries);
+    void sendWifiConfig(const std::string& ssid, const std::string& password,
+                        uint32_t serverIp, uint16_t serverPort);
+
     // M7-C4 P1-2：当前传输会话 epoch（跨线程安全）。每次 runLoop 入口递增；
     // GUI 以此丢弃旧会话 stale 帧（switchTransport 后的残帧）。
     uint64_t sessionId() const { return sessionCounter_.load(); }
@@ -188,6 +197,15 @@ signals:
     // M7-D2：PHYSICAL_PREVIEW 帧快照（worker 线程 emit；含像素副本，QueuedConnection
     // 投递 GUI）。断线时 worker 发出清空后的快照（No Preview 语义）。
     void previewFrame(const espview::pc::PhysicalPreviewState& state);
+    // M7-D3：WIFI_SCAN_RESULT（ESP→PC，fire-and-forget；解析成功即 emit）。
+    void wifiScanResult(const espview::proto::WifiScanResultInfo& result);
+    // M7-D3：WIFI_STATUS（ESP→PC，fire-and-forget；解析成功即 emit；绝无密码字段）。
+    void wifiStatus(const espview::proto::WifiStatusInfo& status);
+    // M7-D3：WIFI_SCAN_REQ 的 ACK（ok=false 且 errorCode=kInvalidParam 时 = 老固件
+    // 不支持 Wi-Fi provisioning，GUI 应降级提示，不发真实凭据；AF.3 探针语义）。
+    void wifiScanReqAck(bool ok, quint16 errorCode);
+    // M7-D3：WIFI_CONFIG 的 ACK（ok=true 已接受并排队应用；false = ACK ERR / 重试耗尽）。
+    void wifiConfigAck(bool ok, quint16 errorCode);
 
 private:
     void runLoop();  // Worker 线程入口
@@ -197,9 +215,11 @@ private:
     void drainAndTick();
     void drainInputQueue();  // 仅 Worker 线程：编码并发送队列中的 InputEvent
     void drainDisplayModeQueue();  // 仅 Worker 线程：发送队列中的 Display Mode
+    void drainWifiQueue();    // M7-D3：发送队列中的 Wi-Fi 命令（发送后清零密码副本）
     void resetSessionCounters();  // M6-D：切换后清会话级统计（仅 stop() join 后调用）
     void clearInputQueue();       // M6-D：清空 GUI→Worker 输入队列（切换前调用）
     void clearDisplayModeQueue(); // M7-C3：清空 Display Mode 队列（切换前调用）
+    void clearWifiQueue();        // M7-D3：清空 Wi-Fi 命令队列（切换前调用）
     void emitStatus(WorkerStatus status, const QString& text);
     void emitStats();
     void pushDiag(proto::Severity severity, std::string source, std::string message);
@@ -263,6 +283,25 @@ private:
     uint64_t modeSent_ = 0;
     uint64_t modeDropped_ = 0;
 
+    // ---- M7-D3：Wi-Fi 命令队列（GUI → Worker；互斥保护）----
+    // 密码只驻留命令副本内存，发送后立即清零（AF.4）。
+    struct WifiCommand {
+        uint8_t kind = 0;  // 0=scan 1=config
+        uint8_t maxEntries = 0;   // scan：0=默认 32
+        std::string ssid;         // config：1..32 字节
+        std::string password;     // config：secret（发送后清零）
+        uint32_t serverIp = 0;    // config：网络序
+        uint16_t serverPort = 0;  // config：1..65535
+    };
+    std::mutex wifiMutex_;
+    std::vector<WifiCommand> wifiQueue_;
+    uint64_t wifiSent_ = 0;
+    uint64_t wifiDropped_ = 0;
+    // 最近一次成功发送的 ACK_REQ 控制消息类型（0=无；0x03 SET_MODE / 0x06
+    // WIFI_SCAN_REQ / 0x08 WIFI_CONFIG）。与 endpoint 单槽 pending ACK 对应：
+    // 最近发送者即等待 ACK 者（有序字节流保证先到先 ACK）。
+    uint8_t pendingAckKind_ = 0;
+
     // M7-D2：Physical Preview 快照（仅 Worker 线程访问；去重/过期/会话语义
     // 在模型内，GUI 只消费副本）。
     espview::pc::PhysicalPreviewState previewState_;
@@ -277,3 +316,6 @@ Q_DECLARE_METATYPE(espview::pc::WorkerStats)
 Q_DECLARE_METATYPE(espview::proto::CapabilitiesInfo)
 // M7-D2：PhysicalPreviewState（含 1KB 像素副本；queued 连接需要 metatype）。
 Q_DECLARE_METATYPE(espview::pc::PhysicalPreviewState)
+// M7-D3：Wi-Fi 消息解析结果（纯值类型，queued 连接需要 metatype；无 Qt 依赖）。
+Q_DECLARE_METATYPE(espview::proto::WifiScanResultInfo)
+Q_DECLARE_METATYPE(espview::proto::WifiStatusInfo)

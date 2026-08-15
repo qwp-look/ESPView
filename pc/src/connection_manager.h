@@ -56,6 +56,11 @@ public:
     // M7-C3：GUI 线程调用，转发给 SerialWorker 的 Display Mode 队列
     // （线程安全；未连接时 Worker 侧丢弃并计数，ACK 经 displayModeAck 回报）。
     void sendDisplayMode(uint8_t mode);
+    // M7-D3：GUI 线程调用，转发给 SerialWorker 的 Wi-Fi 命令队列（线程安全）。
+    // 凭据只经 UART bootstrap 下发（AF.4：绝不经 TCP）；Worker 发送后清零密码。
+    void sendWifiScanRequest(uint8_t maxEntries);
+    void sendWifiConfig(const std::string& ssid, const std::string& password,
+                        uint32_t serverIp, uint16_t serverPort);
     // M7-C4 P1-2：当前传输会话 epoch（透传 worker 计数器）。
     uint64_t sessionId() const { return worker_.sessionId(); }
 
@@ -72,6 +77,11 @@ signals:
     void capabilitiesReceived(const espview::proto::CapabilitiesInfo& caps);
     // M7-D2：PHYSICAL_PREVIEW 帧快照转发（Worker → GUI，queued）。
     void previewFrame(const espview::pc::PhysicalPreviewState& state);
+    // M7-D3：Wi-Fi 消息/ACK 转发（Worker → GUI，queued；D4 向导消费）。
+    void wifiScanResult(const espview::proto::WifiScanResultInfo& result);
+    void wifiStatus(const espview::proto::WifiStatusInfo& status);
+    void wifiScanReqAck(bool ok, quint16 errorCode);
+    void wifiConfigAck(bool ok, quint16 errorCode);
 
 private:
     SerialWorker worker_;

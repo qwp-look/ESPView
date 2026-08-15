@@ -1205,6 +1205,9 @@ int main(int argc, char** argv) {
     qRegisterMetaType<espview::pc::DisplayFrame>("espview::pc::DisplayFrame");
     // M7-D2：PhysicalPreviewState（queued 连接需要运行时注册）。
     qRegisterMetaType<espview::pc::PhysicalPreviewState>("espview::pc::PhysicalPreviewState");
+    // M7-D3：Wi-Fi 消息解析结果（queued 连接需要运行时注册；无 Qt 依赖类型）。
+    qRegisterMetaType<espview::proto::WifiScanResultInfo>("espview::proto::WifiScanResultInfo");
+    qRegisterMetaType<espview::proto::WifiStatusInfo>("espview::proto::WifiStatusInfo");
     qRegisterMetaType<espview::pc::DisplayRect>("espview::pc::DisplayRect");
     qRegisterMetaType<espview::pc::WorkerStats>("espview::pc::WorkerStats");
     qRegisterMetaType<espview::pc::WorkerStatus>("espview::pc::WorkerStatus");

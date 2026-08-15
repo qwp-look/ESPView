@@ -14,6 +14,7 @@ void runProtocolEndpointTests();
 void runEndpointConcurrencyTests();
 void runCapabilitiesTests();
 void runPhysicalPreviewTests();
+void runWifiProvisioningTests();
 void runOledPreviewTests();
 void runStreamingEncoderTests();
 void runInputTests();
@@ -59,6 +60,8 @@ int main() {
     runCapabilitiesTests();
     std::printf("[physical_preview]\n");
     runPhysicalPreviewTests();
+    std::printf("[wifi_provisioning]\n");
+    runWifiProvisioningTests();
     std::printf("[oled_preview]\n");
     runOledPreviewTests();
     std::printf("[streaming_encoder]\n");

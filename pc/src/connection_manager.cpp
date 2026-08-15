@@ -19,6 +19,15 @@ ConnectionManager::ConnectionManager(QObject* parent) : QObject(parent) {
     // M7-D2：PHYSICAL_PREVIEW 帧快照转发（与其它 Worker signal 同模式，queued）。
     connect(&worker_, &SerialWorker::previewFrame, this,
             &ConnectionManager::previewFrame);
+    // M7-D3：Wi-Fi 消息/ACK 转发（同模式，queued；D4 向导消费）。
+    connect(&worker_, &SerialWorker::wifiScanResult, this,
+            &ConnectionManager::wifiScanResult);
+    connect(&worker_, &SerialWorker::wifiStatus, this,
+            &ConnectionManager::wifiStatus);
+    connect(&worker_, &SerialWorker::wifiScanReqAck, this,
+            &ConnectionManager::wifiScanReqAck);
+    connect(&worker_, &SerialWorker::wifiConfigAck, this,
+            &ConnectionManager::wifiConfigAck);
 }
 
 ConnectionManager::~ConnectionManager() {
@@ -51,6 +60,15 @@ void ConnectionManager::sendInput(const espview::input::InputEvent& ev) {
 
 void ConnectionManager::sendDisplayMode(uint8_t mode) {
     worker_.sendDisplayMode(mode);
+}
+
+void ConnectionManager::sendWifiScanRequest(uint8_t maxEntries) {
+    worker_.sendWifiScanRequest(maxEntries);
+}
+
+void ConnectionManager::sendWifiConfig(const std::string& ssid, const std::string& password,
+                                       uint32_t serverIp, uint16_t serverPort) {
+    worker_.sendWifiConfig(ssid, password, serverIp, serverPort);
 }
 
 }  // namespace pc

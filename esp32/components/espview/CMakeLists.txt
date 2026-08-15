@@ -3,6 +3,7 @@ idf_component_register(
     SRCS
         "src/uart_transport.cpp"
         "src/wifi_sta.cpp"
+        "src/wifi_provisioning.cpp"
         "src/tcp_transport.cpp"
         "src/transport_manager.cpp"
         "${CMAKE_CURRENT_LIST_DIR}/../../../shared/transport/transport_manager.cpp"
@@ -20,6 +21,8 @@ idf_component_register(
         freertos
         esp_common
         log
+    PRIV_REQUIRES
+        esp_timer
 )
 
 # 编译要求：IDF 默认 -Wall -Werror（无 warning 验收）；C++ 标准至少 C++17。

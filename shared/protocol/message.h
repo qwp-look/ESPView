@@ -10,9 +10,11 @@
 
 #pragma once
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <optional>
+#include <string>
 #include <string_view>
 #include <vector>
 
@@ -145,6 +147,105 @@ std::optional<Message> makePhysicalPreview(uint16_t frameId, uint16_t width,
 // pixelFormat 白名单兜底（v0.1 唯一合法值 kMono1，未知值映射 kMono1，
 // 杜绝 UI 数值注入）；width/height 以 wire 字段为准（AE.2）。
 bool parsePhysicalPreview(BytesView payload, PhysicalPreviewInfo& out);
+
+// ---- Wi-Fi provisioning（TYPE 0x06..0x09）（M7-D3 AF.2 冻结 payload）----
+
+// AF.2 常量：SSID 1..32 字节；password 字段 64 字节定宽（0=开放网络，8..63 passphrase）；
+// WIFI_CONFIG 定长 103B；WIFI_SCAN_REQ 定长 2B；SCAN_RESULT record 42B、最多 64 条
+// （5 + 64*42 = 2693B ≤ 4096 单包上限）；WIFI_STATUS 17 + ssidLen(≤32) = 49B 上限。
+inline constexpr size_t kWifiSsidMaxBytes = 32;
+inline constexpr size_t kWifiPasswordFieldBytes = 64;
+inline constexpr size_t kWifiConfigPayloadSize = 103;
+inline constexpr size_t kWifiScanReqPayloadSize = 2;
+inline constexpr uint8_t kWifiScanReqMaxEntries = 64;
+inline constexpr size_t kWifiScanResultRecordBytes = 42;
+inline constexpr size_t kWifiScanResultMaxRecords = 64;
+inline constexpr size_t kWifiStatusMaxPayload = 49;
+// AF.2：WIFI_CONFIG.flags bit0 = CLEAR（清除凭据并断开）。
+inline constexpr uint8_t kWifiConfigFlagClear = 0x01;
+// AF.2：WIFI_SCAN_RESULT.flags bit0 = truncated。
+inline constexpr uint8_t kWifiScanResultFlagTruncated = 0x01;
+
+// SCAN_RESULT 单条 record（42B）解析结果（ssid 为可见字节 1..32，无 NUL）。
+struct WifiScanRecordInfo {
+    std::string ssid;                  // 1..32 可见字节
+    std::array<uint8_t, 6> bssid{};    // 原始 6 字节 BSSID
+    int8_t rssi = -128;                // dBm
+    uint8_t channel = 0;               // 1..14 / 0=未知
+    uint8_t authmode = 0;              // ESP-IDF wifi_auth_mode_t 0..8
+};
+
+// SCAN_RESULT 完整解析结果（≤64 条，RSSI 降序）。
+struct WifiScanResultInfo {
+    uint8_t scanSeq = 0;               // 响应 REQ 计数（回绕）
+    uint8_t count = 0;                 // records.size()（0..64）
+    uint8_t flags = 0;                 // bit0=truncated
+    uint16_t total = 0;                // 总可见 AP 数（含截断）
+    std::vector<WifiScanRecordInfo> records;  // count 条
+};
+
+// WIFI_CONFIG 解析结果（AF.2 103B）。password 为宿主内存副本（仅调用方持有，
+// 用后须清零；本结构绝不进入日志/持久化/UI）。
+struct WifiConfigInfo {
+    uint8_t flags = 0;                 // bit0=CLEAR
+    std::string ssid;                  // 1..32 可见字节
+    std::string password;              // 0（开放网络）或 8..63 字节
+    uint32_t serverIp = 0;             // 网络序 IPv4（禁 0.0.0.0）
+    uint16_t serverPort = 0;           // 1..65535
+};
+
+// WIFI_STATUS 解析结果（AF.2；绝无密码字段）。
+struct WifiStatusInfo {
+    uint8_t phase = 0;                 // WifiStatusPhase
+    uint16_t errorCode = 0;            // ErrorCode（0=无）
+    uint8_t flags = 0;                 // 保留
+    int8_t rssi = -128;                // dBm（-128=无）
+    uint8_t channel = 0;               // 0=无
+    uint32_t ip = 0;                   // 本机 IPv4（网络序）
+    uint32_t serverIp = 0;             // 目标 server IPv4（网络序）
+    uint16_t serverPort = 0;           // LE
+    uint8_t ssidLen = 0;               // 0..32
+    std::string ssid;                  // 当前网络名（非 secret metadata）
+};
+
+// 构造 WIFI_SCAN_REQ（0x06，必须 ACK_REQ，2B）。flags 保留位必须为 0；
+// maxEntries 0=默认32 或 1..64。违规返回 nullopt。
+std::optional<Message> makeWifiScanReq(uint8_t flags, uint8_t maxEntries);
+
+// 解析 WIFI_SCAN_REQ（定长 2B）。
+bool parseWifiScanReq(BytesView payload, uint8_t& flags, uint8_t& maxEntries);
+
+// 构造 WIFI_SCAN_RESULT（0x07，fire-and-forget，无 ACK_REQ，≤2693B）。
+// count = records 条数（0..64）；records 为 null 时 count 必须为 0；
+// 每条 ssid 须 1..32 可见字节、authmode 0..8。违规返回 nullopt。
+std::optional<Message> makeWifiScanResult(uint8_t scanSeq, bool truncated, uint16_t total,
+                                          const WifiScanRecordInfo* records, size_t count);
+
+// 解析 WIFI_SCAN_RESULT：payload ≥ 5 + count*42（尾部忽略）；count > 64 → false。
+bool parseWifiScanResult(BytesView payload, WifiScanResultInfo& out);
+
+// 构造 WIFI_CONFIG（0x08，必须 ACK_REQ，103B）。ssid 1..32 字节；
+// password 0（开放网络）或 8..63 字节；serverIp 网络序且不得为 0；serverPort 1..65535。
+// 违规返回 nullopt（含 1..7 字节短密码与 64 字节 raw-PSK——v0.1 不实现）。
+std::optional<Message> makeWifiConfig(std::string_view ssid, std::string_view password,
+                                      uint32_t serverIp, uint16_t serverPort);
+
+// 构造 WIFI_CONFIG CLEAR（0x08，flags bit0=1，103B，其余字段全 0；必须 ACK_REQ）。
+Message makeWifiClear();
+
+// 解析 WIFI_CONFIG（定长 103B，尾部忽略）。password 拷贝进 out 供调用方
+// 用后清零（本函数不落任何日志/持久化）。
+bool parseWifiConfig(BytesView payload, WifiConfigInfo& out);
+
+// 构造 WIFI_STATUS（0x09，fire-and-forget，无 ACK_REQ，17+ssidLen ≤49B）。
+// phase 白名单 0..9；ssid 0..32 可见字节。违规返回 nullopt。
+std::optional<Message> makeWifiStatus(uint8_t phase, uint16_t errorCode, uint8_t flags,
+                                      int8_t rssi, uint8_t channel, uint32_t ip,
+                                      uint32_t serverIp, uint16_t serverPort,
+                                      std::string_view ssid);
+
+// 解析 WIFI_STATUS：payload ≥ 17 + ssidLen（尾部忽略）；ssidLen > 32 → false。
+bool parseWifiStatus(BytesView payload, WifiStatusInfo& out);
 
 // 构造 CAPABILITIES（AD.2 布局；无 ACK_REQ，fire-and-forget）。违规输入返回 nullopt：
 //   width/height 须 1..4096；physWidth/physHeight 0=未知 或 1..4096；

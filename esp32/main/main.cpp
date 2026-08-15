@@ -16,6 +16,8 @@
 #include <atomic>
 #include <cstdint>
 #include <cstdio>
+#include <cstring>
+#include <string>
 #include <vector>
 
 #include "esp_log.h"
@@ -33,6 +35,7 @@
 #include "display_router.h"              // M7-C2：DisplayRouter / PhysicalScene（shared/display）
 #include "espview/tcp_transport.hpp"
 #include "espview/uart_transport.hpp"
+#include "espview/wifi_provisioning.hpp"
 #include "transport_manager.h"           // shared/transport：TransportManager
 #include "transport_sink.h"              // shared/transport：TransportSink（paced/unpaced 统一收口）
 #include "espview/transport_manager.hpp" // ESP32 UART/TCP adapter（旧 ITransport -> 新 ITransport）
@@ -126,6 +129,8 @@ TaskHandle_t g_statsTask = nullptr;
 
 // g_endpoint / g_testPattern / g_lvgl / monotonicMs 定义在文件下方；回调与 sink 提前引用需要前向声明。
 extern ProtocolEndpoint g_endpoint;
+// M7-D3：Wi-Fi Provisioning 全局（定义在 g_endpoint 之后；ACK 回调提前引用）。
+extern WifiProvisioning g_wifiProv;
 #if CONFIG_ESPVIEW_APP_LVGL
 extern std::unique_ptr<espview::LvglPort> g_lvgl;
 #else
@@ -412,6 +417,88 @@ void onSetModeRequest(uint8_t type, const std::vector<uint8_t>& payload, uint16_
     g_endpoint.acknowledge(ackSeq, 0, ErrorCode::kNone);
 }
 
+// ---- M7-D3：Wi-Fi Provisioning 请求处理（AF.2/AF.3）----
+// WIFI_SCAN_REQ：ACK OK = 已接受并排队扫描（结果经 WIFI_SCAN_RESULT 异步到达）；
+// ACK ERR = 非法参数（探针场景下老固件同样回 ERR，PC 据此降级，不发真实凭据）。
+void onWifiScanReqRequest(uint8_t type, const std::vector<uint8_t>& payload, uint16_t ackSeq) {
+    if (type != static_cast<uint8_t>(MessageType::kWifiScanReq) || payload.size() != 2) {
+        g_endpoint.acknowledge(ackSeq, 1, ErrorCode::kInvalidParam);
+        return;
+    }
+    const uint8_t flags = payload[0];
+    const uint8_t maxEntries = payload[1];
+    if (flags != 0 || maxEntries > 64) {
+        g_endpoint.acknowledge(ackSeq, 1, ErrorCode::kInvalidParam);
+        return;
+    }
+    g_wifiProv.requestScan(maxEntries);
+    g_endpoint.acknowledge(ackSeq, 0, ErrorCode::kNone);
+}
+
+// WIFI_CONFIG（103B，含密码明文）。AF.3：ACK ERR → 不上报成功、不落存储。
+// AF.4 安全：payload 中的凭据经 parseWifiConfig 拷贝到 info 后，本函数内所有
+// 本地副本（info.password）在处理后立即清零；请求副本由 WifiProvisioning
+// 复制到 RAM 并在应用后清零（消息缓冲由 Decoder 覆写，本处不可写）。
+void onWifiConfigRequest(uint8_t type, const std::vector<uint8_t>& payload, uint16_t ackSeq) {
+    if (type != static_cast<uint8_t>(MessageType::kWifiConfig) ||
+        payload.size() < kWifiConfigPayloadSize) {
+        g_endpoint.acknowledge(ackSeq, 1, ErrorCode::kInvalidParam);
+        return;
+    }
+    WifiConfigInfo info;
+    if (!parseWifiConfig(BytesView(payload.data(), payload.size()), info)) {
+        g_endpoint.acknowledge(ackSeq, 1, ErrorCode::kInvalidParam);
+        return;
+    }
+    if ((info.flags & kWifiConfigFlagClear) != 0) {
+        g_wifiProv.requestClear();
+        g_endpoint.acknowledge(ackSeq, 0, ErrorCode::kNone);
+        return;
+    }
+    // 校验与 makeWifiConfig 同规则（ssid 1..32；password 0 或 8..63；serverIp 非 0；
+    // serverPort 1..65535）。
+    const bool ok = !info.ssid.empty() && info.ssid.size() <= kWifiSsidMaxBytes &&
+                    (info.password.empty() ||
+                     (info.password.size() >= 8 && info.password.size() <= 63)) &&
+                    info.serverIp != 0 && info.serverPort != 0;
+    if (!ok) {
+        // 清零后 ACK ERR（不留凭据副本）。
+        if (!info.password.empty()) {
+            std::memset(info.password.data(), 0, info.password.size());
+        }
+        g_endpoint.acknowledge(ackSeq, 1, ErrorCode::kInvalidParam);
+        return;
+    }
+    g_wifiProv.requestConfig(info.ssid.data(), info.ssid.size(), info.password.data(),
+                             info.password.size(), info.serverIp, info.serverPort);
+    // 安全：立即清零本地密码副本（AF.4）。
+    if (!info.password.empty()) {
+        std::memset(info.password.data(), 0, info.password.size());
+        info.password.clear();
+    }
+    g_endpoint.acknowledge(ackSeq, 0, ErrorCode::kNone);
+}
+
+// ACK_REQ 控制消息按 type 分派（v0.1：SET_MODE / WIFI_SCAN_REQ / WIFI_CONFIG）。
+// 未知类型 → 确定性 ACK ERR kInvalidParam（AF.3：PC 探针据此识别不支持）。
+void onAckRequestDispatcher(uint8_t type, const std::vector<uint8_t>& payload,
+                            uint16_t ackSeq) {
+    switch (static_cast<MessageType>(type)) {
+        case MessageType::kSetMode:
+            onSetModeRequest(type, payload, ackSeq);
+            return;
+        case MessageType::kWifiScanReq:
+            onWifiScanReqRequest(type, payload, ackSeq);
+            return;
+        case MessageType::kWifiConfig:
+            onWifiConfigRequest(type, payload, ackSeq);
+            return;
+        default:
+            g_endpoint.acknowledge(ackSeq, 1, ErrorCode::kInvalidParam);
+            return;
+    }
+}
+
 void onAck(uint16_t ackSeq, uint8_t status, ErrorCode errorCode) {
     ESP_LOGI(kTag, "ACK seq=%u status=%u err=%u", static_cast<unsigned>(ackSeq),
              static_cast<unsigned>(status), static_cast<unsigned>(errorCode));
@@ -661,6 +748,8 @@ void sessionLoop(void*) {
         }
 #endif
         g_endpoint.tick();
+        // M7-D3：Wi-Fi Provisioning 相位机（命令/扫描结果/状态去重；非阻塞回调）。
+        g_wifiProv.tick(monotonicMs());
 #if CONFIG_ESPVIEW_OLED_ENABLE
         // M7-D2（AE.3）：2Hz 节拍发送 Physical Preview（内部 tryTransmit，非阻塞）。
         if (g_oled && g_endpoint.state() == SessionState::kConnected) {
@@ -846,7 +935,7 @@ ProtocolEndpoint::Callbacks kEndpointCallbacks = [] {
     c.onFrameCommit = onFrameCommit;
     c.onFrameDiscard = onFrameDiscard;
     c.onHello = onHello;
-    c.onAckRequest = onSetModeRequest;
+    c.onAckRequest = onAckRequestDispatcher;  // M7-D3：SET_MODE / WIFI_SCAN_REQ / WIFI_CONFIG
     c.onAck = onAck;
     c.onError = onError;
     c.onOtherMessage = onOtherMessage;  // M3：INPUT_* 输入通道
@@ -854,6 +943,49 @@ ProtocolEndpoint::Callbacks kEndpointCallbacks = [] {
 }();
 
 ProtocolEndpoint g_endpoint(kEndpointCfg, transportSink, trySink, kEndpointCallbacks, monotonicMs);
+
+// ---- M7-D3：Wi-Fi Provisioning（UART bootstrap）----
+// 状态/扫描结果回调在会话任务 tick 上下文执行（非阻塞 tryTransmit 发送：
+// sendWifiStatus/sendWifiScanResult 内部背压整帧丢弃，绝不阻塞 sessionLoop）。
+WifiProvisioning g_wifiProv(WifiProvisioning::Callbacks{
+    [](const WifiProvStatus& st) {
+        WifiStatusInfo info;
+        info.phase = st.phase;
+        info.errorCode = st.errorCode;
+        info.flags = st.flags;
+        info.rssi = st.rssi;
+        info.channel = st.channel;
+        info.ip = st.ip;
+        info.serverIp = st.serverIp;
+        info.serverPort = st.serverPort;
+        info.ssidLen = st.ssidLen;
+        if (st.ssidLen > 0) {
+            info.ssid.assign(st.ssid, st.ssid + st.ssidLen);
+        }
+        g_endpoint.sendWifiStatus(info);
+    },
+    [](uint8_t scanSeq, bool truncated, uint16_t total,
+       const WifiProvScanRecord* records, size_t count) {
+        WifiScanResultInfo result;
+        result.scanSeq = scanSeq;
+        result.total = total;
+        if (truncated) {
+            result.flags |= kWifiScanResultFlagTruncated;
+        }
+        result.records.reserve(count);
+        for (size_t i = 0; i < count; ++i) {
+            WifiScanRecordInfo rec;
+            const size_t n = std::strlen(records[i].ssid);
+            rec.ssid.assign(records[i].ssid, records[i].ssid + n);
+            std::memcpy(rec.bssid.data(), records[i].bssid, 6);
+            rec.rssi = records[i].rssi;
+            rec.channel = records[i].channel;
+            rec.authmode = records[i].authmode;
+            result.records.push_back(std::move(rec));
+        }
+        result.count = static_cast<uint8_t>(result.records.size());
+        g_endpoint.sendWifiScanResult(result);
+    }});
 
 #include "esp_heap_caps.h"  // heap_caps_get_largest_free_block / MALLOC_CAP_DEFAULT
 #include "esp_system.h"     // esp_get_free_heap_size / esp_get_minimum_free_heap_size

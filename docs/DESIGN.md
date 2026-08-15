@@ -2407,3 +2407,45 @@ GOT_IP → TCP handoff。**凭据只经 UART bootstrap 下发，绝不经 TCP �
 - 不修改：Packet Header、CRC、HELLO、SET_MODE、Frame 语义、CAPABILITIES。
 - 本阶段不实现 NVS 持久化、不实现 TLS、不做 AP outage 测试（用户明确禁止）。
 - 新增错误码 5..12 为 additive 扩展（不影响既有 0..4）。
+
+### AF.6 已实现（M7-D3，2026-08-15）
+
+- shared/protocol：新增 TYPE `0x06 WIFI_SCAN_REQ` / `0x07 WIFI_SCAN_RESULT` /
+  `0x08 WIFI_CONFIG` / `0x09 WIFI_STATUS` 与 ErrorCode 5..12、WifiStatusPhase
+  0..9；builders/parsers（`make/parseWifiScanReq`（2B）、`make/parseWifiConfig`
+  （103B，CLEAR 位）、`make/parseWifiScanResult`（5+42N ≤2693B，≤64 条）、
+  `make/parseWifiStatus`（17+ssidLen ≤49B，绝无密码字段））；serverIp 网络序、
+  serverPort LE；SSID/password 定长 NUL 填充。
+- ProtocolEndpoint：`kWifiScanResult`/`kWifiStatus` 分派（非法 payload 仅计数
+  dropped，不 failSession）；`onWifiScanResult`/`onWifiStatus` 回调；
+  `sendWifiScanResult()`/`sendWifiStatus()` 走 tryTransmit（非阻塞；锁忙/背压
+  整帧丢弃，AF.3）；统计 rx/tx/dropped。`WIFI_SCAN_REQ`/`WIFI_CONFIG`（ACK_REQ）
+  经既有 handleAckRequest → onAckRequest 分派（应用层按 type 路由）。
+- ESP32：新增 `espview/wifi_provisioning.hpp/.cpp`（espview 组件）：
+  懒初始化 Wi-Fi（RAM 存储；`esp_wifi_init` 已被 TcpTransport/WifiSta 占用时
+  复用驱动、不建第二个 netif）；扫描（`esp_wifi_scan_start` → SCAN_DONE →
+  会话任务取数、RSSI 降序 top-N≤64）；配置应用（`esp_wifi_stop→set_config→
+  start→connect`，AF.4 重连流程）；CLEAR（清零凭据 + 断开）；状态机
+  IDLE/SCANNING/CONFIG_APPLYING/WIFI_CONNECTING/WIFI_CONNECTED/GOT_IP/
+  ERROR/CLEARED + 去重状态回调；错误映射（认证类 reason→kAuthFailed、
+  NO_AP_FOUND→kApNotFound、限时无 IP→kDhcpTimeout、API 失败→kApiError）。
+  main.cpp：onAckRequest 按 type 分派（SET_MODE / WIFI_SCAN_REQ / WIFI_CONFIG，
+  未知→ACK ERR kInvalidParam）；sessionLoop 每 200ms `g_wifiProv.tick()`；
+  状态/扫描结果回调经 `sendWifiStatus`/`sendWifiScanResult` 上行（非阻塞）。
+  凭据：接收→RAM 副本→应用后清零本地副本（含消息缓冲内 WifiConfigInfo 副本），
+  日志只记 SSID 长度，绝不打印/上报密码。
+- PC：SerialWorker 新增 Wi-Fi 命令队列（sendWifiScanRequest/sendWifiConfig，
+  密码发送后立即清零）→ pumpLoop drain；`wifiScanResult`/`wifiStatus`/
+  `wifiScanReqAck`/`wifiConfigAck` 信号（queued）+ ConnectionManager 透传；
+  ACK 按最近发送的 ACK_REQ 类型分派（SET_MODE→displayModeAck，
+  WIFI_SCAN_REQ→wifiScanReqAck 探针语义，WIFI_CONFIG→wifiConfigAck）；
+  onAckTimeout 同规则分派失败。探针降级（AF.3）：老固件对未知 ACK_REQ 回
+  ACK ERR → wifiScanReqAck(ok=false, err) → D4 提示"固件不支持 Wi-Fi
+  provisioning"，不发真实凭据。
+- 边界：TCP 构建下 provisioning 与 WifiSta 的驱动共存采用"外部已初始化即复用"
+  策略；UART bootstrap → TCP handoff 的完整运行时切换（kTcpConnecting/
+  kTcpConnected 相位、WifiSta 已初始化场景的 stop/set_config 冲突处理）留待
+  D6 集成阶段验证；D4 向导（WifiWizardState + i18n + Qt 接线）尚未接入。
+- 验证：host 384,104+ checks / 0 failures（新增 wifi_provisioning 套件：布局/
+  校验/解析/端点分发/发送/ACK_REQ 分派）；Qt 构建通过；ESP32（UART 生产
+  配置）构建通过。真实硬件扫描/配网验收见 D6。

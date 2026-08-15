@@ -46,6 +46,10 @@ enum class MessageType : uint8_t {
     kSetMode        = 0x03,  // PC→ESP，必须 ACK_REQ
     kSetResolution  = 0x04,  // 未来
     kSetPixelFormat = 0x05,  // 未来
+    kWifiScanReq    = 0x06,  // PC→ESP（M7-D3，必须 ACK_REQ）
+    kWifiScanResult = 0x07,  // ESP→PC（M7-D3，fire-and-forget）
+    kWifiConfig     = 0x08,  // PC→ESP（M7-D3，必须 ACK_REQ）
+    kWifiStatus     = 0x09,  // ESP→PC（M7-D3，fire-and-forget，绝无密码字段）
     kFrameBegin     = 0x10,  // ESP→PC
     kFrameRect      = 0x11,  // ESP→PC
     kFrameEnd       = 0x12,  // ESP→PC
@@ -89,6 +93,29 @@ enum class ErrorCode : uint16_t {
     kInvalidParam    = 2,
     kBusy            = 3,
     kInternal        = 4,
+    // M7-D3（AF.2）：Wi-Fi provisioning 错误码 5..12（additive 扩展，不影响 0..4）。
+    kScanFailed      = 5,   // esp_wifi_scan_start 失败 / 无结果
+    kAuthFailed      = 6,   // WPA/WPA2 认证失败（STA_DISCONNECTED 认证类 reason）
+    kApNotFound      = 7,   // 目标 AP 未找到（STA_DISCONNECTED NO_AP_FOUND）
+    kDhcpTimeout     = 8,   // 连接后限时未获 GOT_IP
+    kNotConfigured   = 9,   // 需要凭据/服务器配置但当前为空
+    kServerUnreachable = 10, // TCP server 不可达（D6 握手期使用）
+    kStorageError    = 11,  // 凭据/存储操作失败
+    kApiError        = 12,  // 其余 ESP-IDF API 失败
+};
+
+// ---- Wi-Fi 状态相位（WIFI_STATUS.phase，AF.2；数值冻结）----
+enum class WifiStatusPhase : uint8_t {
+    kIdle           = 0,
+    kScanning       = 1,
+    kConfigApplying = 2,
+    kWifiConnecting = 3,
+    kWifiConnected  = 4,
+    kGotIp          = 5,
+    kTcpConnecting  = 6,
+    kTcpConnected   = 7,
+    kError          = 8,
+    kCleared        = 9,
 };
 
 }  // namespace proto

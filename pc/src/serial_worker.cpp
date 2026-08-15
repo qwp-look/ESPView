@@ -4,6 +4,7 @@
 
 #include <chrono>
 #include <cstdio>
+#include <optional>
 #include <utility>
 
 #include <protocol_endpoint.h>
@@ -70,6 +71,7 @@ bool SerialWorker::switchTransport(const TransportConfig& cfg) {
     //    §十二：不保留旧 Transport 残留字节，避免 stale 解析）。
     clearInputQueue();
     clearDisplayModeQueue();
+    clearWifiQueue();  // M7-D3：清 Wi-Fi 命令（含未发送的密码副本）
     {
         std::lock_guard<std::mutex> lk(rxMutex_);
         rxBuf_.clear();
@@ -364,16 +366,41 @@ void SerialWorker::runLoop() {
             emit previewFrame(previewState_);
         }
     };
-    // M7-C3：SET_MODE 是 v0.1 唯一 ACK_REQ 控制消息，因此所有 ACK 结果都是
-    // Display Mode 的 ACK。onAckTimeout（重试耗尽）同样按失败上报。
+    // M7-D3：WIFI_SCAN_RESULT / WIFI_STATUS 解析成功 → 原样转发 GUI（queued；
+    // 消费接线在 main.cpp/ConnectionManager，D4 向导消费）。
+    cb.onWifiScanResult = [this](const proto::WifiScanResultInfo& result) {
+        emit wifiScanResult(result);
+    };
+    cb.onWifiStatus = [this](const proto::WifiStatusInfo& status) {
+        emit wifiStatus(status);
+    };
+    // M7-D3：ACK 按最近一次发送的 ACK_REQ 类型分派（endpoint 单槽 pending ACK：
+    // 最近发送者即等待 ACK 者；有序字节流保证先到先 ACK，无跨类型串扰）。
+    // SET_MODE → displayModeAck；WIFI_SCAN_REQ → wifiScanReqAck（探针语义）；
+    // WIFI_CONFIG → wifiConfigAck。onAckTimeout（重试耗尽）同样按类型分派失败。
     cb.onAck = [this](uint16_t ackSeq, uint8_t status, proto::ErrorCode errorCode) {
         (void)ackSeq;
-        (void)errorCode;
-        emit displayModeAck(status == 0);
+        const uint8_t kind = pendingAckKind_;
+        pendingAckKind_ = 0;  // 单槽：ACK 到达即清（防重复 ACK 二次上报）
+        if (kind == static_cast<uint8_t>(proto::MessageType::kSetMode)) {
+            emit displayModeAck(status == 0);
+        } else if (kind == static_cast<uint8_t>(proto::MessageType::kWifiScanReq)) {
+            emit wifiScanReqAck(status == 0, static_cast<quint16>(errorCode));
+        } else if (kind == static_cast<uint8_t>(proto::MessageType::kWifiConfig)) {
+            emit wifiConfigAck(status == 0, static_cast<quint16>(errorCode));
+        }
     };
     cb.onAckTimeout = [this](uint16_t lastSeq) {
         (void)lastSeq;
-        emit displayModeAck(false);
+        const uint8_t kind = pendingAckKind_;
+        pendingAckKind_ = 0;
+        if (kind == static_cast<uint8_t>(proto::MessageType::kSetMode)) {
+            emit displayModeAck(false);
+        } else if (kind == static_cast<uint8_t>(proto::MessageType::kWifiScanReq)) {
+            emit wifiScanReqAck(false, 0);
+        } else if (kind == static_cast<uint8_t>(proto::MessageType::kWifiConfig)) {
+            emit wifiConfigAck(false, 0);
+        }
     };
 
     ep_ = std::make_unique<proto::ProtocolEndpoint>(cfg, sink, cb, steadyMs);
@@ -552,6 +579,7 @@ void SerialWorker::pumpLoop(uint64_t openAtMs) {
         // 不引入额外锁。发送走 endpoint.sendMessage（sendMutex_ 原子整消息）。
         drainInputQueue();
         drainDisplayModeQueue();  // M7-C3：Display Mode（SET_MODE）队列同线程 drain
+        drainWifiQueue();     // M7-D3：Wi-Fi 命令（SCAN_REQ / CONFIG）同线程 drain
 
         if (now - lastStatsMs >= 500) {
             lastStatsMs = now;
@@ -626,6 +654,80 @@ void SerialWorker::sendDisplayMode(uint8_t mode) {
 void SerialWorker::clearDisplayModeQueue() {
     std::lock_guard<std::mutex> lk(modeMutex_);
     displayModeQueue_.clear();
+}
+
+// ---- M7-D3：Wi-Fi 命令队列 ----
+
+void SerialWorker::sendWifiScanRequest(uint8_t maxEntries) {
+    WifiCommand cmd;
+    cmd.kind = 0;  // scan
+    cmd.maxEntries = maxEntries;
+    std::lock_guard<std::mutex> lk(wifiMutex_);
+    wifiQueue_.push_back(std::move(cmd));
+}
+
+void SerialWorker::sendWifiConfig(const std::string& ssid, const std::string& password,
+                                  uint32_t serverIp, uint16_t serverPort) {
+    WifiCommand cmd;
+    cmd.kind = 1;  // config
+    cmd.ssid = ssid;
+    cmd.password = password;  // 仅内存驻留（AF.4）；发送后 drain 清零
+    cmd.serverIp = serverIp;
+    cmd.serverPort = serverPort;
+    std::lock_guard<std::mutex> lk(wifiMutex_);
+    wifiQueue_.push_back(std::move(cmd));
+}
+
+void SerialWorker::clearWifiQueue() {
+    std::lock_guard<std::mutex> lk(wifiMutex_);
+    for (WifiCommand& cmd : wifiQueue_) {
+        if (!cmd.password.empty()) {
+            std::fill(cmd.password.begin(), cmd.password.end(), '\0');
+        }
+    }
+    wifiQueue_.clear();
+}
+
+void SerialWorker::drainWifiQueue() {
+    std::vector<WifiCommand> queue;
+    {
+        std::lock_guard<std::mutex> lk(wifiMutex_);
+        if (wifiQueue_.empty()) {
+            return;
+        }
+        queue.swap(wifiQueue_);
+    }
+    if (!ep_) {
+        wifiDropped_ += queue.size();
+        return;
+    }
+    for (WifiCommand& cmd : queue) {
+        // 未连接时丢弃并计数（同 sendInput 语义）；密码副本仍须清零。
+        bool sent = false;
+        if (ep_->isConnected()) {
+            std::optional<proto::Message> msg;
+            if (cmd.kind == 0) {
+                msg = proto::makeWifiScanReq(0, cmd.maxEntries);
+            } else {
+                msg = proto::makeWifiConfig(cmd.ssid, cmd.password, cmd.serverIp,
+                                            cmd.serverPort);
+            }
+            if (msg.has_value() &&
+                ep_->sendMessage(*msg) == proto::SendResult::kOk) {
+                sent = true;
+                ++wifiSent_;
+                // 记录最近 ACK_REQ 类型（单槽 pending ACK 归属）。
+                pendingAckKind_ = msg->type;
+            }
+        }
+        if (!sent) {
+            ++wifiDropped_;
+        }
+        // 安全（AF.4）：发送/丢弃后立即清零密码副本（不进入任何持久化路径）。
+        if (!cmd.password.empty()) {
+            std::fill(cmd.password.begin(), cmd.password.end(), '\0');
+        }
+    }
 }
 
 void SerialWorker::drainDisplayModeQueue() {

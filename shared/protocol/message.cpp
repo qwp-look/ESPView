@@ -26,6 +26,36 @@ void putU64(std::vector<uint8_t>& v, uint64_t val) {
     }
 }
 
+// 网络序 u32（AF.2：serverIp/ip 字段按大端写线；入参为网络序 u32）。
+void pushNetU32(std::vector<uint8_t>& v, uint32_t val) {
+    v.push_back(static_cast<uint8_t>((val >> 24) & 0xFFu));
+    v.push_back(static_cast<uint8_t>((val >> 16) & 0xFFu));
+    v.push_back(static_cast<uint8_t>((val >> 8) & 0xFFu));
+    v.push_back(static_cast<uint8_t>(val & 0xFFu));
+}
+
+uint16_t readU16(BytesView p, size_t off) {
+    return static_cast<uint16_t>(p[off]) |
+           static_cast<uint16_t>(static_cast<uint16_t>(p[off + 1]) << 8);
+}
+
+// 网络序 u32 读取（首字节 = 地址第一段）。
+uint32_t readNetU32(BytesView p, size_t off) {
+    return (static_cast<uint32_t>(p[off]) << 24) |
+           (static_cast<uint32_t>(p[off + 1]) << 16) |
+           (static_cast<uint32_t>(p[off + 2]) << 8) |
+           static_cast<uint32_t>(p[off + 3]);
+}
+
+// 定长 NUL 填充字段提取（SSID/password；遇首个 NUL 即止，不含填充字节）。
+std::string readFixedString(BytesView p, size_t off, size_t len) {
+    size_t n = 0;
+    while (n < len && p[off + n] != 0) {
+        ++n;
+    }
+    return std::string(reinterpret_cast<const char*>(p.data() + off), n);
+}
+
 Message messageWithPayload(uint8_t type, uint8_t flags, std::vector<uint8_t> payload) {
     Message m;
     m.type = type;
@@ -245,6 +275,218 @@ bool parsePhysicalPreview(BytesView payload, PhysicalPreviewInfo& out) {
     info.flags = payload[7];
 
     out = info;
+    return true;
+}
+
+std::optional<Message> makeWifiScanReq(uint8_t flags, uint8_t maxEntries) {
+    // AF.2：flags 保留位必须为 0；maxEntries 0=默认32 或 1..64。
+    if (flags != 0) {
+        return std::nullopt;
+    }
+    if (maxEntries > kWifiScanReqMaxEntries) {
+        return std::nullopt;
+    }
+    std::vector<uint8_t> p = {flags, maxEntries};
+    return messageWithPayload(static_cast<uint8_t>(MessageType::kWifiScanReq), kFlagAckReq,
+                              std::move(p));
+}
+
+bool parseWifiScanReq(BytesView payload, uint8_t& flags, uint8_t& maxEntries) {
+    if (payload.size() != kWifiScanReqPayloadSize) {
+        return false;
+    }
+    flags = payload[0];
+    maxEntries = payload[1];
+    return true;
+}
+
+std::optional<Message> makeWifiScanResult(uint8_t scanSeq, bool truncated, uint16_t total,
+                                          const WifiScanRecordInfo* records, size_t count) {
+    // AF.2：0..64 条；每条 ssid 1..32 可见字节、authmode 0..8（ESP-IDF 白名单）。
+    if (count > kWifiScanResultMaxRecords) {
+        return std::nullopt;
+    }
+    if (count > 0 && records == nullptr) {
+        return std::nullopt;
+    }
+    for (size_t i = 0; i < count; ++i) {
+        if (records[i].ssid.empty() || records[i].ssid.size() > kWifiSsidMaxBytes) {
+            return std::nullopt;
+        }
+        if (records[i].authmode > 8) {
+            return std::nullopt;
+        }
+    }
+
+    // AF.2 布局：scanSeq(1) count(1) flags(1) total(2 LE) records[count*42]。
+    std::vector<uint8_t> p;
+    p.reserve(5 + count * kWifiScanResultRecordBytes);
+    p.push_back(scanSeq);
+    p.push_back(static_cast<uint8_t>(count));
+    p.push_back(truncated ? kWifiScanResultFlagTruncated : 0u);
+    putU16(p, total);
+    for (size_t i = 0; i < count; ++i) {
+        const WifiScanRecordInfo& r = records[i];
+        for (size_t j = 0; j < kWifiSsidMaxBytes; ++j) {
+            p.push_back(j < r.ssid.size() ? static_cast<uint8_t>(r.ssid[j]) : 0);
+        }
+        p.insert(p.end(), r.bssid.begin(), r.bssid.end());
+        p.push_back(static_cast<uint8_t>(r.rssi));
+        p.push_back(r.channel);
+        p.push_back(r.authmode);
+        p.push_back(0);  // rsvd
+    }
+    return messageWithPayload(static_cast<uint8_t>(MessageType::kWifiScanResult), 0,
+                              std::move(p));
+}
+
+bool parseWifiScanResult(BytesView payload, WifiScanResultInfo& out) {
+    // AF.3：短包/超限拒绝；长于 5+count*42 忽略尾部。
+    if (payload.size() < 5) {
+        return false;
+    }
+    const uint8_t count = payload[1];
+    if (count > kWifiScanResultMaxRecords) {
+        return false;
+    }
+    const size_t need = 5 + static_cast<size_t>(count) * kWifiScanResultRecordBytes;
+    if (payload.size() < need) {
+        return false;
+    }
+
+    WifiScanResultInfo info;
+    info.scanSeq = payload[0];
+    info.count = count;
+    info.flags = payload[2];
+    info.total = readU16(payload, 3);
+    info.records.reserve(count);
+    for (size_t i = 0; i < count; ++i) {
+        const size_t o = 5 + i * kWifiScanResultRecordBytes;
+        WifiScanRecordInfo rec;
+        rec.ssid = readFixedString(payload, o, kWifiSsidMaxBytes);
+        std::memcpy(rec.bssid.data(), payload.data() + o + kWifiSsidMaxBytes, 6);
+        rec.rssi = static_cast<int8_t>(payload[o + 38]);
+        rec.channel = payload[o + 39];
+        rec.authmode = payload[o + 40];
+        info.records.push_back(std::move(rec));
+    }
+    out = std::move(info);
+    return true;
+}
+
+std::optional<Message> makeWifiConfig(std::string_view ssid, std::string_view password,
+                                      uint32_t serverIp, uint16_t serverPort) {
+    // AF.2 校验：ssid 1..32；password 0（开放网络）或 8..63（64-hex raw-PSK 预留，
+    // v0.1 拒绝）；serverIp 网络序且非 0；serverPort 1..65535。
+    if (ssid.empty() || ssid.size() > kWifiSsidMaxBytes) {
+        return std::nullopt;
+    }
+    if (!password.empty() && (password.size() < 8 || password.size() > 63)) {
+        return std::nullopt;
+    }
+    if (serverIp == 0) {
+        return std::nullopt;
+    }
+    if (serverPort == 0) {
+        return std::nullopt;
+    }
+
+    // AF.2 布局：定长 103 字节；flags(0) ssid[32] password[64] serverIp(4 网络序)
+    // serverPort(2 LE)。按下标写入（禁止追加，避免破坏定长）。
+    std::vector<uint8_t> p(kWifiConfigPayloadSize, 0);
+    p[0] = 0;  // 非 CLEAR
+    for (size_t i = 0; i < kWifiSsidMaxBytes && i < ssid.size(); ++i) {
+        p[1 + i] = static_cast<uint8_t>(ssid[i]);
+    }
+    for (size_t i = 0; i < kWifiPasswordFieldBytes && i < password.size(); ++i) {
+        p[33 + i] = static_cast<uint8_t>(password[i]);
+    }
+    p[97] = static_cast<uint8_t>((serverIp >> 24) & 0xFFu);
+    p[98] = static_cast<uint8_t>((serverIp >> 16) & 0xFFu);
+    p[99] = static_cast<uint8_t>((serverIp >> 8) & 0xFFu);
+    p[100] = static_cast<uint8_t>(serverIp & 0xFFu);
+    p[101] = static_cast<uint8_t>(serverPort & 0xFFu);
+    p[102] = static_cast<uint8_t>((serverPort >> 8) & 0xFFu);
+    return messageWithPayload(static_cast<uint8_t>(MessageType::kWifiConfig), kFlagAckReq,
+                              std::move(p));
+}
+
+Message makeWifiClear() {
+    // AF.2：CLEAR（flags bit0=1），其余字段全 0；必须 ACK_REQ。
+    std::vector<uint8_t> p(kWifiConfigPayloadSize, 0);
+    p[0] = kWifiConfigFlagClear;
+    return messageWithPayload(static_cast<uint8_t>(MessageType::kWifiConfig), kFlagAckReq,
+                              std::move(p));
+}
+
+bool parseWifiConfig(BytesView payload, WifiConfigInfo& out) {
+    // AF.3：短包拒绝；长于 103B 忽略尾部。password 为宿主内存副本，用后须清零。
+    if (payload.size() < kWifiConfigPayloadSize) {
+        return false;
+    }
+    WifiConfigInfo info;
+    info.flags = payload[0];
+    info.ssid = readFixedString(payload, 1, kWifiSsidMaxBytes);
+    info.password = readFixedString(payload, 33, kWifiPasswordFieldBytes);
+    info.serverIp = readNetU32(payload, 97);
+    info.serverPort = readU16(payload, 101);
+    out = std::move(info);
+    return true;
+}
+
+std::optional<Message> makeWifiStatus(uint8_t phase, uint16_t errorCode, uint8_t flags,
+                                      int8_t rssi, uint8_t channel, uint32_t ip,
+                                      uint32_t serverIp, uint16_t serverPort,
+                                      std::string_view ssid) {
+    // AF.2：phase 白名单 0..9；ssid 0..32 字节；载荷 17+ssidLen ≤ 49B。
+    if (phase > static_cast<uint8_t>(WifiStatusPhase::kCleared)) {
+        return std::nullopt;
+    }
+    if (ssid.size() > kWifiSsidMaxBytes) {
+        return std::nullopt;
+    }
+
+    std::vector<uint8_t> p;
+    p.reserve(17 + ssid.size());
+    p.push_back(phase);
+    putU16(p, errorCode);
+    p.push_back(flags);
+    p.push_back(static_cast<uint8_t>(rssi));
+    p.push_back(channel);
+    pushNetU32(p, ip);
+    pushNetU32(p, serverIp);
+    putU16(p, serverPort);
+    p.push_back(static_cast<uint8_t>(ssid.size()));
+    p.insert(p.end(), ssid.begin(), ssid.end());
+    return messageWithPayload(static_cast<uint8_t>(MessageType::kWifiStatus), 0,
+                              std::move(p));
+}
+
+bool parseWifiStatus(BytesView payload, WifiStatusInfo& out) {
+    // AF.3：短包拒绝；长于 17+ssidLen 忽略尾部；ssidLen 上限 32。
+    if (payload.size() < 17) {
+        return false;
+    }
+    const uint8_t ssidLen = payload[16];
+    if (ssidLen > kWifiSsidMaxBytes) {
+        return false;
+    }
+    if (payload.size() < 17u + ssidLen) {
+        return false;
+    }
+
+    WifiStatusInfo info;
+    info.phase = payload[0];
+    info.errorCode = readU16(payload, 1);
+    info.flags = payload[3];
+    info.rssi = static_cast<int8_t>(payload[4]);
+    info.channel = payload[5];
+    info.ip = readNetU32(payload, 6);
+    info.serverIp = readNetU32(payload, 10);
+    info.serverPort = readU16(payload, 14);
+    info.ssidLen = ssidLen;
+    info.ssid.assign(reinterpret_cast<const char*>(payload.data() + 17), ssidLen);
+    out = std::move(info);
     return true;
 }
 
