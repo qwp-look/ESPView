@@ -68,6 +68,127 @@ Message makeSetMode(DisplayMode mode) {
                               std::move(p));
 }
 
+std::optional<Message> makeCapabilities(
+    bool virtualPresent, bool physicalPresent, uint16_t width, uint16_t height,
+    PixelFormat pixelFormat, uint8_t colorDepth, bool virtualMono,
+    bool virtualCanReadback, uint8_t modeMask, uint16_t physWidth, uint16_t physHeight,
+    PhysicalPixelFormat physPixelFormat, uint8_t physColorDepth, bool physMono,
+    bool physCanReadback, CapabilitiesController physController,
+    uint8_t physI2cAddress, uint8_t sceneSupport) {
+    // AD.2 校验（违规输入 → nullopt）。
+    if (width < 1 || width > 4096 || height < 1 || height > 4096) {
+        return std::nullopt;  // 虚拟几何 1..4096（与 HELLO 对齐）
+    }
+    if (physWidth > 4096 || physHeight > 4096) {
+        return std::nullopt;  // 物理几何 0=未知 或 1..4096
+    }
+    if (pixelFormat != PixelFormat::kRgb565) {
+        return std::nullopt;  // v0.1 虚拟像素格式仅 RGB565
+    }
+    if (physPixelFormat != PhysicalPixelFormat::kRgb565 &&
+        physPixelFormat != PhysicalPixelFormat::kMono1) {
+        return std::nullopt;
+    }
+    if (physController != CapabilitiesController::kAuto &&
+        physController != CapabilitiesController::kSsd1306 &&
+        physController != CapabilitiesController::kSh1106 &&
+        physController != CapabilitiesController::kUnknown) {
+        return std::nullopt;
+    }
+    if ((modeMask & 0xF0u) != 0 || (sceneSupport & 0xFCu) != 0) {
+        return std::nullopt;  // 保留位发送方必须填 0
+    }
+
+    // AD.2 布局：定长 32 字节 LE；rsvd/rsvd2 填 0（按下标写入，禁止追加）。
+    std::vector<uint8_t> p(kCapabilitiesPayloadSize, 0);
+    p[0] = kCapabilitiesPayloadVersion;
+    p[1] = (virtualPresent ? 0x01u : 0u) | (physicalPresent ? 0x02u : 0u);
+    p[2] = static_cast<uint8_t>(width & 0xFFu);
+    p[3] = static_cast<uint8_t>((width >> 8) & 0xFFu);
+    p[4] = static_cast<uint8_t>(height & 0xFFu);
+    p[5] = static_cast<uint8_t>((height >> 8) & 0xFFu);
+    p[6] = static_cast<uint8_t>(pixelFormat);
+    p[7] = colorDepth;
+    p[8] = virtualMono ? 1u : 0u;
+    p[9] = virtualCanReadback ? 1u : 0u;
+    p[10] = modeMask;
+    // [11..15] rsvd = 0
+    p[16] = static_cast<uint8_t>(physWidth & 0xFFu);
+    p[17] = static_cast<uint8_t>((physWidth >> 8) & 0xFFu);
+    p[18] = static_cast<uint8_t>(physHeight & 0xFFu);
+    p[19] = static_cast<uint8_t>((physHeight >> 8) & 0xFFu);
+    p[20] = static_cast<uint8_t>(physPixelFormat);
+    p[21] = physColorDepth;
+    p[22] = physMono ? 1u : 0u;
+    p[23] = physCanReadback ? 1u : 0u;
+    p[24] = static_cast<uint8_t>(physController);
+    p[25] = physI2cAddress;
+    p[26] = sceneSupport;
+    // [27..31] rsvd2 = 0
+    return messageWithPayload(static_cast<uint8_t>(MessageType::kCapabilities), 0,
+                              std::move(p));
+}
+
+bool parseCapabilities(BytesView payload, CapabilitiesInfo& out) {
+    // AD.3：短于 32B 丢弃；长于 32B 忽略尾部；version≠0x01 丢弃。
+    if (payload.size() < kCapabilitiesPayloadSize) {
+        return false;
+    }
+    const uint8_t version = payload[0];
+    if (version != kCapabilitiesPayloadVersion) {
+        return false;
+    }
+
+    CapabilitiesInfo info;
+    info.version = version;
+    const uint8_t flags = payload[1];
+    info.virtualPresent = (flags & 0x01u) != 0;
+    info.physicalPresent = (flags & 0x02u) != 0;
+    info.width = static_cast<uint16_t>(payload[2]) |
+                 static_cast<uint16_t>(static_cast<uint16_t>(payload[3]) << 8);
+    info.height = static_cast<uint16_t>(payload[4]) |
+                  static_cast<uint16_t>(static_cast<uint16_t>(payload[5]) << 8);
+    // pixelFormat 白名单：v0.1 唯一合法值 kRgb565(0)，其余一律兜底（杜绝数值注入）。
+    info.pixelFormat = PixelFormat::kRgb565;
+    info.colorDepth = payload[7];
+    info.virtualMono = payload[8] != 0;
+    info.virtualCanReadback = payload[9] != 0;
+    info.modeMask = payload[10];
+    info.physWidth = static_cast<uint16_t>(payload[16]) |
+                     static_cast<uint16_t>(static_cast<uint16_t>(payload[17]) << 8);
+    info.physHeight = static_cast<uint16_t>(payload[18]) |
+                      static_cast<uint16_t>(static_cast<uint16_t>(payload[19]) << 8);
+    // physPixelFormat 白名单 {0,1}；其余兜底 kRgb565。
+    const uint8_t ppf = payload[20];
+    info.physPixelFormat =
+        ppf == static_cast<uint8_t>(PhysicalPixelFormat::kMono1)
+            ? PhysicalPixelFormat::kMono1
+            : PhysicalPixelFormat::kRgb565;
+    info.physColorDepth = payload[21];
+    info.physMono = payload[22] != 0;
+    info.physCanReadback = payload[23] != 0;
+    // physController 白名单 {0,1,2}；未知值（含 0xFF 语义）→ kUnknown。
+    switch (payload[24]) {
+        case static_cast<uint8_t>(CapabilitiesController::kAuto):
+            info.physController = CapabilitiesController::kAuto;
+            break;
+        case static_cast<uint8_t>(CapabilitiesController::kSsd1306):
+            info.physController = CapabilitiesController::kSsd1306;
+            break;
+        case static_cast<uint8_t>(CapabilitiesController::kSh1106):
+            info.physController = CapabilitiesController::kSh1106;
+            break;
+        default:
+            info.physController = CapabilitiesController::kUnknown;
+            break;
+    }
+    info.physI2cAddress = payload[25];
+    info.sceneSupport = payload[26];
+
+    out = info;
+    return true;
+}
+
 Message makeAck(uint16_t ackSeq, uint8_t status, ErrorCode errorCode) {
     std::vector<uint8_t> p;
     putU16(p, ackSeq);

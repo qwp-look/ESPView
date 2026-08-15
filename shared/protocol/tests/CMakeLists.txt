@@ -9,6 +9,7 @@ add_executable(espview_protocol_tests
     frame_pipeline_test.cpp
     protocol_endpoint_test.cpp
     endpoint_concurrency_test.cpp
+    capabilities_test.cpp
     streaming_encoder_test.cpp
     input_test.cpp
     lvgl_adapter_test.cpp

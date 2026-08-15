@@ -41,6 +41,7 @@
 #include "display_frame.h"
 #include "host_tcp_transport.h"
 #include "input_event.h"
+#include "message.h"  // proto::CapabilitiesInfo（M7-D1 能力上行，纯 C++17）
 #include "pc_transport.h"
 #include "runtime_stats.h"  // proto::Severity / proto::DiagnosticsRing（M4 诊断）
 #include "serial_transport.h"
@@ -181,6 +182,8 @@ signals:
     // M7-C3：SET_MODE 的 ACK 结果（ok=true 设备已应用；false = ACK ERR /
     // 重试耗尽）。由 Worker 线程 emit，QueuedConnection 投递 GUI。
     void displayModeAck(bool ok);
+    // M7-D1：CAPABILITIES 解析成功（worker 线程 emit，QueuedConnection 投递 GUI）。
+    void capabilitiesReceived(const espview::proto::CapabilitiesInfo& caps);
 
 private:
     void runLoop();  // Worker 线程入口
@@ -262,3 +265,5 @@ private:
 
 Q_DECLARE_METATYPE(espview::pc::WorkerStatus)
 Q_DECLARE_METATYPE(espview::pc::WorkerStats)
+// M7-D1：CAPABILITIES 纯值类型（queued 连接需要 metatype；无 Qt 依赖）。
+Q_DECLARE_METATYPE(espview::proto::CapabilitiesInfo)

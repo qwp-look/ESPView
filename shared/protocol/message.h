@@ -3,8 +3,9 @@
 // 规范来源：docs/DESIGN.md E 节「消息表 / 帧消息 Payload Layout / 控制消息 Payload Layout」。
 // Message = 一条逻辑协议消息（TYPE + FLAGS + 完整载荷）。
 // 本文件只负责"按 DESIGN.md 布局序列化载荷"；Message → Packet 的拆分见 encoder.h。
-// 注意：CAPABILITIES / SET_RESOLUTION / SET_PIXEL_FORMAT / INPUT_TOUCH / RESET 在
+// 注意：SET_RESOLUTION / SET_PIXEL_FORMAT / INPUT_TOUCH / RESET 在
 // DESIGN.md 中没有 payload layout（可选/未来），因此不提供专用 builder，只能用 makeMessage。
+// CAPABILITIES 的 payload layout 已由 M7-D1 AD.2 冻结，专用 builder/解析器见下文。
 // 纯 C++17，零平台依赖。
 
 #pragma once
@@ -48,6 +49,87 @@ std::optional<Message> makeHello(uint8_t protocolVersion, uint8_t deviceClass,
 
 // SET_MODE (0x03)：mode。按 DESIGN.md「必须 ACK_REQ」自动置 kFlagAckReq。
 Message makeSetMode(DisplayMode mode);
+
+// ---- CAPABILITIES (0x02)（M7-D1 AD.2 冻结 payload；v0.1 定长 32 字节 LE）----
+
+// AD.2：payload 定长（< 32B 丢弃；> 32B 忽略尾部）。
+inline constexpr size_t kCapabilitiesPayloadSize = 32;
+
+// 物理控制器枚举（AD.2 physController：0=AUTO 1=SSD1306 2=SH1106 0xFF=UNKNOWN；
+// 数值对齐 shared/oled ControllerType 与 display OledControllerCode）。
+enum class CapabilitiesController : uint8_t {
+    kAuto = 0,
+    kSsd1306 = 1,
+    kSh1106 = 2,
+    kUnknown = 0xFF,
+};
+
+// 物理像素格式（AD.2 physPixelFormat：0=RGB565 1=Mono1；虚拟侧仍用 proto::PixelFormat）。
+enum class PhysicalPixelFormat : uint8_t {
+    kRgb565 = 0,
+    kMono1 = 1,
+};
+
+// 场景支持位（AD.2 sceneSupport：bit0=kApplication bit1=kDiagnostics）。
+inline constexpr uint8_t kSceneSupportApplication = 0x01;
+inline constexpr uint8_t kSceneSupportDiagnostics = 0x02;
+
+// C++17 只读字节区间视图（std::span 为 C++20；shared/protocol 保持 C++17
+// 零平台依赖）。语义与 std::span<const uint8_t> 对齐：data()/size()/operator[]。
+class BytesView {
+public:
+    BytesView() = default;
+    BytesView(const uint8_t* data, size_t size) : data_(data), size_(size) {}
+    BytesView(const std::vector<uint8_t>& v) : data_(v.data()), size_(v.size()) {}
+    const uint8_t* data() const { return data_; }
+    size_t size() const { return size_; }
+    const uint8_t& operator[](size_t i) const { return data_[i]; }
+    bool empty() const { return size_ == 0; }
+
+private:
+    const uint8_t* data_ = nullptr;
+    size_t size_ = 0;
+};
+
+// CAPABILITIES 解析结果（AD.2 字段全集；枚举字段已按白名单映射，见 parseCapabilities）。
+struct CapabilitiesInfo {
+    uint8_t version = 0;
+    bool virtualPresent = false;
+    bool physicalPresent = false;
+    uint16_t width = 0;
+    uint16_t height = 0;
+    PixelFormat pixelFormat = PixelFormat::kRgb565;
+    uint8_t colorDepth = 0;
+    bool virtualMono = false;
+    bool virtualCanReadback = false;
+    uint8_t modeMask = 0;
+    uint16_t physWidth = 0;
+    uint16_t physHeight = 0;
+    PhysicalPixelFormat physPixelFormat = PhysicalPixelFormat::kRgb565;
+    uint8_t physColorDepth = 0;
+    bool physMono = false;
+    bool physCanReadback = false;
+    CapabilitiesController physController = CapabilitiesController::kUnknown;
+    uint8_t physI2cAddress = 0;
+    uint8_t sceneSupport = 0;
+};
+
+// 构造 CAPABILITIES（AD.2 布局；无 ACK_REQ，fire-and-forget）。违规输入返回 nullopt：
+//   width/height 须 1..4096；physWidth/physHeight 0=未知 或 1..4096；
+//   pixelFormat 仅 kRgb565；physPixelFormat 仅 kRgb565/kMono1；
+//   physController 仅白名单 4 值；modeMask 高 4 位、sceneSupport 高 6 位必须为 0。
+std::optional<Message> makeCapabilities(
+    bool virtualPresent, bool physicalPresent, uint16_t width, uint16_t height,
+    PixelFormat pixelFormat, uint8_t colorDepth, bool virtualMono,
+    bool virtualCanReadback, uint8_t modeMask, uint16_t physWidth, uint16_t physHeight,
+    PhysicalPixelFormat physPixelFormat, uint8_t physColorDepth, bool physMono,
+    bool physCanReadback, CapabilitiesController physController,
+    uint8_t physI2cAddress, uint8_t sceneSupport);
+
+// 解析 CAPABILITIES（AD.3 规则）：< 32B → false；> 32B 忽略尾部；version≠0x01 → false；
+// 未知枚举白名单映射（physController → kUnknown；physPixelFormat/pixelFormat → 白名单兜底），
+// 杜绝 UI 数值注入。成功 → out 填充并返回 true。
+bool parseCapabilities(BytesView payload, CapabilitiesInfo& out);
 
 // ACK (0x51)：ackSeq = 被确认包的 SEQ；status = 0(OK)/1(ERR)；errorCode。
 Message makeAck(uint16_t ackSeq, uint8_t status, ErrorCode errorCode);

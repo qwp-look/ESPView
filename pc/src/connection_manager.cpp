@@ -13,6 +13,9 @@ ConnectionManager::ConnectionManager(QObject* parent) : QObject(parent) {
     connect(&worker_, &SerialWorker::statsChanged, this, &ConnectionManager::statsChanged);
     connect(&worker_, &SerialWorker::diagAdded, this, &ConnectionManager::diagAdded);
     connect(&worker_, &SerialWorker::displayModeAck, this, &ConnectionManager::displayModeAck);
+    // M7-D1：CAPABILITIES 能力快照转发（与其它 Worker signal 同模式，queued）。
+    connect(&worker_, &SerialWorker::capabilitiesReceived, this,
+            &ConnectionManager::capabilitiesReceived);
 }
 
 ConnectionManager::~ConnectionManager() {

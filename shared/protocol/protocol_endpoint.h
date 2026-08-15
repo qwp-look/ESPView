@@ -129,6 +129,10 @@ struct SessionStats {
     uint64_t decoderErrors = 0;     // Decoder 上报的协议错误（CRC/seq/...）
     uint64_t rxMessages = 0;        // 收到的全部合法消息
     uint64_t txMessages = 0;        // 发出的全部消息（含自动 PONG）
+    // M7-D1：CAPABILITIES（TYPE 0x02）会话级计数。
+    uint64_t rxCapabilities = 0;        // 收到并通过 parseCapabilities 的消息
+    uint64_t txCapabilities = 0;        // 发出成功的 CAPABILITIES（sendCapabilities）
+    uint64_t capabilitiesDropped = 0;   // 收到但 payload 非法/版本不支持（AD.3 诊断计数）
 
     // ---- M4 心跳可观察（spec §五/§六）----
     uint64_t lastPingTimeMs = 0;    // 最近一次 PING 发送时刻（本端时钟）
@@ -178,7 +182,10 @@ public:
         std::function<void(uint16_t lastSeq)> onAckTimeout;
         // 收到 ERROR 消息
         std::function<void(ErrorCode errorCode, std::string_view text)> onError;
-        // 未被会话层消费的消息（INPUT_*、CAPABILITIES、未知类型等；诊断用）
+        // 收到并解析成功的 CAPABILITIES（M7-D1；fire-and-forget，无 ACK_REQ）。
+        std::function<void(const CapabilitiesInfo& caps)> onCapabilities;
+        // 未被会话层消费的消息（INPUT_*、未知类型等；诊断用）
+        // （CAPABILITIES 由 onCapabilities 消费，M7-D1。）
         std::function<void(const Message& msg)> onOtherMessage;
     };
 
@@ -215,6 +222,9 @@ public:
     SendResult acknowledge(uint16_t ackSeq, uint8_t status, ErrorCode errorCode);
     // 主动发 ERROR 消息（诊断/错误上报）
     SendResult sendError(ErrorCode errorCode, std::string_view text);
+    // 主动发 CAPABILITIES（M7-D1 AD.3：fire-and-forget，不带 ACK_REQ）。
+    // 违规字段（makeCapabilities 校验失败）→ kInvalidMessage。
+    SendResult sendCapabilities(const CapabilitiesInfo& caps);
 
     // ---- 心跳/超时驱动（由上层定时调用，如每 100-200ms）----
     void tick();
@@ -237,6 +247,7 @@ private:
     void handlePong(const Message& msg);
     void handleAck(const Message& msg);
     void handleError(const Message& msg);
+    void handleCapabilities(const Message& msg);
     void handleAckRequest(const Message& msg);
     FrameAssembler::Callbacks makeFrameCallbacks();
     void completeHandshake();
@@ -304,7 +315,5 @@ private:
 
 }  // namespace proto
 }  // namespace espview
-
-
 
 

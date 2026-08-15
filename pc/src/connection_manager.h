@@ -67,6 +67,8 @@ signals:
                    const QString& message);
     // M7-C3：SET_MODE ACK 结果转发（Worker → GUI，queued）。
     void displayModeAck(bool ok);
+    // M7-D1：CAPABILITIES 能力快照转发（Worker → GUI，queued）。
+    void capabilitiesReceived(const espview::proto::CapabilitiesInfo& caps);
 
 private:
     SerialWorker worker_;

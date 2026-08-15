@@ -217,12 +217,74 @@ public:
 };
 
 // ---- Application 回调（ProtocolEndpoint → 本文件）----
+// M7-D1：CONNECTED 后每会话发送一次 CAPABILITIES（AD.2/AD.3；fire-and-forget，
+// 不带 ACK_REQ）。数据源 = DisplayCapabilities sink 事实（display_capabilities.h）
+// + OledDisplay 运行时事实（实际 I2C 地址/控制器）+ OledFb 常量（128x64 几何已在
+// PhysicalDisplaySink::init 由 OledFb::kWidth/kHeight 落定）；modeMask 硬件派生
+// （物理 sink 存在 → 0..3 全模式；否则仅 WINDOW），禁止编译期 0b1111 常量冒充。
+void sendCapabilitiesMessage() {
+    espview::proto::CapabilitiesInfo caps;
+    caps.version = espview::proto::kCapabilitiesPayloadVersion;
+
+    const auto vSink = g_router ? g_router->virtualSink() : nullptr;
+    if (vSink) {
+        const display::DisplayCapabilities& v = vSink->capabilities();
+        caps.virtualPresent = true;
+        caps.width = static_cast<uint16_t>(v.width);
+        caps.height = static_cast<uint16_t>(v.height);
+        caps.pixelFormat = v.format;
+        caps.colorDepth = v.color;
+        caps.virtualMono = v.mono;
+        caps.virtualCanReadback = v.canReadback;
+    }
+
+#if CONFIG_ESPVIEW_OLED_ENABLE
+    if (g_physicalSink) {
+        const display::DisplayCapabilities& p = g_physicalSink->capabilities();
+        caps.physicalPresent = true;
+        caps.physWidth = static_cast<uint16_t>(p.width);
+        caps.physHeight = static_cast<uint16_t>(p.height);
+        // 物理输出为 1-bit 单色：physPixelFormat 由 mono 事实派生（AD.2 OLED=1）。
+        caps.physPixelFormat = p.mono
+                                   ? espview::proto::PhysicalPixelFormat::kMono1
+                                   : espview::proto::PhysicalPixelFormat::kRgb565;
+        caps.physColorDepth = p.color;
+        caps.physMono = p.mono;
+        caps.physCanReadback = p.canReadback;
+        // 运行时事实（OledDisplay status：实际探测地址/控制器；未就绪时 kAuto/0）。
+        if (g_oled) {
+            const espview::oled::OledStatus os = g_oled->status();
+            caps.physController =
+                static_cast<espview::proto::CapabilitiesController>(os.controller);
+            caps.physI2cAddress = os.address;
+        }
+        caps.sceneSupport = espview::proto::kSceneSupportApplication |
+                            espview::proto::kSceneSupportDiagnostics;  // 0b11
+    }
+#endif
+    // modeMask 硬件派生：物理 sink 存在 → WINDOW|DEVICE|MIRROR|SPLIT；否则仅 WINDOW。
+    caps.modeMask = caps.physicalPresent ? 0x0Fu : 0x01u;
+
+    const SendResult r = g_endpoint.sendCapabilities(caps);
+    ESP_LOGI(kTag, "CAPABILITIES sent: %s (phys=%d %ux%u ctrl=%u addr=0x%02X mask=0x%02X)",
+             r == SendResult::kOk ? "ok" : "err",
+             caps.physicalPresent ? 1 : 0, static_cast<unsigned>(caps.physWidth),
+             static_cast<unsigned>(caps.physHeight),
+             static_cast<unsigned>(caps.physController),
+             static_cast<unsigned>(caps.physI2cAddress),
+             static_cast<unsigned>(caps.modeMask));
+}
+
 void onSessionState(SessionState s) {
     ESP_LOGI(kTag, "session state -> %d", static_cast<int>(s));
     if (s == SessionState::kDisconnected) {
         // M3 spec §18：断线/会话重置 → 本地安全恢复（pressed keys/buttons 全部
         // 补发 release，清空状态；绝不回发 PC）。
         g_inputManager.resetState();
+    }
+    // M7-D1：每会话 CONNECTED 后发送一次 CAPABILITIES（重连重发，AD.3）。
+    if (s == SessionState::kConnected) {
+        sendCapabilitiesMessage();
     }
 #if CONFIG_ESPVIEW_APP_LVGL
     if (g_lvgl) {

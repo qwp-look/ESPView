@@ -343,6 +343,10 @@ void SerialWorker::runLoop() {
                  "ERROR code=" + std::to_string(static_cast<unsigned>(code)) + ": " +
                      msg.toStdString());
     };
+    // M7-D1：CAPABILITIES 解析成功 → 原样转发 GUI（queued；消费接线在 main.cpp）。
+    cb.onCapabilities = [this](const proto::CapabilitiesInfo& caps) {
+        emit capabilitiesReceived(caps);
+    };
     // M7-C3：SET_MODE 是 v0.1 唯一 ACK_REQ 控制消息，因此所有 ACK 结果都是
     // Display Mode 的 ACK。onAckTimeout（重试耗尽）同样按失败上报。
     cb.onAck = [this](uint16_t ackSeq, uint8_t status, proto::ErrorCode errorCode) {

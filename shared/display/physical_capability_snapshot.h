@@ -25,8 +25,8 @@ namespace display {
 // 能力来源（当前唯一 = OLED 文本遥测推断；未来可加 kCapabilitiesMessage）。
 enum class PhysicalCapabilityProvenance : uint8_t {
     kNotSeen = 0,       // 未收到任何物理证据
-    kOledTelemetry = 1, // 由 oled 文本遥测学习（当前唯一）
-    // 未来：kCapabilitiesMessage（协议 CAPABILITIES uplink 落地后）
+    kOledTelemetry = 1, // 由 oled 文本遥测学习
+    kCapabilitiesMessage = 2, // 由 CAPABILITIES 协议消息（M7-D1）学习（最高信任）
 };
 
 // PC 侧物理能力快照（值语义；单一派生源）。

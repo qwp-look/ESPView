@@ -217,6 +217,11 @@ public:
                         ok ? tr_("Success: SET_MODE") : tr_("Failure: SET_MODE"),
                         3000);
                 });
+        // M7-D1：CAPABILITIES 能力上行 → snapshot 更新 + capability 门控。
+        connect(&manager_, &ConnectionManager::capabilitiesReceived, this,
+                [this](const espview::proto::CapabilitiesInfo& caps) {
+                    onCapabilitiesReceived(caps);
+                });
         // M7-C3：语言切换（只改文案，不触碰 transport / display / framebuffer）。
         connect(langSel_, &LanguageSelector::languageChanged, this,
                 &MainWindow::onLanguageChanged);
@@ -551,6 +556,39 @@ private slots:
             modeWidget_->setUiState(s);
             syncModeStateToUi();
         }
+    }
+
+    // M7-D1：CAPABILITIES（TYPE 0x02）→ 物理能力快照（wire 直接映射）。
+    // 遥测推断保留为 graceful fallback：未收到 CAPABILITIES 时维持现有行为
+    // （面板 "Capability unavailable"）；收到后以 wire 事实为准。healthy/
+    // telemetryFresh 仍属遥测域（能力≠健康，AD.4），由最近 oled 行驱动。
+    void onCapabilitiesReceived(const espview::proto::CapabilitiesInfo& caps) {
+        espview::display::PhysicalCapabilitySnapshot snap;
+        snap.provenance =
+            espview::display::PhysicalCapabilityProvenance::kCapabilitiesMessage;
+        snap.capabilityKnown = caps.physicalPresent;
+        snap.width = caps.physWidth;
+        snap.height = caps.physHeight;
+        snap.mono = caps.physMono;
+        snap.canReadback = caps.physCanReadback;
+        snap.controller =
+            static_cast<espview::display::OledControllerCode>(caps.physController);
+        snap.address = caps.physI2cAddress;
+        snap.scene =
+            (caps.sceneSupport & espview::proto::kSceneSupportApplication) != 0
+                ? espview::display::PhysicalScene::kApplication
+                : espview::display::PhysicalScene::kDiagnostics;
+        snap.healthy = physCap_.healthy;
+        snap.telemetryFresh = physCap_.telemetryFresh;
+        physCap_ = snap;
+
+        auto s = modeWidget_->state();
+        s.onPhysicalAvailable(caps.physicalPresent);
+        if (physCap_.capabilityKnown) {
+            s.onPhysicalDegraded(!physCap_.healthy);
+        }
+        modeWidget_->setUiState(s);
+        syncModeStateToUi();
     }
 
     void saveSnapshot() {

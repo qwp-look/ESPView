@@ -2222,6 +2222,24 @@ Frame 语义；HELLO layout 不动；SET_MODE 0..3 语义不动。
 - CAPABILITIES 是 additive：老固件无该消息时 Qt graceful fallback（遥测推断）。
 - 本消息不含任何凭据。
 
+### AD.6 已实现（M7-D1，2026-08-15）
+
+- shared/protocol：新增 `kCapabilitiesPayloadVersion=0x01`；`CapabilitiesInfo` +
+  `makeCapabilities()`/`parseCapabilities()`（32B 定长 LE；<32B 丢弃、>32B
+  忽略尾部、version≠0x01 丢弃、未知 controller/format 白名单映射 UNKNOWN）。
+- ProtocolEndpoint：`kCapabilities` 分派 `handleCapabilities`（非法 payload
+  仅计数 `capabilitiesDropped`，不 failSession）；`onCapabilities` 回调；
+  `sendCapabilities()`（requireConnected=true，fire-and-forget）；统计
+  rx/txCapabilities。
+- ESP32：CONNECTED 后每会话发送一次（重连重发）；字段全部硬件派生（sink
+  存在位、DisplayCapabilities 几何/格式、OledFb 常量、oled status 运行时
+  事实；modeMask=physicalPresent?0x0F:0x01，无编译期冒充）。
+- PC：SerialWorker → ConnectionManager 信号转发；main.cpp 消费更新
+  PhysicalCapabilitySnapshot（provenance=kCapabilitiesMessage、
+  capabilityKnown=physicalPresent）；未收到 CAPABILITIES 时维持遥测推断
+  fallback。
+- 验证：host 224,899 checks / 0 failures；Qt 构建通过；ESP32 构建通过。
+
 ============================================================
 AE. M7-D2 PHYSICAL_PREVIEW（2026-08-15 设计冻结；wire additive）
 ============================================================

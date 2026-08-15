@@ -12,6 +12,7 @@ void runPipelineTests();
 void runFramePipelineTests();
 void runProtocolEndpointTests();
 void runEndpointConcurrencyTests();
+void runCapabilitiesTests();
 void runStreamingEncoderTests();
 void runInputTests();
 void runLvglAdapterTests();
@@ -51,6 +52,8 @@ int main() {
     runProtocolEndpointTests();
     std::printf("[endpoint_concurrency]\n");
     runEndpointConcurrencyTests();
+    std::printf("[capabilities]\n");
+    runCapabilitiesTests();
     std::printf("[streaming_encoder]\n");
     runStreamingEncoderTests();
     std::printf("[input]\n");

@@ -361,6 +361,24 @@ SendResult ProtocolEndpoint::sendError(ErrorCode errorCode, std::string_view tex
     return transmit(*err, /*requireConnected=*/false);
 }
 
+SendResult ProtocolEndpoint::sendCapabilities(const CapabilitiesInfo& caps) {
+    const auto msg = makeCapabilities(
+        caps.virtualPresent, caps.physicalPresent, caps.width, caps.height,
+        caps.pixelFormat, caps.colorDepth, caps.virtualMono, caps.virtualCanReadback,
+        caps.modeMask, caps.physWidth, caps.physHeight, caps.physPixelFormat,
+        caps.physColorDepth, caps.physMono, caps.physCanReadback, caps.physController,
+        caps.physI2cAddress, caps.sceneSupport);
+    if (!msg.has_value()) {
+        return SendResult::kInvalidMessage;
+    }
+    // AD.3：不带 ACK_REQ（fire-and-forget）；仅在 CONNECTED 后可发。
+    const SendResult r = transmit(*msg, /*requireConnected=*/true);
+    if (r == SendResult::kOk) {
+        ++stats_.txCapabilities;
+    }
+    return r;
+}
+
 void ProtocolEndpoint::tick() {
     const uint64_t now = clock_();
 
@@ -456,6 +474,9 @@ void ProtocolEndpoint::handleMessage(const Message& msg) {
             return;
         case MessageType::kError:
             handleError(msg);
+            return;
+        case MessageType::kCapabilities:
+            handleCapabilities(msg);
             return;
         case MessageType::kFrameBegin:
         case MessageType::kFrameRect:
@@ -588,6 +609,24 @@ void ProtocolEndpoint::handleError(const Message& msg) {
     }
 }
 
+void ProtocolEndpoint::handleCapabilities(const Message& msg) {
+    // AD.3：短于 32B / version 不支持 → 丢弃并计数（不 failSession，旧 PC 兼容）；
+    // 长于 32B 由 parseCapabilities 忽略尾部。
+    if (msg.payload.size() < kCapabilitiesPayloadSize) {
+        ++stats_.capabilitiesDropped;
+        return;
+    }
+    CapabilitiesInfo info;
+    if (!parseCapabilities(BytesView(msg.payload.data(), msg.payload.size()), info)) {
+        ++stats_.capabilitiesDropped;
+        return;
+    }
+    ++stats_.rxCapabilities;
+    if (cb_.onCapabilities) {
+        cb_.onCapabilities(info);
+    }
+}
+
 void ProtocolEndpoint::handleAckRequest(const Message& msg) {
     if (cb_.onAckRequest) {
         cb_.onAckRequest(msg.type, msg.payload, lastSinglePacketSeq_);
@@ -629,6 +668,5 @@ void ProtocolEndpoint::failSession(SessionError err, std::string_view detail) {
 
 }  // namespace proto
 }  // namespace espview
-
 
 

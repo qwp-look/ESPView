@@ -23,6 +23,9 @@ inline constexpr uint8_t kProtocolVersion = 0x01;
 // 单包载荷上限（Header.LENGTH 上限，0..kMaxPacketPayload）
 inline constexpr uint32_t kMaxPacketPayload = 4096;
 
+// CAPABILITIES payload 版本（AD.2：payload 独立于 kProtocolVersion；0x00 或 >0x01 丢弃）
+inline constexpr uint8_t kCapabilitiesPayloadVersion = 0x01;
+
 // 逻辑 Message 完整 payload 上限（MAX_MESSAGE_PAYLOAD，DESIGN.md E 节，M0-C 正式冻结）。
 // 一个 Message 的所有 CHUNKED Packet 拼接后不得超过该值；仅 wire-level 上限，
 // 不要求任何组件分配固定 1 MiB 缓冲（流式/分段处理）。
