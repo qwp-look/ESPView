@@ -2154,3 +2154,215 @@ Packet Header/CRC/Frame 语义）。
 - 未实现：OLED 像素级预览（wire gap，AC.10 Path B 冻结为 C4+）、Wi-Fi
   credential（C5）、OTA/Touch/压缩。不修改 wire format、不改 OLED renderer、
   不重新实现 PhysicalDisplaySink/DisplayRouter/ProtocolEndpoint/FrameAssembler。
+
+============================================================
+AD. M7-D1 CAPABILITIES（2026-08-15 设计冻结；wire additive，Packet Header/CRC/既有消息未修改）
+============================================================
+
+### AD.1 定位
+
+M7-D1 正式冻结 CAPABILITIES（TYPE 0x02）payload layout 并实现两端：
+ESP32 在每会话 HELLO 握手后发送一次能力快照；PC 解析并消费。
+wire format 只做 additive：不修改 Packet Header / CRC / 既有消息 payload /
+Frame 语义；HELLO layout 不动；SET_MODE 0..3 语义不动。
+
+### AD.2 CAPABILITIES payload（v0.1，定长 32 字节，多字节 LE）
+
+| 偏移 | 宽度 | 字段 | 取值 | 语义 |
+|---|---|---|---|---|
+| 0 | 1 | version | 0x01 | payload 版本（独立于 kProtocolVersion；0x00 或 >0x01 → 丢弃） |
+| 1 | 1 | flags | bit0=virtualPresent bit1=physicalPresent | sink 存在位（派生自真实 sink 状态，非编译期常量） |
+| 2 | 2 | width | 1..4096 | 虚拟几何宽（与 HELLO 对齐；320） |
+| 4 | 2 | height | 1..4096 | 虚拟几何高（240） |
+| 6 | 1 | pixelFormat | 0=RGB565 | 虚拟像素格式（v0.1） |
+| 7 | 1 | colorDepth | 16 | 虚拟色深 bpp |
+| 8 | 1 | virtualMono | 0/1 | 虚拟单色标志（false） |
+| 9 | 1 | virtualCanReadback | 0/1 | 虚拟回读支持（true） |
+| 10 | 1 | modeMask | bit0..3=WINDOW/DEVICE/MIRROR/SPLIT | 显示模式掩码（硬件派生，禁止编译期常量冒充） |
+| 11 | 5 | rsvd | 0 | 保留（发送方填 0；接收方忽略） |
+| 16 | 2 | physWidth | 1..4096；0=未知 | 物理宽（OLED=128） |
+| 18 | 2 | physHeight | 1..4096；0=未知 | 物理高（OLED=64） |
+| 20 | 1 | physPixelFormat | 0=RGB565 / 1=Mono1 | 物理像素格式（OLED=1） |
+| 21 | 1 | physColorDepth | 1 | 物理色深 bpp |
+| 22 | 1 | physMono | 0/1 | 物理单色（OLED=true） |
+| 23 | 1 | physCanReadback | 0/1 | 物理回读（OLED=false） |
+| 24 | 1 | physController | 0=AUTO 1=SSD1306 2=SH1106 0xFF=UNKNOWN | 物理控制器枚举（对齐 shared/oled ControllerType 与 OledControllerCode） |
+| 25 | 1 | physI2cAddress | 0x00=未知 | I2C 7-bit 地址（0x3C 等） |
+| 26 | 1 | sceneSupport | bit0=kApplication bit1=kDiagnostics | 物理场景支持（v0.1=0b11） |
+| 27 | 5 | rsvd2 | 0 | 保留（发送方填 0；接收方忽略） |
+
+合计 32 字节 < 4096：单包，无需 CHUNKED。
+
+### AD.3 ACK / 兼容性 / 版本策略
+
+- ACK：**不带 ACK_REQ**（fire-and-forget）。每会话 CONNECTED 后发送一次，
+  重连重发；重复按刷新处理。理由：旧 PC 对未知控制消息静默丢弃，带 ACK_REQ
+  只会产生无意义重试噪音；能力快照丢失由下一会话补发，无重试价值。
+- 旧 PC ↔ 新 ESP：0x02 类型合法、CRC 通过、不 failSession；旧 PC 静默丢弃。
+- 新 PC ↔ 旧 ESP：旧设备不发 CAPABILITIES → PC 保持 oled 遥测推断 +
+  「Capability unavailable」展示；**不得**因 HELLO mode_mask 或 SET_MODE ACK ok
+  自动放行 OLED/Split。只有明确 capability snapshot 才能启用对应 UI。
+- 解析规则：短于 32B 丢弃（诊断计数）；长于 32B 忽略尾部；version≠0x01 丢弃；
+  未知枚举白名单映射到 UNKNOWN（0xFF），杜绝 UI 数值注入。
+
+### AD.4 Host 模型映射
+
+- ESP32 发送侧：DisplayCapabilities（display_capabilities.h，sink init 事实）→
+  wire 全直接：width/height→physW/H、format→physPixelFormat、color→physColorDepth、
+  mono→physMono、canReadback→physCanReadback、sinkKind→flags 存在位、controller/
+  i2cAddress 来自 OledFb 常量（SSD1306/0x3C）、sceneSupport=0b11。
+- PC 消费侧：PhysicalCapabilitySnapshot（physical_capability_snapshot.h）——
+  capabilityKnown←physicalPresent；width/height/mono/canReadback/controller/address/
+  scene 由「推断/遥测」升级为 wire 直接映射；healthy/telemetryFresh 仍属遥测
+  （能力≠健康）；provenance 追加 kCapabilitiesMessage。
+
+### AD.5 边界
+
+- 不修改：Packet Header、CRC、HELLO、SET_MODE、Frame 语义。
+- CAPABILITIES 是 additive：老固件无该消息时 Qt graceful fallback（遥测推断）。
+- 本消息不含任何凭据。
+
+============================================================
+AE. M7-D2 PHYSICAL_PREVIEW（2026-08-15 设计冻结；wire additive）
+============================================================
+
+### AE.1 定位
+
+M7-D2 冻结 PHYSICAL_PREVIEW（TYPE 0x13）payload layout：ESP32 把 OLED
+（SSD1306 128x64 1bpp）当前内容作为诊断/UX 预览帧上行到 PC Split Drawer。
+Preview 是诊断/UX 特性，**不是第二权威 framebuffer**：ESP32 Application
+authority 不变；不改 PhysicalDisplaySink/DisplayRouter 渲染决策；
+caps.canReadback 保持 false。wire additive：不修改 Packet Header/CRC/
+既有消息/Frame 语义。
+
+### AE.2 PHYSICAL_PREVIEW payload（v0.1，1032 字节，多字节 LE）
+
+| 偏移 | 宽度 | 字段 | 取值 | 语义 |
+|---|---|---|---|---|
+| 0 | 2 | frameId | 0..65535 回绕 | 预览帧序号；PC 侧 `(int16_t)(id-last)>0` 丢弃乱序/过期 |
+| 2 | 2 | width | 128 | 物理宽（v1 恒 128；解析方以本字段为准） |
+| 4 | 2 | height | 64 | 物理高（v1 恒 64） |
+| 6 | 1 | pixelFormat | 1=Mono1（新增 kMono1=1；HELLO 布局不改） | 1bpp 页式 |
+| 7 | 1 | flags | bit0=0（v1 恒 FULL，预留增量） | 帧类型位 |
+| 8 | 1024 | pixels | 页式 1bpp | 与 OledFb::data() 逐字节一致的快照 |
+
+合计 1032B < 4096：单包，Encoder 恒产出 1 个 CHUNKED=0 包，恰消耗 1 个 SEQ。
+
+### AE.3 传输语义
+
+- CHUNKED：**不需要**（1032B 单包）。
+- ACK：**fire-and-forget**（与 FRAME_* 数据面一致；ACK 只服务控制消息；
+  丢帧自重同步、背压整帧丢弃已覆盖；重试引入乱序/重复无收益）。
+- 序列：复用 Packet SEQ（字节流连续性）；frameId 做消息级去重/过期；
+  握手时双方清零；断线重连 PC 清 lastFrameId 后首帧无条件接受。
+- 频率：上限 10 Hz，默认 2 Hz（对齐 OLED 500ms 刷新节拍）；
+  UART 115200 → 1 Hz（占空比 9.1%/fps；勘误 AC.10 的 "1fps 占 91%" 应为
+  9.1%/fps，91% 对应 10fps）；921600 → 5 Hz；TCP → 5–10 Hz。
+- 内存：复用 ESP32 权威 1KB fb 免重采样；OLED 任务在内容确定点做 1KB
+  短拷贝进预览槽（最新帧合并，不阻塞、不触碰 transport）；发送在会话侧
+  任务；峰值额外 ≈ +3KB（槽 1KB + payload 1032B + 包缓冲 1052B 复用）。
+- 重连/断线：ESP32 仅 CONNECTED 发送，握手重置 frameId/清槽；PC 断线
+  清空预览位图，重连等首帧 FULL。
+- DisplayMode 交互：Preview 只镜像面板当前内容（Diagnostics→诊断页 fb_，
+  Application→appFb_），不改变真实 Physical output；任何模式下 Preview 均可
+  作为 Drawer 辅助观察。
+
+### AE.4 安全
+
+载荷 = 诊断页或 1bpp 应用缩略帧，无凭据（StatusSnapshot 无 SSID/密码）；
+与 Virtual 帧同等级明文，不引入新暴露面。
+
+### AE.5 边界
+
+- 不修改：Packet Header、CRC、HELLO、SET_MODE、Frame 语义、DisplayCapabilities。
+- Preview 使能由 PC 侧 UI 控制（QSettings preview enabled），ESP32 侧默认关闭
+  或按 Kconfig 默认开启需在 D2 实现时定夺并记录。
+- 本消息不含任何凭据。
+
+============================================================
+AF. M7-D3 Wi-Fi Provisioning Protocol（2026-08-15 设计冻结；wire additive）
+============================================================
+
+### AF.1 定位
+
+M7-D3 冻结 Wi-Fi 配置协议族（4 个新增 TYPE，全部单包 ≤4096B、additive；
+VERSION 保持 0x01；复用既有 ACK（500ms×2 重试、单槽串行）/ERROR/CHUNKED
+机制）。目标：UART bootstrap → 扫描 → 配置 SSID/password/TCP server →
+GOT_IP → TCP handoff。**凭据只经 UART bootstrap 下发，绝不经 TCP 下发。**
+
+### AF.2 消息族与 Wire layout
+
+**WIFI_SCAN_REQ（0x06，PC→ESP，必须 ACK_REQ，2B）**
+| 偏移 | 宽度 | 字段 | 语义 |
+|---|---|---|---|
+| 0 | 1 | flags | bit0..7 保留（0） |
+| 1 | 1 | maxEntries | 0=默认 32；上限 64 |
+
+**WIFI_SCAN_RESULT（0x07，ESP→PC，fire-and-forget，≤2693B）**
+| 偏移 | 宽度 | 字段 | 语义 |
+|---|---|---|---|
+| 0 | 1 | scanSeq | 扫描序号（响应 REQ 计数，回绕） |
+| 1 | 1 | count | records 数（0..maxEntries） |
+| 2 | 1 | flags | bit0=truncated |
+| 3 | 2 | total | 总可见 AP 数（含截断） |
+| 5 | count×42 | records | ssid[32] NUL 填充 + bssid[6] + rssi(1) + channel(1) + authmode(1，ESP-IDF 0..8) + rsvd(1)；按 RSSI 降序 top-N |
+
+**WIFI_CONFIG（0x08，PC→ESP，必须 ACK_REQ，103B）**
+| 偏移 | 宽度 | 字段 | 语义 |
+|---|---|---|---|
+| 0 | 1 | flags | bit0=CLEAR（清除凭据并断开）；其余保留 |
+| 1 | 32 | ssid | UTF-8 定长 NUL 填充（1..32 字节） |
+| 33 | 64 | password | 0 长度=开放网络；8..63 字节 passphrase；64-hex raw-PSK 预留 |
+| 97 | 4 | serverIp | 网络序 IPv4；禁 0.0.0.0 |
+| 101 | 2 | serverPort | LE u16，1..65535 |
+
+**WIFI_STATUS（0x09，ESP→PC，fire-and-forget，≤49B）——绝无密码字段**
+| 偏移 | 宽度 | 字段 | 语义 |
+|---|---|---|---|
+| 0 | 1 | phase | IDLE/SCANNING/CONFIG_APPLYING/WIFI_CONNECTING/WIFI_CONNECTED/GOT_IP/TCP_CONNECTING/TCP_CONNECTED/ERROR/CLEARED |
+| 1 | 2 | errorCode | 复用 kInvalidParam/kBusy/kInternal + 新增 5..12（scan/auth/AP-not-found/DHCP-timeout/not-configured/server-unreachable/storage/api） |
+| 3 | 1 | flags | 保留 |
+| 4 | 1 | rssi | dBm（-128=无） |
+| 5 | 1 | channel | 0=无 |
+| 6 | 4 | ip | 本机 IPv4（网络序） |
+| 10 | 4 | serverIp | 目标 server IPv4（网络序） |
+| 14 | 2 | serverPort | LE |
+| 16 | 1 | ssidLen | 0..32 |
+| 17 | ssidLen | ssid | 当前网络名（非 secret metadata） |
+
+错误码新增：5=kScanFailed 6=kAuthFailed 7=kApNotFound 8=kDhcpTimeout
+9=kNotConfigured 10=kServerUnreachable 11=kStorageError 12=kApiError。
+
+### AF.3 传输/ACK 语义
+
+- WIFI_SCAN_REQ / WIFI_CONFIG：必须 ACK_REQ（控制消息）；ACK ERR → 不上报
+  成功、不落存储；PC 探针（0x06）ACK OK 后才发真实凭据（0x08）。
+- WIFI_SCAN_RESULT / WIFI_STATUS：fire-and-forget（状态流，无重试价值）。
+- 兼容性：老固件对未知 ACK_REQ 确定性回 ACK ERR kInvalidParam → PC 探针失败
+  即提示"固件不支持 Wi-Fi provisioning"，优雅降级，**不发真实凭据**。
+
+### AF.4 凭据生命周期（安全冻结）
+
+- **默认 RAM-only**：断电即失，无 at-rest 秘密；Wi-Fi 重连不需重启
+  （esp_wifi_stop→set_config→start→connect）。
+- NVS 明文持久化（"上电免配网"）为显式选项：当前无 flash encryption，属
+  **plaintext at-rest**（esp_partition_read 可读），须记录风险 + 提供 CLEAR
+  动作；不推荐默认启用。本阶段不实现 NVS 持久化。
+- password 永不进：日志 / ERROR 文本遥测 / RuntimeStats / 诊断 / QSettings /
+  DESIGN / git / PNG dump / UI（仅可记录长度）。
+- PC：对话框输入（禁 CLI 参数）→ 专用内存构造 → ACK 成功或耗尽后立即
+  secureErase → 不持久化。SSID 可选保存（非 secret metadata），默认不保存。
+- ESP32：接收后复制到 RAM 并清零消息缓冲；应用后清零副本；重连不重发；
+  CLEAR（flags bit0）清除凭据并断开。
+- **明文风险声明**：SSID/password 经 UART（及未来任何 TCP 下发）为明文载荷
+  （CRC32 仅完整性非加密）。**M7-D 只能做局域网开发工具用途，不能宣称安全
+  provisioning；不实现 TLS。** UART bootstrap 配网完成后建议断开物理通道；
+  威胁模型限于可信开发局域网。
+- TCP server 暴露面：PC TCP server 默认建议 bind 127.0.0.1（Peer token 机制
+  留待后续），凭据路径锁定 UART-only。
+
+### AF.5 边界
+
+- 不修改：Packet Header、CRC、HELLO、SET_MODE、Frame 语义、CAPABILITIES。
+- 本阶段不实现 NVS 持久化、不实现 TLS、不做 AP outage 测试（用户明确禁止）。
+- 新增错误码 5..12 为 additive 扩展（不影响既有 0..4）。
