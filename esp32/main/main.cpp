@@ -27,8 +27,10 @@
 #if CONFIG_ESPVIEW_OLED_ENABLE
 #include "esp_netif.h"
 #include "oled/oled_display.hpp"
+#include "oled/physical_display_sink.hpp"  // M7-C2：PhysicalDisplaySink（IDisplaySink）
 #endif
 
+#include "display_router.h"              // M7-C2：DisplayRouter / PhysicalScene（shared/display）
 #include "espview/tcp_transport.hpp"
 #include "espview/uart_transport.hpp"
 #include "transport_manager.h"           // shared/transport：TransportManager
@@ -111,6 +113,12 @@ std::atomic<uint64_t> g_switchEntryMs{0};
 std::atomic<uint64_t> g_switchExitMs{0};
 std::atomic<bool> g_switchActive{false};
 #endif
+// M7-C2 test-only：F11（HID 0x44）按下 → 运行时循环 DisplayRouteMode 0..3
+// （0→1→2→3→0）的验收钩子（CONFIG_ESPVIEW_TEST_MODE_SWITCH，生产固件置 n）。
+// 请求由 sessionLoop 消费执行（避免在 RX/输入处理栈内切换 DisplayRouter 模式）。
+#if CONFIG_ESPVIEW_TEST_MODE_SWITCH
+std::atomic<bool> g_modeSwitchPending{false};
+#endif
 // M6-D 诊断：session/stats 任务句柄（供 TEST_TRANSPORT_SWITCH 调试命令报告任务状态；
 // 任务循环无条件记录，故无条件声明；生产固件 =n 时仅赋值、不被读取）。
 TaskHandle_t g_sessionTask = nullptr;
@@ -128,7 +136,11 @@ uint64_t monotonicMs();
 #include "esp_system.h"     // esp_get_free_heap_size / esp_get_minimum_free_heap_size
 #if CONFIG_ESPVIEW_OLED_ENABLE
 extern std::unique_ptr<espview::oled::OledDisplay> g_oled;  // 定义在文件下方
+// M7-C2：PhysicalDisplaySink（定义在文件下方；SET_MODE/调试钩子提前引用）。
+extern std::shared_ptr<espview::oled::PhysicalDisplaySink> g_physicalSink;
 #endif
+// M7-C2：DisplayRouter（定义在文件下方；SET_MODE/调试钩子提前引用）。
+extern std::shared_ptr<display::DisplayRouter> g_router;
 
 #include "esp_heap_caps.h"  // heap_caps_get_largest_free_block / MALLOC_CAP_DEFAULT
 #include "esp_system.h"     // esp_get_free_heap_size / esp_get_minimum_free_heap_size
@@ -236,19 +248,62 @@ void onHello(const HelloInfo& hello) {
              hello.device_name.data());
 }
 
-// SET_MODE 请求（ACK_REQ）：Application 校验后回 ACK（M1-2 无真实 Display backend）。
+// ---- M7-C2：DisplayRouteMode 映射与模式应用（SET_MODE 与 test-only 钩子共用）----
+// SET_MODE（0..3）→ DisplayRouteMode 显式映射（值对齐 wire：0/1/2/3）。
+display::DisplayRouteMode routeModeOf(uint8_t mode) {
+    switch (mode) {
+        case 0: return display::DisplayRouteMode::kVirtualOnly;
+        case 1: return display::DisplayRouteMode::kPhysicalOnly;
+        case 2: return display::DisplayRouteMode::kMirror;
+        case 3: return display::DisplayRouteMode::kSplit;
+    }
+    return display::DisplayRouteMode::kVirtualOnly;  // 不可达（调用方已校验 0..3）
+}
+
+// 模式 → PhysicalScene（M7-C2 定稿映射）：
+//   Mirror/PhysicalOnly → Application（OLED 显示 LVGL 应用缩略帧）；
+//   Split → Diagnostics；VirtualOnly → Diagnostics（应用帧禁用，诊断页继续）。
+// 仅 OLED_ENABLE 时使用（applyDisplayMode 内 PhysicalScene 仅存在于物理 sink 路径）。
+#if CONFIG_ESPVIEW_OLED_ENABLE
+display::PhysicalScene sceneOf(uint8_t mode) {
+    return (mode == 1 || mode == 2) ? display::PhysicalScene::kApplication
+                                    : display::PhysicalScene::kDiagnostics;
+}
+#endif
+
+// 应用模式：白名单已由调用方校验（0..3）；Router 缺 physical sink 时
+// setMode 返回 kInvalidParam 且不崩溃（C1 语义；OLED=n 时 1/2/3 走此降级）。
+void applyDisplayMode(uint8_t mode) {
+    g_currentMode = static_cast<DisplayMode>(mode);
+    if (g_router) {
+        const display::DisplayStatus rs = g_router->setMode(routeModeOf(mode));
+        ESP_LOGI(kTag, "applyDisplayMode mode=%u router=%s state=%d", static_cast<unsigned>(mode),
+                 rs == display::DisplayStatus::kOk ? "ok" : "err",
+                 static_cast<int>(g_router->state()));
+    } else {
+        ESP_LOGI(kTag, "applyDisplayMode mode=%u (router not assembled)", static_cast<unsigned>(mode));
+    }
+#if CONFIG_ESPVIEW_OLED_ENABLE
+    if (g_physicalSink) {
+        g_physicalSink->setScene(sceneOf(mode));
+    }
+#endif
+}
+
+// SET_MODE 请求（ACK_REQ）：白名单 0..3（M7-C2 起 kSplit 接受）；模式经
+// DisplayRouter 实际路由（缺 physical sink 时对应模式仍 ACK OK，但仅虚拟侧生效）。
 void onSetModeRequest(uint8_t type, const std::vector<uint8_t>& payload, uint16_t ackSeq) {
     if (type != static_cast<uint8_t>(MessageType::kSetMode) || payload.size() != 1) {
         g_endpoint.acknowledge(ackSeq, 1, ErrorCode::kInvalidParam);
         return;
     }
     const uint8_t mode = payload[0];
-    if (mode > static_cast<uint8_t>(DisplayMode::kMirror)) {
+    if (mode > static_cast<uint8_t>(display::DisplayRouteMode::kSplit)) {
         g_endpoint.acknowledge(ackSeq, 1, ErrorCode::kInvalidParam);
         ESP_LOGW(kTag, "SET_MODE invalid mode=%u -> ACK ERR", static_cast<unsigned>(mode));
         return;
     }
-    g_currentMode = static_cast<DisplayMode>(mode);
+    applyDisplayMode(mode);
     ESP_LOGI(kTag, "SET_MODE OK mode=%u -> ACK", static_cast<unsigned>(mode));
     g_endpoint.acknowledge(ackSeq, 0, ErrorCode::kNone);
 }
@@ -274,6 +329,15 @@ void onOtherMessage(const Message& msg) {
         // 走正常输入链路）。调试键不进入输入链路。
         if (e.type == espview::input::InputType::kKeyDown && e.keycode == 0x45u) {
             g_debugSwitchPending.store(true);
+            return;
+        }
+#endif
+#if CONFIG_ESPVIEW_TEST_MODE_SWITCH
+        // M7-C2 test-only：F11 按下 → 请求运行时循环 DisplayRouteMode 0..3
+        // （验收钩子；生产固件 CONFIG_ESPVIEW_TEST_MODE_SWITCH=n 时该键走
+        // 正常输入链路）。调试键不进入输入链路。
+        if (e.type == espview::input::InputType::kKeyDown && e.keycode == 0x44u) {
+            g_modeSwitchPending.store(true);
             return;
         }
 #endif
@@ -450,6 +514,31 @@ void debugTransportSwitch() {
 }
 #endif  // CONFIG_ESPVIEW_TEST_TRANSPORT_SWITCH
 
+#if CONFIG_ESPVIEW_TEST_MODE_SWITCH
+// M7-C2 test-only：F11 执行体（sessionLoop 上下文）：循环 DisplayRouteMode
+// 0..3（0→1→2→3→0），与 SET_MODE 同一 applyDisplayMode 路径（白名单 + Router
+// setMode + PhysicalScene 映射）。状态经 ERROR 文本通道上报（非 wire 格式）。
+void debugModeSwitch() {
+    const uint8_t next = static_cast<uint8_t>(
+        (static_cast<uint8_t>(g_currentMode) + 1u) % 4u);
+    applyDisplayMode(next);
+    char buf[64];
+    std::snprintf(buf, sizeof(buf), "mod sw=%u st=%d scene=%d",
+                  static_cast<unsigned>(next),
+                  g_router ? static_cast<int>(g_router->state()) : -1,
+#if CONFIG_ESPVIEW_OLED_ENABLE
+                  g_physicalSink ? static_cast<int>(g_physicalSink->scene()) : -1
+#else
+                  -1
+#endif
+    );
+    const auto m = makeError(ErrorCode::kNone, buf);
+    if (m.has_value()) {
+        g_endpoint.sendMessage(*m);
+    }
+}
+#endif  // CONFIG_ESPVIEW_TEST_MODE_SWITCH
+
 // ---- 会话驱动：每 200ms tick（心跳 2s / 对端超时 5s / ACK 重试 500ms）----
 // 注意：本任务绝不做阻塞式发送。流式大帧（153608B FRAME_RECT）会持有
 // sendMutex_ 十余秒，任何阻塞式 sendMessage 都会让 tick() 饿死（心跳停摆、
@@ -460,6 +549,11 @@ void sessionLoop(void*) {
 #if CONFIG_ESPVIEW_TEST_TRANSPORT_SWITCH
         if (g_debugSwitchPending.exchange(false)) {
             debugTransportSwitch();
+        }
+#endif
+#if CONFIG_ESPVIEW_TEST_MODE_SWITCH
+        if (g_modeSwitchPending.exchange(false)) {
+            debugModeSwitch();
         }
 #endif
         g_endpoint.tick();
@@ -623,7 +717,7 @@ const EndpointConfig kEndpointCfg = [] {
     c.width = 320;
     c.height = 240;
     c.pixel_format = PixelFormat::kRgb565;
-    c.mode_mask = 0b111;  // WINDOW | DEVICE | MIRROR
+    c.mode_mask = 0b1111;  // M7-C2：WINDOW | DEVICE | MIRROR | SPLIT（SET_MODE 白名单 0..3）
     c.device_name = "espview-esp32";
     return c;
 }();
@@ -651,7 +745,12 @@ ProtocolEndpoint g_endpoint(kEndpointCfg, transportSink, trySink, kEndpointCallb
 #if CONFIG_ESPVIEW_OLED_ENABLE
 // M7-A：独立 OLED 状态显示（组件协议无关；任务优先级 2 < stats=3/session=5）。
 std::unique_ptr<espview::oled::OledDisplay> g_oled;
+// M7-C2：物理显示 sink（IDisplaySink；app_main 组装：init + attachPhysical）。
+std::shared_ptr<espview::oled::PhysicalDisplaySink> g_physicalSink;
 #endif
+// M7-C2：DisplayRouter 全局（app_main 组装：lvgl_port attach virtual、本文件
+// attach physical + setMode；SET_MODE 请求与 test-only 钩子共用）。
+std::shared_ptr<display::DisplayRouter> g_router;
 
 #if CONFIG_ESPVIEW_APP_LVGL
 // M5-A LVGL Port：display driver + flush_cb + TX 任务 + 统计。
@@ -673,13 +772,17 @@ extern "C" void app_main() {
 #endif
 
 #if CONFIG_ESPVIEW_APP_LVGL
-    // M5-A：LVGL 应用（真实 UI → dirty rect → RemoteDisplay → 协议 → PC 窗口）。
+    // M7-C2：DisplayRouter 组装（lvgl_port 构造时 attach VirtualSink；本文件随后
+    // attach PhysicalDisplaySink + setMode；SET_MODE 白名单 0..3 映射到 Router）。
+    g_router = std::make_shared<display::DisplayRouter>();
+    // M5-A：LVGL 应用（真实 UI → dirty rect → DisplayRouter → 虚拟/物理 sink）。
     // 发送回调同时持有普通 Message 与 Streaming 两条路径（与 TestPattern 同构）。
     g_lvgl = std::make_unique<espview::LvglPort>(
         [](const Message& msg) { return g_endpoint.sendMessage(msg); },
         [](const MessageHeader& header, IMessagePayloadSource& source) {
             return g_endpoint.sendMessageStreaming(header, source);
-        });
+        },
+        g_router);
     g_lvgl->start();
 #else
     // M1-3C：TestPattern 同时持有普通 Message 发送与 Streaming 发送两条路径；
@@ -752,8 +855,52 @@ extern "C" void app_main() {
             ESP_LOGE(kTag, "OLED display start failed");
             g_oled.reset();
         }
+        // M7-C2：PhysicalDisplaySink 组装（init 校验生产者能力并落定自身 128x64
+        // mono；attach 后由 Router 路由；OLED start 失败时 sink 仍 attach，
+        // isAvailable()==false → Router 收敛 kDegraded，Virtual 侧不受影响）。
+        if (g_oled) {
+            // 非拥有引用：g_physicalSink 与 g_oled 同为全局，销毁序 sink 先于 display。
+            g_physicalSink = std::make_shared<espview::oled::PhysicalDisplaySink>(g_oled.get());
+            display::DisplayCapabilities prodCaps;
+            prodCaps.width = 320;    // LVGL/TestPattern 源帧分辨率（LVGL 320x240）
+            prodCaps.height = 240;
+            prodCaps.format = proto::PixelFormat::kRgb565;
+            prodCaps.color = 16;
+            prodCaps.mono = false;
+            prodCaps.canReadback = true;
+            prodCaps.sinkKind = display::DisplaySinkKind::kVirtual;  // 生产者侧能力描述
+            if (g_physicalSink->init(prodCaps) == display::DisplayStatus::kOk && g_router) {
+                g_router->attachPhysical(g_physicalSink);
+                ESP_LOGI(kTag, "PhysicalDisplaySink attached (src %ux%u -> 128x64 mono)",
+                         static_cast<unsigned>(prodCaps.width),
+                         static_cast<unsigned>(prodCaps.height));
+            } else {
+                ESP_LOGE(kTag, "PhysicalDisplaySink init failed; physical routing disabled");
+                g_physicalSink.reset();
+            }
+        }
     }
 #endif
+
+    // M7-C2：Router 钩子 —— 模式切换成功后请求下一帧 FULL resync（LVGL 全屏置脏，
+    // 所有启用 sink 收新帧；stale-clear 由 RemoteDisplay 自身 FULL 语义覆盖，本层
+    // 不额外清屏）。钩子内不得调用 Router 锁方法（display_router.h 约定）。
+    if (g_router) {
+        g_router->setFullResyncCallback([] {
+#if CONFIG_ESPVIEW_APP_LVGL
+            if (g_lvgl) {
+                g_lvgl->requestFullInvalidate();
+            }
+#endif
+        });
+        // 初始模式（CONFIG_ESPVIEW_DEFAULT_MODE：0=VirtualOnly 1=PhysicalOnly
+        // 2=Mirror 3=Split；硬件验证 Physical/Mirror 时改此值；与 SET_MODE 同路径）。
+        uint8_t initialMode = static_cast<uint8_t>(CONFIG_ESPVIEW_DEFAULT_MODE);
+        if (initialMode > static_cast<uint8_t>(display::DisplayRouteMode::kSplit)) {
+            initialMode = static_cast<uint8_t>(display::DisplayRouteMode::kVirtualOnly);
+        }
+        applyDisplayMode(initialMode);
+    }
 
     xTaskCreate(sessionLoop, "espview_sess", 4096, nullptr, 5, nullptr);
     xTaskCreate(statsLoop, "espview_stat", 4096, nullptr, 3, nullptr);

@@ -476,7 +476,7 @@ void initEndpoint(Harness& h) {
     cfg.width = 320;
     cfg.height = 240;
     cfg.pixel_format = espview::proto::PixelFormat::kRgb565;
-    cfg.mode_mask = 0b111;
+    cfg.mode_mask = 0b1111;  // M7-C2：WINDOW|DEVICE|MIRROR|SPLIT
     cfg.device_name = "espview-pc-input";
 
     auto sink = [&h](const uint8_t* d, size_t n) -> SendStatus {

@@ -87,7 +87,7 @@ struct EndpointConfig {
     uint16_t width = 320;                         // HELLO.width（默认输出分辨率）
     uint16_t height = 240;                        // HELLO.height
     PixelFormat pixel_format = PixelFormat::kRgb565;
-    uint8_t mode_mask = 0b111;  // bit0=WINDOW, bit1=DEVICE, bit2=MIRROR
+    uint8_t mode_mask = 0b1111;  // bit0=WINDOW, bit1=DEVICE, bit2=MIRROR, bit3=SPLIT (M7-C2)
     std::string device_name = "espview";
 
     // 心跳（DESIGN.md：PING 每 2s；对端 5s 无响应判超时）

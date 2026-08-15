@@ -15,6 +15,7 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <cstring>
 #include <functional>
 #include <memory>
 #include <utility>
@@ -49,7 +50,10 @@ constexpr uint32_t kDtorJoinTimeoutMs = 15000;
 }  // namespace
 
 OledDisplay::OledDisplay(const OledConfig& cfg, StatusProvider provider)
-    : cfg_(cfg), provider_(std::move(provider)) {}
+    : cfg_(cfg), provider_(std::move(provider)) {
+    // M7-C2：应用帧渲染器（128x64 单色；presentAppFrame 在互斥锁内使用）。
+    appRenderer_ = std::make_unique<PhysicalRenderer>(OledFb::kWidth, OledFb::kHeight);
+}
 
 OledDisplay::~OledDisplay() {
     stop();
@@ -166,6 +170,78 @@ OledStatus OledDisplay::status() const {
     return s;
 }
 
+// ---- M7-C2：场景/应用帧控制（跨任务安全；原子/互斥）----
+
+void OledDisplay::setScene(Scene scene) {
+    scene_.store(static_cast<uint8_t>(scene), std::memory_order_relaxed);
+}
+
+OledDisplay::Scene OledDisplay::scene() const {
+    return static_cast<Scene>(scene_.load(std::memory_order_relaxed));
+}
+
+void OledDisplay::setAppFramesEnabled(bool enabled) {
+    appFramesEnabled_.store(enabled, std::memory_order_relaxed);
+}
+
+bool OledDisplay::appFramesEnabled() const {
+    return appFramesEnabled_.load(std::memory_order_relaxed);
+}
+
+// PhysicalDisplaySink::present 委托：用 PhysicalRenderer 同步渲染进共享
+// appFb_ 并置 dirty。本方法在 UI/LVGL 任务执行，绝不持有 rgb565 指针
+// （renderFrame 同步完成）；appFbMutex_ 与 OLED 任务的上传快照互斥。
+void OledDisplay::presentAppFrame(int srcW, int srcH, const RenderRect& rect,
+                                  const uint8_t* rgb565) {
+    std::lock_guard<std::mutex> lock(appFbMutex_);
+    if (appRenderer_ == nullptr || rgb565 == nullptr) {
+        return;  // 渲染器未就绪 / 非法指针：忽略（调用方已校验场景与启用态）
+    }
+    appRenderer_->renderFrame(appFb_, srcW, srcH, rgb565, rect);
+    appFrameDirty_.store(true, std::memory_order_release);
+}
+
+// M7-C2：上传结果统一收口（保持 M7-B Z.2/Z.4 语义：成功更新 ok/state/
+// flushCount/lastFlushMs；失败 recordError + 有界 re-init 恢复；busReady
+// 为 taskLoop 局部变量，重建路径经引用回落）。
+void OledDisplay::handleUploadResult(uint64_t nowMs, bool uploaded, bool& busReady) {
+    if (uploaded) {
+        ok_.store(true, std::memory_order_relaxed);
+        state_.store(static_cast<uint8_t>(OledState::kReady),
+                     std::memory_order_relaxed);
+        consecutiveErrors_.store(0, std::memory_order_relaxed);
+        flushCount_.fetch_add(1, std::memory_order_relaxed);
+        lastFlushMs_.store(nowMs, std::memory_order_relaxed);
+        return;
+    }
+    recordError(nowMs, 0);
+    const uint32_t cons =
+        consecutiveErrors_.fetch_add(1, std::memory_order_relaxed) + 1;
+    if (cons >= cfg_.maxReinit) {
+        consecutiveErrors_.store(0, std::memory_order_relaxed);
+        // 恢复路径 ①：bus_reset + 重发 init/清屏。
+        bool recovered = false;
+        esp_err_t recErr = ESP_OK;
+        if (i2c_ != nullptr && i2c_->valid()) {
+            const esp_err_t r = i2c_->resetBus();
+            if (r == ESP_OK) {
+                recovered = runInitSequence(&recErr);
+            } else {
+                recErr = r;
+            }
+        }
+        if (!recovered && recErr != ESP_OK) {
+            lastErrorCode_.store(static_cast<uint32_t>(recErr),
+                                 std::memory_order_relaxed);
+        }
+        if (!recovered) {
+            // 恢复路径 ②：整体重建（下次刷新走 initOnce）。
+            i2c_.reset();
+            busReady = false;
+        }
+        recordRecover();
+    }
+}
 void OledDisplay::taskEntry(void* arg) {
     static_cast<OledDisplay*>(arg)->taskLoop();
 }
@@ -199,46 +275,28 @@ void OledDisplay::taskLoop() {
                     }
                 }
             } else {
-                const StatusSnapshot snap = provider_();
-                renderStatus(fb_, snap);
-                if (uploadFrame(fb_)) {
-                    ok_.store(true, std::memory_order_relaxed);
-                    state_.store(static_cast<uint8_t>(OledState::kReady),
-                                 std::memory_order_relaxed);
-                    consecutiveErrors_.store(0, std::memory_order_relaxed);
-                    flushCount_.fetch_add(1, std::memory_order_relaxed);
-                    lastFlushMs_.store(nowMs, std::memory_order_relaxed);
-                } else {
-                    recordError(nowMs, 0);
-                    const uint32_t cons = consecutiveErrors_.fetch_add(
-                                              1, std::memory_order_relaxed) +
-                                          1;
-                    if (cons >= cfg_.maxReinit) {
-                        consecutiveErrors_.store(0, std::memory_order_relaxed);
-                        // 恢复路径 ①：bus_reset + 重发 init/清屏。
-                        bool recovered = false;
-                        esp_err_t recErr = ESP_OK;
-                        if (i2c_ != nullptr && i2c_->valid()) {
-                            const esp_err_t r = i2c_->resetBus();
-                            if (r == ESP_OK) {
-                                recovered = runInitSequence(&recErr);
-                            } else {
-                                recErr = r;
-                            }
-                        }
-                        if (!recovered && recErr != ESP_OK) {
-                            lastErrorCode_.store(static_cast<uint32_t>(recErr),
-                                                 std::memory_order_relaxed);
-                        }
-                        if (!recovered) {
-                            // 恢复路径 ②：整体重建（下次刷新走 initOnce）。
-                            i2c_.reset();
-                            busReady = false;
-                        }
-                        recordRecover();
+                // M7-C2：场景分发（PhysicalDisplaySink 经 setScene/setAppFramesEnabled
+                // 设置；模式映射见 main.cpp）。Application + 应用帧启用 → dirty 触发
+                // 上传应用 fb；Diagnostics 或应用帧未启用 → 既有 renderStatus 诊断路径
+                //（系统诊断页独立于 router 持续刷新）。I2C 上传只在本任务内进行。
+                const bool appScene = scene() == Scene::kApplication &&
+                                      appFramesEnabled();
+                if (appScene && appFrameDirty_.exchange(false)) {
+                    // 快照 1KB 应用帧：锁内拷贝到上传 staging（fb_），锁外分段上传，
+                    // 避免上传期间阻塞 UI/LVGL 侧的同步渲染。
+                    {
+                        std::lock_guard<std::mutex> lock(appFbMutex_);
+                        std::memcpy(fb_.data(), appFb_.data(), OledFb::kSizeBytes);
                     }
+                    handleUploadResult(nowMs, uploadFrame(fb_), busReady);
+                } else if (!appScene) {
+                    const StatusSnapshot snap = provider_();
+                    renderStatus(fb_, snap);
+                    handleUploadResult(nowMs, uploadFrame(fb_), busReady);
                 }
+                // appScene 且无新帧：跳过本周期上传（保持最后画面；dirty 由 UI 侧置位）。
             }
+
         }
 
         // 有界等待（≤50ms 粒度）；stop() 通知立即唤醒退出。

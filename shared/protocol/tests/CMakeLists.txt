@@ -20,6 +20,7 @@ add_executable(espview_protocol_tests
     ../../transport/tests/transport_pipeline_test.cpp
     ../../oled/tests/oled_test.cpp
     ../../oled/tests/oled_status_test.cpp
+    ../../oled/tests/physical_renderer_test.cpp
 )
 target_link_libraries(espview_protocol_tests PRIVATE espview_protocol espview_input espview_display espview_transport espview_oled)
 

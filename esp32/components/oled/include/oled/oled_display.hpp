@@ -1,6 +1,8 @@
-// ESPView M7-A/M7-B — 独立 OLED 状态显示（ESP32 组件公共接口）。
+// ESPView M7-A/M7-B/M7-C2 — 独立 OLED 显示（ESP32 组件公共接口）。
 //
-// 协议无关：本组件不依赖 protocol/display/lvgl/transport；状态由 main 经
+// M7-A/M7-B：诊断状态显示（协议无关：不依赖 protocol/transport 与 LVGL；
+// M7-C2 起依赖 shared/display 抽象 —— PhysicalDisplaySink 是 IDisplaySink
+// 实现，应用帧经 shared/oled PhysicalRenderer 渲染）。状态由 main 经
 // StatusProvider（std::function<StatusSnapshot()>）注入，任务内自行读取。
 // 线程模型：
 //   - start() 创建低优先级任务（默认 2，低于 session=5 / stats=3）；
@@ -14,6 +16,14 @@
 // M7-B：StatusSnapshot/OledConfig/renderStatus 已迁移到 shared/oled
 //   （oled_status.h / oled_config.h，纯 C++17，host 可测）；本头只保留
 //   OledStatus 运行时快照与 OledDisplay 生命周期接口。
+// M7-C2：OledDisplay 扩展为 Physical Display Sink 的帧缓冲宿主 ——
+//   PhysicalDisplaySink（physical_display_sink.hpp）经 presentAppFrame()
+//   用 PhysicalRenderer（shared/oled，Agent D 交付）把 LVGL 应用帧同步
+//   渲染进共享 1KB 应用 fb（appFb_，与 OLED 任务互斥共享，绝不持有
+//   px_map 指针）；taskLoop 按场景分发：Scene::kApplication + 应用帧
+//   启用 → 上传应用 fb（dirty 触发）；否则走既有 renderStatus 诊断路径
+//   （系统诊断页独立于 router 持续刷新）。I2C 上传只发生在 OLED 任务内
+//   （本类不对外暴露任何 I2C 操作；PhysicalDisplaySink 只做同步渲染）。
 
 #pragma once
 
@@ -21,6 +31,7 @@
 #include <cstdint>
 #include <functional>
 #include <memory>
+#include <mutex>
 
 #include "esp_err.h"
 #include "freertos/FreeRTOS.h"
@@ -28,6 +39,7 @@
 
 #include "oled_config.h"   // shared/oled：OledConfig / validateOledConfig
 #include "oled_cmd.h"      // shared/oled：ControllerType（espview::oled 命名空间）
+#include "physical_renderer.h"  // shared/oled（Agent D 交付）：PhysicalRenderer / RenderRect
 #include "oled_status.h"   // shared/oled：StatusSnapshot / renderStatus
 
 namespace espview {
@@ -68,6 +80,15 @@ class OledDisplay {
 public:
     using StatusProvider = std::function<StatusSnapshot()>;
 
+    // M7-C2：物理显示场景（taskLoop 上传分发依据；由 PhysicalDisplaySink
+    // 按 SET_MODE 模式映射设置 —— Mirror/PhysicalOnly→Application，
+    // Split/VirtualOnly→Diagnostics）。数值与 display::PhysicalScene 对齐
+    // （0=Diagnostics, 1=Application），但本头不依赖 shared/display。
+    enum class Scene : uint8_t {
+        kDiagnostics = 0,  // 系统诊断页（renderStatus；独立于 router 持续刷新）
+        kApplication = 1,  // LVGL 应用缩略帧（dirty 标记触发上传）
+    };
+
     OledDisplay(const OledConfig& cfg, StatusProvider provider);
     ~OledDisplay();
 
@@ -80,6 +101,20 @@ public:
     void stop();
     OledStatus status() const;
 
+    // ---- M7-C2：场景/应用帧控制（跨任务安全；均为原子操作）----
+    // 场景切换（PhysicalDisplaySink::setScene 转发；SET_MODE 后调用）。
+    void setScene(Scene scene);
+    Scene scene() const;
+    // 应用帧接收开关（PhysicalDisplaySink::setEnabled 转发；false = 应用帧
+    // 禁用，taskLoop 回退 renderStatus 路径）。
+    void setAppFramesEnabled(bool enabled);
+    bool appFramesEnabled() const;
+    // 应用帧呈现（UI/LVGL 任务调用）：用 PhysicalRenderer 同步渲染进共享
+    // appFb_ 并置 dirty（绝不持有 rgb565 指针；与 OLED 任务互斥）。场景与
+    // 启用状态由调用方（PhysicalDisplaySink）保证；srcW/srcH 为源帧分辨率。
+    void presentAppFrame(int srcW, int srcH, const RenderRect& rect,
+                         const uint8_t* rgb565);
+
 private:
     static void taskEntry(void* arg);
     void taskLoop();
@@ -88,11 +123,20 @@ private:
     bool uploadFrame(const OledFb& fb);
     void recordError(uint64_t nowMs, int32_t errorCode);
     void recordRecover();
+    void handleUploadResult(uint64_t nowMs, bool uploaded, bool& busReady);
 
     OledConfig cfg_;
     StatusProvider provider_;
     std::unique_ptr<OledI2c> i2c_;
-    OledFb fb_;                      // 1KB 页式 framebuffer（BSS 一次性分配）
+    OledFb fb_;                      // 1KB 页式 framebuffer（诊断渲染/上传 staging）
+
+    // M7-C2：应用帧共享缓冲（PhysicalDisplaySink 渲染 / taskLoop 上传）。
+    std::mutex appFbMutex_;
+    OledFb appFb_;                                     // 1KB 应用帧（PhysicalRenderer 输出）
+    std::unique_ptr<PhysicalRenderer> appRenderer_;    // 128x64 单色渲染（构造时创建）
+    std::atomic<uint8_t> scene_{static_cast<uint8_t>(Scene::kDiagnostics)};
+    std::atomic<bool> appFramesEnabled_{false};
+    std::atomic<bool> appFrameDirty_{false};
 
     std::atomic<bool> running_{false};
     std::atomic<bool> taskExited_{false};

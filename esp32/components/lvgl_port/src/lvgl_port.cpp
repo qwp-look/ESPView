@@ -52,10 +52,68 @@ private:
     LvglPort::StreamingSender stream_;
 };
 
+// M7-C2：VirtualSink —— IDisplaySink 适配 RemoteDisplay（LVGL flush_cb →
+// DisplayRouter → VirtualSink → RemoteDisplay，保持既有 writeRect/flush 契约
+// 不变）。isAvailable → RemoteDisplay connected（transport 会话）；status →
+// debugState 派生。lastPresentStatus() 供 flush_cb 在 Mirror/Split 下识别
+// Virtual 路径背压（Router 聚合结果可能被物理侧接受掩盖，见 flushCb）。
+class VirtualSink : public display::IDisplaySink {
+public:
+    explicit VirtualSink(std::shared_ptr<display::RemoteDisplay> remote)
+        : remote_(std::move(remote)) {}
+
+    display::DisplayStatus init(const display::DisplayCapabilities& caps) override {
+        // 校验生产者能力：v0.1 仅 RGB565；分辨率必须为正。
+        if (caps.format != proto::PixelFormat::kRgb565) {
+            return display::DisplayStatus::kNotSupported;
+        }
+        if (caps.width <= 0 || caps.height <= 0) {
+            return display::DisplayStatus::kInvalidParam;
+        }
+        caps_ = caps;
+        caps_.canReadback = true;
+        caps_.sinkKind = display::DisplaySinkKind::kVirtual;
+        return display::DisplayStatus::kOk;
+    }
+
+    const display::DisplayCapabilities& capabilities() const override {
+        return caps_;
+    }
+
+    display::DisplayStatus present(const display::Rect& rect,
+                                   const uint8_t* pixels) override {
+        const display::DisplayStatus s =
+            remote_->writeRect(rect.x, rect.y, rect.w, rect.h, pixels);
+        lastPresent_ = s;
+        return s;
+    }
+
+    display::DisplayStatus flush() override { return remote_->flush(); }
+    display::DisplayStatus setEnabled(bool enabled) override {
+        return remote_->setEnabled(enabled);
+    }
+    bool isAvailable() const override { return remote_->debugState().connected; }
+    display::DisplayStatus status() const override {
+        return remote_->debugState().connected ? display::DisplayStatus::kOk
+                                               : display::DisplayStatus::kNotConnected;
+    }
+
+    // flush_cb 专用：最近一次 present() 的 Virtual 路径结果（初始 kOk）。
+    display::DisplayStatus lastPresentStatus() const { return lastPresent_; }
+
+private:
+    std::shared_ptr<display::RemoteDisplay> remote_;
+    display::DisplayCapabilities caps_;
+    display::DisplayStatus lastPresent_ = display::DisplayStatus::kOk;
+};
+
 }  // namespace
 
-LvglPort::LvglPort(Sender sender, StreamingSender streamingSender)
-    : sender_(std::move(sender)), streamingSender_(std::move(streamingSender)) {
+LvglPort::LvglPort(Sender sender, StreamingSender streamingSender,
+                   std::shared_ptr<display::DisplayRouter> router)
+    : sender_(std::move(sender)),
+      streamingSender_(std::move(streamingSender)),
+      router_(std::move(router)) {
     // RemoteDisplay + DisplayManager（编译期 WINDOW 模式）。
     sink_ = std::make_shared<EndpointSink>(sender_, streamingSender_);
     display::RemoteDisplay::Config cfg;
@@ -70,6 +128,23 @@ LvglPort::LvglPort(Sender sender, StreamingSender streamingSender)
     });
     displayMgr_ = std::make_unique<display::DisplayManager>();
     displayMgr_->addBackend(remote_);
+
+    // M7-C2：VirtualSink 适配 RemoteDisplay 并接入 DisplayRouter（main 组装
+    // physical sink 后 setMode；VirtualOnly 纯透传零回归）。init 在 attach 前
+    // 完成（display_sink.h 约定）。
+    virtualSink_ = std::make_shared<VirtualSink>(remote_);
+    display::DisplayCapabilities caps;
+    caps.width = kWidth;
+    caps.height = kHeight;
+    caps.format = proto::PixelFormat::kRgb565;
+    caps.color = 16;
+    caps.mono = false;
+    caps.canReadback = true;
+    caps.sinkKind = display::DisplaySinkKind::kVirtual;
+    (void)virtualSink_->init(caps);
+    if (router_) {
+        router_->attachVirtual(virtualSink_);
+    }
 
     slotFreeSem_ = xSemaphoreCreateBinary();
     inputAdapter_ = std::make_unique<input::LvglInputAdapter>(kWidth, kHeight);
@@ -161,8 +236,29 @@ void LvglPort::flushCb(lv_disp_drv_t* drv, const lv_area_t* area, lv_color_t* co
     const int h = area->y2 - area->y1 + 1;
     const uint8_t* px = reinterpret_cast<const uint8_t*>(color_p);
 
-    // 1) 非阻塞入队（同步拷贝 px_map → 槽 buffer）。
-    display::DisplayStatus st = self->remote_->writeRect(x, y, w, h, px);
+    // 1) 非阻塞入队：经 Router 扇出（同步拷贝 px_map → 槽 buffer / 物理渲染；
+    //    VirtualOnly 纯透传零回归）。物理侧只做同步渲染（I2C 上传在 OLED 任务），
+    //    flush_cb 不被物理侧阻塞 —— kQueueFull/kFrameBusy 等待只源于 Virtual 路径。
+    display::DisplayStatus st;
+    if (self->router_) {
+        st = self->router_->writeRect(display::Rect{x, y, w, h}, px);
+        // Mirror/Split 下 Router 聚合结果可能被物理侧接受掩盖 Virtual 背压：
+        // 若 Virtual 路径本轮确实背压，恢复既有等待/丢弃契约（VirtualOnly 时
+        // 两者等价；PhysicalOnly 时 Virtual 不在路径内，保持 kOk）。
+        if (self->router_->mode() != display::DisplayRouteMode::kPhysicalOnly) {
+            auto* vs = static_cast<VirtualSink*>(self->virtualSink_.get());
+            if (vs != nullptr) {
+                const display::DisplayStatus vsSt = vs->lastPresentStatus();
+                if ((vsSt == display::DisplayStatus::kQueueFull ||
+                     vsSt == display::DisplayStatus::kFrameBusy) &&
+                    st == display::DisplayStatus::kOk) {
+                    st = vsSt;
+                }
+            }
+        }
+    } else {
+        st = self->remote_->writeRect(x, y, w, h, px);
+    }
 
     // 2) 背压：有界等待队列空间/上一帧结束（FULL 帧允许长等 = UART 节流；
     //    PARTIAL 帧短等，超时 → 丢弃整帧 + FULL resync）。
@@ -175,7 +271,11 @@ void LvglPort::flushCb(lv_disp_drv_t* drv, const lv_area_t* area, lv_color_t* co
             if (self->slotFreeSem_ != nullptr) {
                 xSemaphoreTake(self->slotFreeSem_, pdMS_TO_TICKS(10));
             }
-            st = self->remote_->writeRect(x, y, w, h, px);
+            if (self->router_) {
+                st = self->router_->writeRect(display::Rect{x, y, w, h}, px);
+            } else {
+                st = self->remote_->writeRect(x, y, w, h, px);
+            }
         }
         if (st == display::DisplayStatus::kQueueFull ||
             st == display::DisplayStatus::kFrameBusy) {
@@ -189,7 +289,11 @@ void LvglPort::flushCb(lv_disp_drv_t* drv, const lv_area_t* area, lv_color_t* co
 
     // 3) 帧边界：最后一次 flush → flush()（TX 在队列排空后发 FRAME_END）。
     if (st == display::DisplayStatus::kOk && lv_disp_flush_is_last(drv)) {
-        self->remote_->flush();
+        if (self->router_) {
+            self->router_->flush();
+        } else {
+            self->remote_->flush();
+        }
     }
 
     // 4) 无论成功/背压/丢弃：必须调用 flush_ready（否则 LVGL 永久停在当前 cycle）。

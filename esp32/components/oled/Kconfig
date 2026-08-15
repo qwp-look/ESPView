@@ -1,15 +1,20 @@
-menu "OLED Diagnostics Display"
+menu "OLED Display (Diagnostics + Physical Sink)"
 
 config ESPVIEW_OLED_ENABLE
-    bool "Enable M7-A independent OLED status display"
+    bool "Enable OLED display (M7-A diagnostics + M7-C2 physical sink)"
     default n
     help
         M7-A：独立的 OLED 状态显示（128x64 SSD1306/SH1106，I2C）。
         低优先级任务（默认 2，低于 session=5 / stats=3）周期渲染
         StatusSnapshot（main 注入）并上传 framebuffer。
-        OLED 组件协议无关：不依赖 protocol/display/lvgl，绝不触碰
-        protocol sendMutex / Transport。禁用时零代码路径（main 集成
-        全部 #if CONFIG_ESPVIEW_OLED_ENABLE 保护）。
+        M7-C2：启用时同时注册 PhysicalDisplaySink（IDisplaySink，经
+        DisplayRouter 收 LVGL 应用帧，PhysicalRenderer 渲染进共享 1KB
+        应用 fb 由任务上传）；taskLoop 按场景分发（Application=dirty
+        触发应用帧；Diagnostics=renderStatus 诊断页）。OLED 任务绝不
+        触碰 protocol sendMutex / Transport；I2C 上传只发生在 OLED 任务内。
+        禁用时零代码路径：PhysicalDisplaySink 不编译、main 不注册
+        （OLED=n 双构建无未定义引用；DisplayRouter 无 physical sink 时
+        setMode 需要 physical 的模式返回 kInvalidParam）。
 
 config ESPVIEW_OLED_SDA_GPIO
     int "OLED I2C SDA GPIO number"

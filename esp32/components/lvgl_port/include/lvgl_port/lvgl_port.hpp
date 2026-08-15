@@ -1,17 +1,22 @@
-// ESPView M5-A — LVGL Port（display driver + flush_cb + TX 任务 + 统计）。
+// ESPView M5-A / M7-C2 — LVGL Port（display driver + flush_cb + TX 任务 + 统计）。
 //
-// 架构（M5-A 任务书 §四/§六–§十七）：
+// 架构（M5-A 任务书 §四/§六–§十七；M7-C2 增加 DisplayRouter 路由）：
 //   LVGL Application → lv_timer_handler() → flush_cb(area, px_map)
-//     → DisplayManager::active() → RemoteDisplay::writeRect()（有界 staging 拷贝）
+//     → DisplayRouter::writeRect()/flush()  → VirtualSink（RemoteDisplay，PC 虚拟）
+//                                        └→ PhysicalDisplaySink（OLED，经 Router attach）
 //     → TX 任务（pump）→ EndpointSink → ProtocolEndpoint::sendMessageStreaming
 //     → UartTransport → COM3 → PC VirtualScreenWidget
 //
-// flush_cb 生命周期（§七）：
-//   px_map 只在 flush_cb 内有效 → 同步拷贝进队列槽 → 有界等待（队列满/上一帧
-//   未结束；FULL 帧允许长等=节流，PARTIAL 短等超时=丢弃整帧+FULL resync）
-//   → 无论成败 lv_disp_flush_ready() → 之后不得再访问 px_map。
+// flush_cb 生命周期（§七；M7-C2 保留全部既有契约）：
+//   px_map 只在 flush_cb 内有效 → 经 Router 同步扇出（VirtualOnly 纯透传零回归；
+//   Mirror/Split 下 virtual 背压仍走既有有界等待 + dropPendingFrame→FULL resync）
+//   → 有界等待（队列满/上一帧未结束；FULL 帧允许长等=节流，PARTIAL 短等超时=
+//   丢弃整帧+FULL resync）→ 无论成败 lv_disp_flush_ready() → 之后不得再访问 px_map。
 // 帧边界（§六）：一个 LVGL rendering cycle = 一个 Frame；最后一个 flush
-//   （lv_disp_flush_is_last）后调用 RemoteDisplay::flush() → TX 发 FRAME_END。
+//   （lv_disp_flush_is_last）后调用 Router::flush() → TX 发 FRAME_END。
+// M7-C2 背压/降级：物理侧 I2C 失败绝不影响 Virtual sink —— PhysicalDisplaySink
+// 只做同步渲染（I2C 上传在 OLED 任务），Router 按 isAvailable() 跳过不可用 sink，
+// flush_cb 不被物理侧阻塞（kQueueFull/kFrameBusy 等待只源于 Virtual 路径背压）。
 //
 // 内存模型（§八/§九）：LVGL draw buffer = 1/10 屏（320x24 RGB565 = 15360B）；
 // RemoteDisplay TX 队列 = 2 槽 x 15360B（≈30KB）；packet staging = 4096B
@@ -32,6 +37,7 @@
 #include "lvgl.h"
 
 #include "display_manager.h"
+#include "display_router.h"     // M7-C2：DisplayRouter（flush_cb 路由 / VirtualSink 接入）
 #include "lvgl_adapter.h"
 #include "remote_display.h"
 #include "protocol_endpoint.h"  // proto::SendResult / Message / MessageHeader / IMessagePayloadSource
@@ -45,7 +51,8 @@ public:
     using StreamingSender = std::function<proto::SendResult(
         const proto::MessageHeader&, proto::IMessagePayloadSource&)>;
 
-    LvglPort(Sender sender, StreamingSender streamingSender);
+    LvglPort(Sender sender, StreamingSender streamingSender,
+                  std::shared_ptr<display::DisplayRouter> router);
     ~LvglPort();
 
     // 初始化 LVGL + 注册 display driver + 创建 demo UI + 启动任务（app_main 调用一次）。
@@ -54,6 +61,10 @@ public:
     // 会话状态：CONNECTED → RemoteDisplay.onConnected() + 全屏置脏（下一帧 FULL）；
     // DISCONNECTED → RemoteDisplay.onDisconnected()（清队列 + 下一帧 FULL）。
     void onSessionState(proto::SessionState s);
+
+    // M7-C2：请求 UI 任务全屏置脏（DisplayRouter full-resync 钩子；模式切换后
+    // 下一 LVGL cycle 全量重绘 → 所有启用 sink 收新帧）。
+    void requestFullInvalidate() { fullInvalidatePending_.store(true); }
 
     // 统计上报（ERROR 文本通道：disp / disp2 两行 ≤64B；由 main statsLoop 调用）。
     void reportStats();
@@ -117,6 +128,10 @@ private:
     std::shared_ptr<display::IFrameSink> sink_;
     std::unique_ptr<display::DisplayManager> displayMgr_;
     std::shared_ptr<display::RemoteDisplay> remote_;
+    // M7-C2：DisplayRouter（main 组装并 attach physical sink；本类 attach virtual）。
+    std::shared_ptr<display::DisplayRouter> router_;
+    // VirtualSink 适配器（IDisplaySink 包装 RemoteDisplay；定义在 lvgl_port.cpp）。
+    std::shared_ptr<display::IDisplaySink> virtualSink_;
 
     lv_disp_draw_buf_t drawBuf_{};
     lv_disp_drv_t dispDrv_{};

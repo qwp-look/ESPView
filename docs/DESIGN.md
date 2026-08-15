@@ -1769,3 +1769,107 @@ wire format / Packet Header / CRC / Message / CHUNKED / Frame 语义零改动。
 - OLED 仍是诊断显示，永不成为权威 framebuffer；状态页不显示 SSID/密码；
 - 不修改 wire format / 分区 / Kconfig 默认值语义；`mem` 行与 monitor 脚本均不在
   协议链路内。
+## AA. M7-C1/C2 多显示架构与物理显示后端（2026-08-15 实测；wire additive: kSplit=3）
+
+### AA.1 定位（覆盖 Z.1/Z.9 中"OLED 仅是 Diagnostic Sink / 本阶段不实现 DisplayMode 变更"的声明）
+
+M7-C1 冻结 DisplayRouter 四模式路由（0=VirtualOnly / 1=PhysicalOnly / 2=Mirror / 3=Split）；
+M7-C2 把 M7-A/B 的 OLED 从"独立诊断显示"提升为正式 Physical Display Sink
+（同时保留 Diagnostics 诊断页）。wire format 只新增 kSplit=3（SET_MODE payload 仍为
+[0] mode；HELLO mode_mask 0b0111 → 0b1111，bit3=SPLIT）。协议 packet/message/frame
+语义零改动。
+
+### AA.2 DisplayCapabilities / IDisplaySink（C1 冻结，C2 消费）
+
+- DisplayCapabilities：width/height/format/color/mono/canReadback/sinkKind。
+- IDisplaySink：init(caps) / capabilities() / present(rect, px) / flush() /
+  setEnabled(bool) / isAvailable() / status()。
+- PhysicalDisplaySink.capabilities() = 128x64 / RGB565(生产者格式) / 1bpp mono /
+  canReadback=false / kPhysical。
+- DisplayRouter 仅扇出与状态机：按模式选择 sink 目标集；任一成功→kOk 聚合；
+  writeRect 逐 sink 以 isAvailable() 门控；presentScene(PhysicalScene) 仅 kSplit
+  接受（C1）；setMode 切换窗口 disable 所有 sink + staleClear + fullResync 钩子。
+
+### AA.3 PhysicalScene 与模式→场景映射（定稿）
+
+- PhysicalScene::kDiagnostics / kApplication。
+- Mirror(2)/PhysicalOnly(1) → Application（OLED 显示 LVGL 应用缩略帧）；
+- Split(3)/VirtualOnly(0) → Diagnostics（VirtualOnly 下应用帧禁用，诊断页继续）。
+- 映射由 main.cpp sceneOf(mode) 派生，Kconfig 不单独设项（避免可配置矛盾）。
+
+### AA.4 PhysicalDisplaySink（esp32/components/oled）
+
+- 非拥有引用 OledDisplay*；init 校验生产者能力（v0.1 仅 RGB565、正分辨率），
+  落定 128x64 mono caps；present 仅在 Application 场景 + enabled 时经
+  OledDisplay::presentAppFrame 同步渲染进共享 1KB 应用 fb（mutex 保护，
+  绝不持有 px 指针）；Diagnostics 场景 no-op（诊断页由 OLED 任务 renderStatus
+  自绘）；flush 为同步 no-op（无排队内容）；isAvailable = OLED kReady（I2C 存活），
+  与 setEnabled 正交。
+- I2C 上传只发生在 OLED 任务内（锁内 memcpy 1KB 快照 → 锁外分段 ≤32B 上传）；
+  flush_cb / present 路径零 I2C、零长阻塞 → 物理失败绝不影响 LVGL/Virtual 路径。
+
+### AA.5 OLED PhysicalRenderer（shared/oled，host 可测）
+
+- RGB565 → Mono1：逐字节 LE 组合（无 reinterpret_cast），R5/G6/B5 放大到 8bit，
+  luminance = (299R + 587G + 114B)/1000 四舍五入，threshold 128（Y>=th → 亮）。
+- crop/scale：源 320x240 → 目标 128x64 保持宽高比；scale=2/5 最近邻
+  （ox = sx*2/5，oy = sy*2/5），垂直 center crop 上下各 16px（可见源区
+  y∈[40,199]）；无堆分配、无异常、矩形增量与越界裁剪。
+- golden tests：全白=全1、全黑=全0、棋盘格式 1KB memcmp、阈值边界、crop/scale/
+  center-crop、空矩形、确定性；整帧 153600B 实测 ≈0.25ms。
+
+### AA.6 LVGL flush_cb → Router 映射（lvgl_port）
+
+- flush_cb：router_->writeRect(Rect, px) / (flush_is_last → router_->flush())；
+  无 router 回退 remote_ 直连（保持既有契约）。
+- VirtualSink 适配器（lvgl_port 匿名命名空间）：present→remote_->writeRect、
+  flush→remote_->flush、setEnabled→remote_->setEnabled、
+  isAvailable→debugState().connected。
+- 保留契约：kQueueFull/kFrameBusy 有界等待（slotFreeSem 10ms 步进，FULL 长等/
+  PARTIAL 短等预算 flushWaitMs()）；超时 → remote_->dropPendingFrame() + 全屏
+  置脏（下一帧 FULL resync）；lv_disp_flush_ready 无条件调用；px_map 只在
+  flush_cb 内有效（同步消费）。Mirror/Split 下 Router 聚合可能被物理接受掩盖
+  Virtual 背压 → 用 VirtualSink::lastPresentStatus() 恢复既有等待/丢弃语义。
+
+### AA.7 四种模式语义
+
+- VirtualOnly：LVGL 帧只走 PC 虚拟显示；OLED 应用帧禁用，系统诊断页持续刷新。
+- PhysicalOnly：Virtual sink 禁用；物理 Application 场景继续收应用帧并更新
+  （不依赖 Qt framebuffer）。
+- Mirror：同一逻辑帧双扇出（Qt 与 OLED 内容语义一致；不要求像素级一致）。
+- Split：Virtual=Application、Physical=Diagnostics 同时存在（M7-C4 的运行时基础）。
+
+### AA.8 背压 / degraded / 生命周期
+
+- 物理 sink 不可用（OLED 未 kReady）→ Router 收敛 kDegraded，Virtual 侧不受影响；
+  PhysicalOnly/Mirror 下物理 present 失败只影响自身，聚合仍返回 kOk（任一成功）。
+- 共享 1KB fb 锁序单向：router.mutex → fb.mutex；OLED 任务只碰 fb.mutex（无环）。
+- 生命周期：PhysicalDisplaySink 非拥有引用，销毁序 sink 先于 OledDisplay（全局
+  声明序保证）；M7-B 冻结语义零回归（stop flag / 任务退出释放 I2C / release-acquire）；
+  stop 后 present → kNotEnabled/kNotConnected。
+- 内存：经典 ESP32 无权威整屏缓冲；仅 1KB 物理 fb + 32B x 8 段 staging +
+  LVGL 15360B draw buffer；present 渲染路径零堆分配。
+
+### AA.9 Kconfig / main 装配 / 测试钩子
+
+- CONFIG_ESPVIEW_DEFAULT_MODE（int 0..3，默认 0=VirtualOnly）：上电初始模式，
+  经与 SET_MODE 相同的 applyDisplayMode 路径。
+- CONFIG_ESPVIEW_TEST_MODE_SWITCH（bool，默认 n）：F11（HID 0x44）运行时循环
+  0→1→2→3→0，状态经 ERROR 文本通道 "mod sw=<mode> st=<router state> scene=<scene>"
+  上报（非 wire 格式）；生产固件 =n 时 F11 走正常输入链路。
+- SET_MODE 白名单 0..3（原 >kMirror 拒绝）；HELLO mode_mask=0b1111。
+- OLED_ENABLE=n：physical_display_sink.cpp 不编译、main 不注册/不引用；
+  Router 无 physical sink 时需要物理的模式 setMode 返回 kInvalidParam（不崩溃），
+  双配置构建无未定义引用。
+
+### AA.10 Host 测试 / 实测
+
+- host：display_router_test 追加 8 个 C2 用例（PhysicalOnly/Mirror/Split 路由、
+  physical unavailable→kDegraded、physical 失败不阻塞 virtual、enable/disable、
+  scene switch）；physical_renderer_test 追加 golden 用例。全量 224,136 checks /
+  0 failures；verify_host.bat ALL PASS。
+- 实测（2026-08-15，UART transport + OLED，COM4 @ 115200，LVGL app）：
+  OLED `a=0x3C c=SSD1306 err=0 ok=1`；F11 循环验证模式序列 2→3→0→1→2，
+  scene 映射 3/0→Diagnostics、1/2→Application 全部正确；HELLO/PING 0 CRC/0 seq。
+- 边界声明：本阶段不实现 Qt 四模式 UI / Wi-Fi wizard / 双语 / build tooling /
+  OTA / Touch / 压缩 / 协议重设计；wire format 仅 additive kSplit=3。

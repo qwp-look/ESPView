@@ -262,7 +262,7 @@ void session_connect_hello() {
     CHECK_EQ(b.hellos[0].protocol_version, espview::proto::kProtocolVersion);
     CHECK_EQ(b.hellos[0].width, 320u);
     CHECK_EQ(b.hellos[0].height, 240u);
-    CHECK_EQ(b.hellos[0].mode_mask, 0b111u);
+    CHECK_EQ(b.hellos[0].mode_mask, 0b1111u);  // M7-C2：SPLIT 加入白名单
 
     // 握手后第一包 seq == 0（seq 已清零）
     CHECK_EQ(a.ep->sendMessage(makePing(1)), SendResult::kOk);

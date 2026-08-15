@@ -23,3 +23,30 @@ config ESPVIEW_APP_TESTPATTERN
 endchoice
 
 endmenu
+
+menu "ESPView Display Routing (M7-C2)"
+
+config ESPVIEW_DEFAULT_MODE
+    int "Default DisplayRouteMode at startup (0=VirtualOnly 1=PhysicalOnly 2=Mirror 3=Split)"
+    default 0
+    range 0 3
+    help
+        M7-C2：上电后初始 DisplayRouteMode（值 = SET_MODE 白名单 0..3）。
+        默认 VirtualOnly（0）：OLED 显示系统诊断页（Diagnostics scene），
+        LVGL 帧只走 PC 虚拟显示。硬件验证 OLED PhysicalOnly/Mirror 时设为
+        1/2（OLED 切到 Application scene：PhysicalRenderer 渲染 LVGL 缩略帧）。
+        PhysicalScene 由模式派生（本工程定稿映射，避免可配置矛盾）：
+          Mirror/PhysicalOnly -> Application（OLED 显示应用帧）
+          Split -> Diagnostics；VirtualOnly -> Diagnostics（应用帧禁用，诊断页继续）。
+
+config ESPVIEW_TEST_MODE_SWITCH
+    bool "Test-only: F11 (HID 0x44) cycles DisplayRouteMode 0..3 at runtime"
+    default n
+    help
+        M7-C2 test-only 验收钩子（生产固件置 n，与 ESPVIEW_TEST_TRANSPORT_SWITCH
+        同模式）：F11 按下 → sessionLoop 内循环 DisplayRouteMode 0..3
+        （0→1→2→3→0），与 SET_MODE 同一白名单/applyDisplayMode 路径
+        （Router.setMode + PhysicalScene 映射）。状态经 ERROR 文本通道
+        "mod sw=<mode> st=<router state>" 上报。生产固件 =n 时 F11 走正常输入链路。
+
+endmenu

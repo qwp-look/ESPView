@@ -125,7 +125,7 @@ struct Harness {
         cfg.width = 320;
         cfg.height = 240;
         cfg.pixel_format = PixelFormat::kRgb565;
-        cfg.mode_mask = 0b111;
+        cfg.mode_mask = 0b1111;  // M7-C2：WINDOW|DEVICE|MIRROR|SPLIT
         cfg.device_name = "espview-a";
 
         ProtocolEndpoint::Callbacks acb;

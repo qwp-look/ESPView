@@ -387,7 +387,7 @@ EndpointConfig pcCfg() {
     cfg.width = 320;
     cfg.height = 240;
     cfg.pixel_format = PixelFormat::kRgb565;
-    cfg.mode_mask = 0b111;
+    cfg.mode_mask = 0b1111;  // M7-C2：WINDOW|DEVICE|MIRROR|SPLIT
     cfg.device_name = "pc-test";
     cfg.ping_interval_ms = 200;  // 测试加速心跳（生产 2000ms）
     cfg.peer_timeout_ms = 2000;

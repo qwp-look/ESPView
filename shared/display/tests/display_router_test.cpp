@@ -565,6 +565,233 @@ void testSinkInterface() {
              static_cast<int>(DisplayStatus::kNotSupported));
 }
 
+
+// ---- M7-C2 追加用例（任务 §21 13-19：PhysicalOnly 路由 / Mirror 扇出 /
+// Split 场景 / physical unavailable / physical degraded / physical failure
+// 不阻塞 virtual / physical enable-disable / scene 切换）----
+
+// 14. PhysicalOnly 路由：应用帧只进 physical；virtual 不启用、不收帧。
+void testC2PhysicalOnlyRoutes() {
+    Harness h;
+    CHECK_EQ(static_cast<int>(h.router.setMode(DisplayRouteMode::kPhysicalOnly)),
+             static_cast<int>(DisplayStatus::kOk));
+    CHECK_EQ(static_cast<int>(h.router.state()), static_cast<int>(RouterState::kConnected));
+    CHECK(!h.virt->enabled_);
+    CHECK(h.phys->enabled_);
+
+    const Rect r{0, 0, 64, 32};
+    const uint8_t px[4] = {0xA1, 0xA2, 0xA3, 0xA4};
+    CHECK_EQ(static_cast<int>(h.router.writeRect(r, px)), static_cast<int>(DisplayStatus::kOk));
+    CHECK_EQ(static_cast<int>(h.router.flush()), static_cast<int>(DisplayStatus::kOk));
+    CHECK_EQ(h.virt->presents_.size(), size_t(0));
+    CHECK_EQ(h.phys->presents_.size(), size_t(1));
+    if (h.phys->presents_.size() == 1) {
+        CHECK(sameRect(h.phys->presents_[0].first, r));
+    }
+    CHECK_EQ(h.virt->flushCalls, 0);
+    CHECK_EQ(h.phys->flushCalls, 1);
+}
+
+// 15. Mirror 双 sink 扇出：virtual + physical 都收到同一 rect（同帧同内容）。
+void testC2MirrorFanout() {
+    Harness h;
+    CHECK_EQ(static_cast<int>(h.router.setMode(DisplayRouteMode::kMirror)),
+             static_cast<int>(DisplayStatus::kOk));
+    const Rect r{8, 8, 16, 8};
+    const uint8_t px[8] = {0xB1, 0xB2, 0xB3, 0xB4, 0xB5, 0xB6, 0xB7, 0xB8};
+    CHECK_EQ(static_cast<int>(h.router.writeRect(r, px)), static_cast<int>(DisplayStatus::kOk));
+    CHECK_EQ(h.virt->presents_.size(), size_t(1));
+    CHECK_EQ(h.phys->presents_.size(), size_t(1));
+    if (h.virt->presents_.size() == 1 && h.phys->presents_.size() == 1) {
+        CHECK(sameRect(h.virt->presents_[0].first, r));
+        CHECK(sameRect(h.phys->presents_[0].first, r));
+        CHECK_EQ(h.virt->presents_[0].second, 0xB1);
+        CHECK_EQ(h.phys->presents_[0].second, 0xB1);
+    }
+    CHECK_EQ(static_cast<int>(h.router.flush()), static_cast<int>(DisplayStatus::kOk));
+    CHECK_EQ(h.virt->flushCalls, 1);
+    CHECK_EQ(h.phys->flushCalls, 1);
+}
+
+// 16. Split 场景：writeRect 只进 virtual；presentScene（Diagnostics/Application）
+//     只进 physical；不同场景的 rect 都能送达 physical。
+void testC2SplitSceneRouting() {
+    Harness h;
+    CHECK_EQ(static_cast<int>(h.router.setMode(DisplayRouteMode::kSplit)),
+             static_cast<int>(DisplayStatus::kOk));
+    const Rect app{0, 0, 20, 10};
+    const uint8_t appPx[4] = {0xC1, 0xC2, 0xC3, 0xC4};
+    CHECK_EQ(static_cast<int>(h.router.writeRect(app, appPx)), static_cast<int>(DisplayStatus::kOk));
+    CHECK_EQ(h.virt->presents_.size(), size_t(1));
+    CHECK_EQ(h.phys->presents_.size(), size_t(0));   // 应用帧不进 physical（Split）
+
+    const Rect diag{10, 10, 8, 4};
+    const uint8_t diagPx[4] = {0xD1, 0xD2, 0xD3, 0xD4};
+    CHECK_EQ(static_cast<int>(h.router.presentScene(PhysicalScene::kDiagnostics, diag, diagPx)),
+             static_cast<int>(DisplayStatus::kOk));
+    CHECK_EQ(h.virt->presents_.size(), size_t(1));   // 场景帧不进 virtual
+    CHECK_EQ(h.phys->presents_.size(), size_t(1));
+    if (h.phys->presents_.size() == 1) {
+        CHECK(sameRect(h.phys->presents_[0].first, diag));
+        CHECK_EQ(h.phys->presents_[0].second, 0xD1);
+    }
+    // 另一场景（Application）同样只进 physical。
+    const Rect app2{30, 30, 4, 4};
+    const uint8_t app2Px[4] = {0xE1, 0xE2, 0xE3, 0xE4};
+    CHECK_EQ(static_cast<int>(h.router.presentScene(PhysicalScene::kApplication, app2, app2Px)),
+             static_cast<int>(DisplayStatus::kOk));
+    CHECK_EQ(h.phys->presents_.size(), size_t(2));
+    if (h.phys->presents_.size() == 2) {
+        CHECK(sameRect(h.phys->presents_[1].first, app2));
+    }
+    CHECK_EQ(h.virt->presents_.size(), size_t(1));
+}
+
+// 17. physical unavailable（PhysicalOnly）：attach 但 isAvailable()==false →
+//     DEGRADED，写路径 kNotConnected；恢复后 CONNECTED。
+void testC2PhysicalUnavailable() {
+    DisplayRouter router;
+    auto virt = makeVirtual(true);
+    auto phys = makePhysical(false);   // I2C/物理链路未就绪
+    router.attachVirtual(virt);
+    router.attachPhysical(phys);
+    CHECK_EQ(static_cast<int>(router.setMode(DisplayRouteMode::kPhysicalOnly)),
+             static_cast<int>(DisplayStatus::kOk));
+    CHECK_EQ(static_cast<int>(router.state()), static_cast<int>(RouterState::kDegraded));
+    const uint8_t px[2] = {0xF1, 0xF2};
+    CHECK_EQ(static_cast<int>(router.writeRect(Rect{0, 0, 2, 1}, px)),
+             static_cast<int>(DisplayStatus::kNotConnected));
+    CHECK_EQ(phys->presents_.size(), size_t(0));
+
+    phys->setAvailable(true);
+    router.refreshState();
+    CHECK_EQ(static_cast<int>(router.state()), static_cast<int>(RouterState::kConnected));
+    CHECK_EQ(static_cast<int>(router.writeRect(Rect{0, 0, 2, 1}, px)),
+             static_cast<int>(DisplayStatus::kOk));
+    CHECK_EQ(phys->presents_.size(), size_t(1));
+}
+
+// 18. physical degraded（Mirror）：physical 运行期不可用 → DEGRADED，
+//     virtual 继续收帧；恢复后回 CONNECTED。
+void testC2PhysicalDegradedMirror() {
+    Harness h;
+    CHECK_EQ(static_cast<int>(h.router.setMode(DisplayRouteMode::kMirror)),
+             static_cast<int>(DisplayStatus::kOk));
+    const Rect r{1, 1, 12, 6};
+    const uint8_t px[4] = {0x11, 0x22, 0x33, 0x44};
+    h.phys->setAvailable(false);
+    CHECK_EQ(static_cast<int>(h.router.writeRect(r, px)), static_cast<int>(DisplayStatus::kOk));
+    CHECK_EQ(static_cast<int>(h.router.state()), static_cast<int>(RouterState::kDegraded));
+    CHECK_EQ(h.virt->presents_.size(), size_t(1));
+    CHECK_EQ(h.phys->presents_.size(), size_t(0));
+    h.phys->setAvailable(true);
+    CHECK_EQ(static_cast<int>(h.router.writeRect(r, px)), static_cast<int>(DisplayStatus::kOk));
+    CHECK_EQ(static_cast<int>(h.router.state()), static_cast<int>(RouterState::kConnected));
+    CHECK_EQ(h.phys->presents_.size(), size_t(1));
+}
+
+// 19. physical failure 不阻塞 virtual：Mirror 下 physical present/flush 返回
+//     错误 → Router 仍 kOk（virtual 成功即不阻塞 UI，DESIGN.md F 节）；
+//     全部失败才传播首个错误。
+void testC2PhysicalFailureDoesNotBlockVirtual() {
+    Harness h;
+    CHECK_EQ(static_cast<int>(h.router.setMode(DisplayRouteMode::kMirror)),
+             static_cast<int>(DisplayStatus::kOk));
+    const Rect r{2, 2, 8, 4};
+    const uint8_t px[4] = {0x71, 0x72, 0x73, 0x74};
+    h.phys->setPresentResult(DisplayStatus::kInternal);
+    CHECK_EQ(static_cast<int>(h.router.writeRect(r, px)), static_cast<int>(DisplayStatus::kOk));
+    CHECK_EQ(h.virt->presents_.size(), size_t(1));
+    CHECK_EQ(h.phys->presents_.size(), size_t(1));   // 仍被调用（present 错误由 sink 自身承载）
+    // physical flush 错误不影响 virtual flush。
+    h.phys->setPresentResult(DisplayStatus::kOk);
+    class FlushFailSink : public RecordingSink {
+    public:
+        explicit FlushFailSink(DisplaySinkKind kind) : RecordingSink(kind, 128, 64, true) {}
+        DisplayStatus flush() override { return DisplayStatus::kInternal; }
+    };
+    auto ff = std::make_shared<FlushFailSink>(DisplaySinkKind::kPhysical);
+    h.router.attachPhysical(ff);
+    CHECK_EQ(static_cast<int>(h.router.setMode(DisplayRouteMode::kMirror)),
+             static_cast<int>(DisplayStatus::kOk));
+    CHECK_EQ(static_cast<int>(h.router.writeRect(r, px)), static_cast<int>(DisplayStatus::kOk));
+    CHECK_EQ(static_cast<int>(h.router.flush()), static_cast<int>(DisplayStatus::kOk));
+    CHECK_EQ(h.virt->flushCalls, 1);
+    // 全部失败：virtual kQueueFull + physical 失败 → 传播首个错误（不静默吞掉）。
+    h.virt->setPresentResult(DisplayStatus::kQueueFull);
+    ff->setPresentResult(DisplayStatus::kInternal);
+    CHECK_EQ(static_cast<int>(h.router.writeRect(r, px)),
+             static_cast<int>(DisplayStatus::kQueueFull));
+    h.virt->setPresentResult(DisplayStatus::kOk);
+    ff->setPresentResult(DisplayStatus::kOk);
+}
+
+// 20. physical enable-disable：Router setMode 统一 enable/disable 两个 sink；
+//     被 disable 的 physical 不接收应用帧（setEnabled 控制应用帧接收）。
+void testC2PhysicalEnableDisable() {
+    Harness h;
+    // PhysicalOnly：physical 启用。
+    CHECK_EQ(static_cast<int>(h.router.setMode(DisplayRouteMode::kPhysicalOnly)),
+             static_cast<int>(DisplayStatus::kOk));
+    CHECK(h.phys->enabled_);
+    CHECK(!h.virt->enabled_);
+    // 切回 VirtualOnly：physical 被 disable（应用帧禁用 → OLED 诊断页继续）。
+    CHECK_EQ(static_cast<int>(h.router.setMode(DisplayRouteMode::kVirtualOnly)),
+             static_cast<int>(DisplayStatus::kOk));
+    CHECK(!h.phys->enabled_);
+    CHECK(h.virt->enabled_);
+    const uint8_t px[2] = {0x81, 0x82};
+    CHECK_EQ(static_cast<int>(h.router.writeRect(Rect{0, 0, 2, 1}, px)),
+             static_cast<int>(DisplayStatus::kOk));
+    CHECK_EQ(h.phys->presents_.size(), size_t(0));   // 未启用：不收应用帧
+    CHECK_EQ(h.virt->presents_.size(), size_t(1));
+    // 再切 Mirror：两个都启用。
+    CHECK_EQ(static_cast<int>(h.router.setMode(DisplayRouteMode::kMirror)),
+             static_cast<int>(DisplayStatus::kOk));
+    CHECK(h.virt->enabled_);
+    CHECK(h.phys->enabled_);
+    CHECK_EQ(static_cast<int>(h.router.writeRect(Rect{0, 0, 2, 1}, px)),
+             static_cast<int>(DisplayStatus::kOk));
+    CHECK_EQ(h.phys->presents_.size(), size_t(1));
+}
+
+// 21. scene 切换：模式循环 VirtualOnly→Mirror→Split→PhysicalOnly 下，写路径与
+//     presentScene 的目标集始终匹配模式（场景概念仅属 Split）。
+void testC2SceneSwitch() {
+    Harness h;
+    const uint8_t px[2] = {0x91, 0x92};
+    const Rect r{0, 0, 4, 2};
+    // VirtualOnly：只 virtual。
+    CHECK_EQ(static_cast<int>(h.router.setMode(DisplayRouteMode::kVirtualOnly)),
+             static_cast<int>(DisplayStatus::kOk));
+    CHECK_EQ(static_cast<int>(h.router.writeRect(r, px)), static_cast<int>(DisplayStatus::kOk));
+    CHECK_EQ(h.virt->presents_.size(), size_t(1));
+    CHECK_EQ(h.phys->presents_.size(), size_t(0));
+    // Mirror：双 sink。
+    CHECK_EQ(static_cast<int>(h.router.setMode(DisplayRouteMode::kMirror)),
+             static_cast<int>(DisplayStatus::kOk));
+    CHECK_EQ(static_cast<int>(h.router.writeRect(r, px)), static_cast<int>(DisplayStatus::kOk));
+    CHECK_EQ(h.virt->presents_.size(), size_t(2));
+    CHECK_EQ(h.phys->presents_.size(), size_t(1));
+    // Split：应用帧只 virtual；presentScene 只 physical（场景概念仅属 Split）。
+    CHECK_EQ(static_cast<int>(h.router.setMode(DisplayRouteMode::kSplit)),
+             static_cast<int>(DisplayStatus::kOk));
+    CHECK_EQ(static_cast<int>(h.router.writeRect(r, px)), static_cast<int>(DisplayStatus::kOk));
+    CHECK_EQ(h.virt->presents_.size(), size_t(3));
+    CHECK_EQ(h.phys->presents_.size(), size_t(1));
+    CHECK_EQ(static_cast<int>(h.router.presentScene(PhysicalScene::kDiagnostics, r, px)),
+             static_cast<int>(DisplayStatus::kOk));
+    CHECK_EQ(h.phys->presents_.size(), size_t(2));
+    // PhysicalOnly：只 physical。
+    CHECK_EQ(static_cast<int>(h.router.setMode(DisplayRouteMode::kPhysicalOnly)),
+             static_cast<int>(DisplayStatus::kOk));
+    CHECK_EQ(static_cast<int>(h.router.writeRect(r, px)), static_cast<int>(DisplayStatus::kOk));
+    CHECK_EQ(h.virt->presents_.size(), size_t(3));
+    CHECK_EQ(h.phys->presents_.size(), size_t(3));
+    // Split 外 presentScene → kNotSupported（场景概念仅属 Split）。
+    CHECK_EQ(static_cast<int>(h.router.presentScene(PhysicalScene::kApplication, r, px)),
+             static_cast<int>(DisplayStatus::kNotSupported));
+}
 }  // namespace
 
 void runDisplayRouterTests() {
@@ -582,5 +809,14 @@ void runDisplayRouterTests() {
     testSetModeValidation();
     testPresentErrorAggregation();
     testSinkInterface();
+    // M7-C2 追加
+    testC2PhysicalOnlyRoutes();
+    testC2MirrorFanout();
+    testC2SplitSceneRouting();
+    testC2PhysicalUnavailable();
+    testC2PhysicalDegradedMirror();
+    testC2PhysicalFailureDoesNotBlockVirtual();
+    testC2PhysicalEnableDisable();
+    testC2SceneSwitch();
     std::printf("[display_router] done\n");
 }
