@@ -25,3 +25,6 @@ CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
 CONFIG_LWIP_TCP_SND_BUF_DEFAULT=24576
 # M6-E §19：生产 profile 默认禁用 F12 transport-switch test hook（=y 仅存在于本地未跟踪 sdkconfig）。
 CONFIG_ESPVIEW_TEST_TRANSPORT_SWITCH=n
+
+# D6：PM 使能（esp_pm_configure 固定 80MHz 以降低 Wi-Fi RF 上电峰值电流）。
+CONFIG_PM_ENABLE=y

@@ -7,6 +7,7 @@
 #include <utility>
 
 #include "esp_log.h"
+#include "esp_pm.h"
 #include "esp_timer.h"
 #include "esp_wifi.h"
 #include "nvs_flash.h"
@@ -124,6 +125,21 @@ void WifiProvisioning::requestClear() {
 esp_err_t WifiProvisioning::ensureWifiReady() {
     if (initialized_) {
         return ESP_OK;
+    }
+
+    // D6 硬件修正（电源）：USB 供电下 Wi-Fi RF 上电/校准的电流尖峰会导致
+    // CH340 USB 掉线 + ESP32 挂死（欠压）。启动 Wi-Fi 前把 CPU 固定到 80MHz，
+    // 降低整机电流，尽量让 PHY 上电峰值落在电源余量内（CONFIG_PM_ENABLE=y；
+    // 其他 profile 未开 PM 时 esp_pm_configure 返回 NOT_SUPPORTED，忽略即可）。
+    const esp_pm_config_t pm = {.max_freq_mhz = 80, .min_freq_mhz = 80,
+                                .light_sleep_enable = false};
+    if (esp_pm_configure(&pm) != ESP_OK) {
+        ESP_LOGW(kTag, "esp_pm_configure(80MHz) failed (PM disabled?)");
+    }
+    // D6：TX 功率压到最低（2dBm）——RF 校准/扫描期间减少发射电流贡献，
+    // 配合 PASSIVE 扫描与 80MHz，尽量压低电源受限板卡的峰值电流。
+    if (esp_wifi_set_max_tx_power(8) != ESP_OK) {
+        ESP_LOGW(kTag, "esp_wifi_set_max_tx_power(8) failed");
     }
 
     // 以下初始化幂等容错：已由其他组件（TcpTransport/WifiSta）完成时忽略。
@@ -449,10 +465,26 @@ void WifiProvisioning::startScan(uint8_t maxEntries) {
     sc.bssid = nullptr;
     sc.channel = 0;
     sc.show_hidden = true;
-    sc.scan_type = WIFI_SCAN_TYPE_ACTIVE;
-    sc.scan_time.active.min = 100;
-    sc.scan_time.active.max = 300;
-    const esp_err_t err = esp_wifi_scan_start(&sc, false);
+    // D6 硬件修正：ACTIVE 扫描的 probe 发射在 USB 供电下触发 ESP32
+    // POWERON_RESET（欠压）；PASSIVE 无探针发射，电流平稳，v0.1 足够
+    // 枚举 SSID/RSSI/auth（WPA2 均来自 beacon）。扫描时长略增（逐信道
+    // 等 beacon，默认 ~100ms/信道，全频段 ≤3s）。
+    sc.scan_type = WIFI_SCAN_TYPE_PASSIVE;
+    sc.scan_time.passive = 120;  // 每信道被动侦听 120ms
+    esp_err_t err = esp_wifi_scan_start(&sc, false);
+    if (err == ESP_ERR_WIFI_NOT_STARTED) {
+        // UART bootstrap 首次懒初始化后驱动仅 init（未 start；applyConfig 才会
+        // stop→start）：扫描前必须先 esp_wifi_start，启动后重试一次。
+        // 已由其他组件（WifiSta/TcpTransport）启动时首次 scan 即成功，不走到这里。
+        ESP_LOGI(kTag, "wifi driver not started -> esp_wifi_start then rescan");
+        const esp_err_t startErr = esp_wifi_start();
+        if (startErr != ESP_OK) {
+            ESP_LOGE(kTag, "esp_wifi_start failed: %s", esp_err_to_name(startErr));
+            setError(12);  // kApiError
+            return;
+        }
+        err = esp_wifi_scan_start(&sc, false);
+    }
     if (err != ESP_OK) {
         ESP_LOGW(kTag, "esp_wifi_scan_start failed: %s", esp_err_to_name(err));
         setError(5);  // kScanFailed

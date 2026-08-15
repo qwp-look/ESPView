@@ -2599,3 +2599,79 @@ verify_qt / ESP-IDF PowerShell profile + `idf.py` 多条命令收敛为一条批
   MinGW64 + ESP-IDF v6.0.2 profile 探测通过）；`espview_flash.bat --dry-run`
   → validation passed（COM4 存在 + `esp32\build\uart_hw\espview_esp32.bin`
   存在，未实际烧录）。真实烧录验收见 D6（板载 COM4 在线）。
+
+## AI. M7-D6 UART 真实验收 + 电源修正（2026-08-16 冻结）
+
+### AI.1 定位
+
+D6 是 D 系列收尾：在板载 CH340（COM4 @ 115200）上对 M7-D3 的 Wi-Fi
+Provisioning 做真实 UART 验收，修正扫描路径缺陷，并新增 host 侧探测工具。
+D6 不改 wire format；对 AF.2/AF.3/AF.4 冻结的协议内容零改动。
+
+### AI.2 D3 固件缺陷修正（startScan）
+
+- 缺陷：`startScan` 首次懒初始化后驱动仅 `esp_wifi_init`（未 `esp_wifi_start`），
+  `esp_wifi_scan_start` 返回 `ESP_ERR_WIFI_NOT_STARTED`，D3 代码直接置
+  `kScanFailed`，扫描永远失败。
+- 修正：`esp_wifi_scan_start` 返回 NOT_STARTED 时先 `esp_wifi_start()` 再重试
+  一次；已由 WifiSta/TcpTransport 启动驱动时首次即成功，不走到该路径。
+- 文件：`esp32/components/espview/src/wifi_provisioning.cpp`。
+
+### AI.3 电源限制发现与固件降流修正
+
+- 现象（真实硬件，COM4/CH340，115200）：`WIFI_SCAN_REQ` → ACK(OK) 正常返回
+  （~0.1s）；随后 Wi-Fi RF 上电（`esp_wifi_start` 的 PHY 校准）触发
+  **CH340 USB 掉线**（PC 侧 ReadFile err=5 / PermissionError 5）并可**挂死
+  ESP32**（欠压；无复位横幅、无 HELLO，需手动复位恢复）。原始字节探针确认
+  掉线发生在扫描请求后 ~0.25s，与 RF 上电时序吻合。
+- 已尝试的软件降流组合（均无法完全避免掉线，但降低挂死概率）：
+  1. `WIFI_SCAN_TYPE_PASSIVE` + `scan_time.passive=120`（无 probe 发射；
+     枚举 SSID/RSSI/auth 足够，v0.1 冻结）；
+  2. `CONFIG_PM_ENABLE=y` + `esp_pm_configure({80,80,false})`（RF 上电前
+     CPU 固定 80MHz，整机电流降低；160MHz 下挂死率 ~100%，80MHz 下有存活
+     案例）；
+  3. `esp_wifi_set_max_tx_power(8)`（2dBm 最低发射功率）。
+- 结论：**该板卡 + USB 供电在 Wi-Fi RF 上电事件上为硬件电源/EMI 限制**，
+  软件无法可靠消除（boot 期预热同样掉线并挂死，已回退）。推荐硬件路径：
+  带供电 USB HUB / 外接 5V / 优质线材；固件扫描逻辑与协议路径已就绪。
+
+### AI.4 UART 协议路径验收（115200，真实硬件）
+
+- HELLO 握手（ESP32 → PC HELLO；PC HELLO 回执后 CAPABILITIES 下发）✓
+- 显示帧流（FRAME_BEGIN/RECT/END 连续收发）✓
+- SET_MODE（mode 0..3，ACK_REQ）→ ACK(OK) ✓（模式切换生效）
+- WIFI_SCAN_REQ（ACK_REQ，maxEntries=32）→ **ACK(OK)** ✓
+  （UART 控制路径端到端验证；显示流占用 sendMutex 时 tryTransmit 会丢
+  控制消息，D6 探针先 SET_MODE(1) 停虚拟帧流再扫描，ACK 稳定返回）
+- WIFI_STATUS（SCANNING 相位）与 WIFI_SCAN_RESULT：固件逻辑已就绪
+  （scan → WIFI_EVENT_SCAN_DONE → RSSI 降序 top-N → 派发），但本板卡
+  因 AI.3 电源限制无法在掉线前送出；供电充足后应可直接验收。
+
+### AI.5 探测工具
+
+- 新增 `pc/src/wifi_provision_probe.cpp`（CMake 已注册，非 Qt 目标；
+  C++17 + Win32 COM API，无 Qt / ESP-IDF）。
+- 流程：打开 COM4 @ 115200（可 `--port/--baud/--timeout-ms/--no-reset`）
+  → 复位脉冲 → 等 HELLO → 完整会话握手（PC HELLO）→ SET_MODE(1) 停虚拟
+  帧流 → WIFI_SCAN_REQ → 打印 ACK/WIFI_STATUS/SCAN_RESULT。
+- 退出码：0 PASS（收到 SCAN_RESULT）/ 1 FAIL（超时/无结果，含本板卡电源
+  限制下的预期 FAIL）/ 2 用法错误 / 3 打开串口失败。
+- 安全：不接收/不打印任何 Wi-Fi 凭据（SSID 为非秘密 metadata）。
+
+### AI.6 边界
+
+- 不改 wire format；不动 AF.2/AF.3/AF.4 冻结语义；不动凭据生命周期。
+- 不实现 OTA/TLS/UDP/mDNS；不改 partition；不做密码持久化/日志。
+- D6 不承诺本板卡（电源受限）的物理扫描成功率；扫描逻辑正确性以代码 +
+  UART 控制路径（ACK）验收为据，物理空口结果依赖供电充足环境。
+
+### AI.7 已实现（M7-D6，2026-08-16）
+
+- `esp32/components/espview/src/wifi_provisioning.cpp`：startScan 修正
+  （NOT_STARTED → start 重试）；PASSIVE 扫描；PM 80MHz；TX 功率 2dBm。
+- `esp32/sdkconfig.defaults`：`CONFIG_PM_ENABLE=y`。
+- `esp32/components/espview/CMakeLists.txt`：PRIV_REQUIRES + esp_pm。
+- `pc/src/wifi_provision_probe.cpp` + `pc/CMakeLists.txt`：D6 探测工具。
+- 本仓库 `docs/DESIGN.md`：AI 章节。
+- 回归：host 384,438 checks / 0 failures；i18n_test 1,889 checks /
+  0 failures；Qt build PASS；ESP32 build PASS；ctest 通过（见 D6 commit）。

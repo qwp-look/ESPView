@@ -23,6 +23,7 @@ idf_component_register(
         log
     PRIV_REQUIRES
         esp_timer
+        esp_pm
 )
 
 # 编译要求：IDF 默认 -Wall -Werror（无 warning 验收）；C++ 标准至少 C++17。

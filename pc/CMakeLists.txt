@@ -157,6 +157,26 @@ if(MINGW OR MSYS)
     target_link_libraries(input_send_test PRIVATE kernel32)
 endif()
 
+# ------------------------------------------------------------
+# M7-D6：wifi_provision_probe（真实 UART Wi-Fi 扫描探测工具，无 Qt）。
+# 链路：HostUartTransport → ProtocolEndpoint → WIFI_SCAN_REQ → 真实空口
+# SCAN_RESULT；PASS = 收到扫描结果或老固件 ACK ERR 降级。不接收任何凭据。
+# ------------------------------------------------------------
+add_executable(wifi_provision_probe
+    src/serial_transport.cpp
+    src/wifi_provision_probe.cpp
+)
+target_include_directories(wifi_provision_probe PRIVATE src)
+target_link_libraries(wifi_provision_probe PRIVATE espview_protocol)
+
+if(MINGW OR MSYS)
+    target_link_libraries(wifi_provision_probe PRIVATE kernel32)
+endif()
+
+if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+    target_compile_options(wifi_provision_probe PRIVATE -Wall -Wextra -Wpedantic)
+endif()
+
 if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
     target_compile_options(input_send_test PRIVATE -Wall -Wextra -Wpedantic)
 endif()
