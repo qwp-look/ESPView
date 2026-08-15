@@ -38,6 +38,7 @@
 #include "freertos/task.h"
 
 #include "oled_config.h"   // shared/oled：OledConfig / validateOledConfig
+#include "oled_preview.h"  // shared/oled（M7-D2）：OledPreviewSlot 预览槽（seqlock）
 #include "oled_cmd.h"      // shared/oled：ControllerType（espview::oled 命名空间）
 #include "physical_renderer.h"  // shared/oled（Agent D 交付）：PhysicalRenderer / RenderRect
 #include "oled_status.h"   // shared/oled：StatusSnapshot / renderStatus
@@ -115,6 +116,14 @@ public:
     void presentAppFrame(int srcW, int srcH, const RenderRect& rect,
                          const uint8_t* rgb565);
 
+    // ---- M7-D2：Physical Preview 预览槽 ----
+    // 内容确定点（taskLoop 上传 fb_ 后）写入；发送任务经
+    // makePhysicalPreviewPayload() 取 1032B PHYSICAL_PREVIEW 载荷并递增 frameId；
+    // reset() 由会话侧在握手/断线时调用（AE.3）。OLED 任务只 store，不触碰
+    // transport；槽为无锁 seqlock，写者零自旋。
+    OledPreviewSlot& previewSlot() { return previewSlot_; }
+    const OledPreviewSlot& previewSlot() const { return previewSlot_; }
+
 private:
     static void taskEntry(void* arg);
     void taskLoop();
@@ -134,6 +143,7 @@ private:
     std::mutex appFbMutex_;
     OledFb appFb_;                                     // 1KB 应用帧（PhysicalRenderer 输出）
     std::unique_ptr<PhysicalRenderer> appRenderer_;    // 128x64 单色渲染（构造时创建）
+    OledPreviewSlot previewSlot_;                      // M7-D2：1KB 预览槽（OLED 任务写）
     std::atomic<uint8_t> scene_{static_cast<uint8_t>(Scene::kDiagnostics)};
     std::atomic<bool> appFramesEnabled_{false};
     std::atomic<bool> appFrameDirty_{false};

@@ -49,6 +49,7 @@ enum class MessageType : uint8_t {
     kFrameBegin     = 0x10,  // ESP→PC
     kFrameRect      = 0x11,  // ESP→PC
     kFrameEnd       = 0x12,  // ESP→PC
+    kPhysicalPreview = 0x13,  // ESP→PC（M7-D2 PHYSICAL_PREVIEW）
     kInputKey       = 0x20,  // PC→ESP
     kInputMouse     = 0x21,  // PC→ESP
     kInputTouch     = 0x22,  // 未来

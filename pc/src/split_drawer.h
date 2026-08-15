@@ -66,6 +66,10 @@ public:
     // 专用）。只存快照 + 调度合并渲染（≤5Hz），不做重量级布局。
     void setPhysicalStatus(const espview::display::PhysicalStatus& status);
 
+    // M7-D2：在抽屉顶部插入外部预览 widget（如 PhysicalPreviewWidget）与
+    // 分区标题；分区标题随 setUiLanguage 重刷。仅 buildUi 后调用一次。
+    void addExternalWidget(const char* sectionKey, QWidget* widget);
+
     // 清空所有字段为占位符（断线 / 未解析 / 头未就位时；会话失联语义）。
     void clearStatus();
 
@@ -134,6 +138,7 @@ private:
     std::vector<std::pair<QLabel*, const char*>> sectionHeaderKeys_;
     std::vector<std::pair<QLabel*, const char*>> fieldNameKeys_;
     QLabel* titleLabel_ = nullptr;
+    QVBoxLayout* contentLayout_ = nullptr;  // buildUi 填充；addExternalWidget 插入
 
     espview::display::PhysicalStatus lastStatus_;  // 最近一次快照
     bool haveStatus_ = false;

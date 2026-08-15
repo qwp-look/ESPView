@@ -19,6 +19,7 @@
 
 #include "display_frame.h"
 #include "input_event.h"
+#include "physical_preview_state.h"  // M7-D2：预览快照信号类型（纯 C++17）
 #include "serial_worker.h"
 
 namespace espview {
@@ -69,6 +70,8 @@ signals:
     void displayModeAck(bool ok);
     // M7-D1：CAPABILITIES 能力快照转发（Worker → GUI，queued）。
     void capabilitiesReceived(const espview::proto::CapabilitiesInfo& caps);
+    // M7-D2：PHYSICAL_PREVIEW 帧快照转发（Worker → GUI，queued）。
+    void previewFrame(const espview::pc::PhysicalPreviewState& state);
 
 private:
     SerialWorker worker_;

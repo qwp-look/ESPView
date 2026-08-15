@@ -262,7 +262,14 @@ const std::map<std::string, std::string>& enDict() {
         {"%1 x %2", "%1 x %2"},
         {"%1 ms", "%1 ms"},
         {"%1 @ %2 (%3)", "%1 @ %2 (%3)"},
-        {"n/a (status link pending)", "n/a (status link pending)"},
+                {"n/a (status link pending)", "n/a (status link pending)"},
+        // M7-D2：Physical Preview 词条
+        {"Physical Preview", "Physical Preview"},
+        {"Controller", "Controller"},
+        {"No Preview", "No Preview"},
+        {"Preview Disabled", "Preview Disabled"},
+        {"Stale", "Stale"},
+        {"Live", "Live"},
     };
     return kEn;
 }
@@ -500,7 +507,14 @@ const std::map<std::string, std::string>& zhDict() {
         {"%1 x %2", "%1 x %2"},
         {"%1 ms", "%1 ms"},
         {"%1 @ %2 (%3)", "%1 @ %2 (%3)"},
-        {"n/a (status link pending)", "无（状态链路待连接）"},
+                {"n/a (status link pending)", "无（状态链路待连接）"},
+        // M7-D2：Physical Preview 词条
+        {"Physical Preview", "物理预览"},
+        {"Controller", "控制器"},
+        {"No Preview", "无预览"},
+        {"Preview Disabled", "预览已禁用"},
+        {"Stale", "过期"},
+        {"Live", "实时"},
     };
     return kZh;
 }

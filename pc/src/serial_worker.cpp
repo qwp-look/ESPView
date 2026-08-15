@@ -277,6 +277,9 @@ void SerialWorker::runLoop() {
         } else if (s == proto::SessionState::kDisconnected) {
             emitStatus(WorkerStatus::Connecting, "Session disconnected — waiting for HELLO");
             pushDiag(proto::Severity::kWarning, "session", "session disconnected");
+            // M7-D2（AE.3）：断线清空预览位图（发 No Preview 快照给 GUI）。
+            previewState_.onDisconnected();
+            emit previewFrame(previewState_);
         }
     };
     cb.onProtocolError = [this](proto::SessionError e, std::string_view detail) {
@@ -346,6 +349,20 @@ void SerialWorker::runLoop() {
     // M7-D1：CAPABILITIES 解析成功 → 原样转发 GUI（queued；消费接线在 main.cpp）。
     cb.onCapabilities = [this](const proto::CapabilitiesInfo& caps) {
         emit capabilitiesReceived(caps);
+    };
+    // M7-D2：PHYSICAL_PREVIEW 解析成功 → 写入预览模型（去重/过期在模型内）
+    // 并转发 GUI（queued；消费接线在 main.cpp）。
+    cb.onPhysicalPreview = [this](const proto::PhysicalPreviewInfo& info,
+                                  const uint8_t* pixels, size_t pixelBytes) {
+        if (pixels == nullptr || pixelBytes == 0) {
+            return;
+        }
+        std::vector<uint8_t> px(pixels, pixels + pixelBytes);
+        if (previewState_.setFrame(info.frameId, info.width, info.height,
+                                   static_cast<uint8_t>(info.pixelFormat),
+                                   std::move(px), nowMs())) {
+            emit previewFrame(previewState_);
+        }
     };
     // M7-C3：SET_MODE 是 v0.1 唯一 ACK_REQ 控制消息，因此所有 ACK 结果都是
     // Display Mode 的 ACK。onAckTimeout（重试耗尽）同样按失败上报。

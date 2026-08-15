@@ -65,6 +65,10 @@ if(ESPVIEW_BUILD_QT_GUI)
         src/language_selector.h
         src/split_drawer.cpp
         src/split_drawer.h
+        src/physical_preview_state.cpp
+        src/physical_preview_state.h
+        src/physical_preview_widget.cpp
+        src/physical_preview_widget.h
         src/virtual_screen_widget.cpp
         src/virtual_screen_widget.h
         src/connection_manager.cpp

@@ -1,5 +1,6 @@
 #include "message.h"
 
+#include <cstring>
 #include <utility>
 
 namespace espview {
@@ -184,6 +185,64 @@ bool parseCapabilities(BytesView payload, CapabilitiesInfo& out) {
     }
     info.physI2cAddress = payload[25];
     info.sceneSupport = payload[26];
+
+    out = info;
+    return true;
+}
+
+std::optional<Message> makePhysicalPreview(uint16_t frameId, uint16_t width,
+                                           uint16_t height,
+                                           PhysicalPixelFormat pixelFormat,
+                                           uint8_t flags, const uint8_t* pixels) {
+    // AE.2 校验（违规返回 nullopt）：几何 1..4096；pixelFormat 仅 kMono1；
+    // flags 仅 bit0（v1 恒 0，保留增量）；pixels 必填。
+    if (width < 1 || width > 4096 || height < 1 || height > 4096) {
+        return std::nullopt;
+    }
+    if (pixelFormat != PhysicalPixelFormat::kMono1) {
+        return std::nullopt;  // v0.1 唯一合法值
+    }
+    if ((flags & 0xFEu) != 0) {
+        return std::nullopt;  // 保留位必须为 0
+    }
+    if (pixels == nullptr) {
+        return std::nullopt;
+    }
+
+    // AE.2 布局：frameId u16 LE + width u16 LE + height u16 LE +
+    // pixelFormat u8 + flags u8 + pixels[1024]；合计 1032 字节。
+    std::vector<uint8_t> p(kPhysicalPreviewPayloadSize, 0);
+    p[0] = static_cast<uint8_t>(frameId & 0xFFu);
+    p[1] = static_cast<uint8_t>((frameId >> 8) & 0xFFu);
+    p[2] = static_cast<uint8_t>(width & 0xFFu);
+    p[3] = static_cast<uint8_t>((width >> 8) & 0xFFu);
+    p[4] = static_cast<uint8_t>(height & 0xFFu);
+    p[5] = static_cast<uint8_t>((height >> 8) & 0xFFu);
+    p[6] = static_cast<uint8_t>(pixelFormat);
+    p[7] = flags;
+    std::memcpy(p.data() + kPhysicalPreviewPixelOffset, pixels,
+                kPhysicalPreviewPixelBytes);
+    return messageWithPayload(static_cast<uint8_t>(MessageType::kPhysicalPreview), 0,
+                              std::move(p));
+}
+
+bool parsePhysicalPreview(BytesView payload, PhysicalPreviewInfo& out) {
+    // AE.3：< 1032B 丢弃；> 1032B 忽略尾部。
+    if (payload.size() < kPhysicalPreviewPayloadSize) {
+        return false;
+    }
+
+    PhysicalPreviewInfo info;
+    info.frameId = static_cast<uint16_t>(payload[0]) |
+                   static_cast<uint16_t>(static_cast<uint16_t>(payload[1]) << 8);
+    info.width = static_cast<uint16_t>(payload[2]) |
+                 static_cast<uint16_t>(static_cast<uint16_t>(payload[3]) << 8);
+    info.height = static_cast<uint16_t>(payload[4]) |
+                  static_cast<uint16_t>(static_cast<uint16_t>(payload[5]) << 8);
+    // pixelFormat 白名单：v0.1 唯一合法值 kMono1(1)，未知值兜底 kMono1
+    //（杜绝 UI 数值注入；AE.2 解析方以 wire 字段为准渲染）。
+    info.pixelFormat = PhysicalPixelFormat::kMono1;
+    info.flags = payload[7];
 
     out = info;
     return true;

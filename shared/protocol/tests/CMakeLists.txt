@@ -10,6 +10,7 @@ add_executable(espview_protocol_tests
     protocol_endpoint_test.cpp
     endpoint_concurrency_test.cpp
     capabilities_test.cpp
+    physical_preview_test.cpp
     streaming_encoder_test.cpp
     input_test.cpp
     lvgl_adapter_test.cpp
@@ -26,6 +27,9 @@ add_executable(espview_protocol_tests
     ../../oled/tests/oled_test.cpp
     ../../oled/tests/oled_status_test.cpp
     ../../oled/tests/physical_renderer_test.cpp
+    ../../oled/tests/oled_preview_test.cpp
+    ../../../pc/src/physical_preview_state.cpp
+    ../../../pc/src/physical_preview_state_test.cpp
 )
 target_link_libraries(espview_protocol_tests PRIVATE espview_protocol espview_input espview_display espview_transport espview_oled)
 
@@ -34,6 +38,7 @@ target_include_directories(espview_protocol_tests PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}
     ${CMAKE_CURRENT_SOURCE_DIR}/../../display/tests
     ${CMAKE_CURRENT_SOURCE_DIR}/../../transport
+    ${CMAKE_CURRENT_SOURCE_DIR}/../../../pc/src
 )
 
 # M7-B：GCC16 对 remote_display_test.cpp 的 -Warray-bounds 属编译器误报

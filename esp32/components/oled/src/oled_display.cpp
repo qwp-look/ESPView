@@ -288,10 +288,14 @@ void OledDisplay::taskLoop() {
                         std::lock_guard<std::mutex> lock(appFbMutex_);
                         std::memcpy(fb_.data(), appFb_.data(), OledFb::kSizeBytes);
                     }
+                    // M7-D2：内容确定点 1 —— 应用帧快照写入预览槽（AE.3）。
+                    previewSlot_.store(fb_.data());
                     handleUploadResult(nowMs, uploadFrame(fb_), busReady);
                 } else if (!appScene) {
                     const StatusSnapshot snap = provider_();
                     renderStatus(fb_, snap);
+                    // M7-D2：内容确定点 2 —— 诊断页快照写入预览槽（AE.3）。
+                    previewSlot_.store(fb_.data());
                     handleUploadResult(nowMs, uploadFrame(fb_), busReady);
                 }
                 // appScene 且无新帧：跳过本周期上传（保持最后画面；dirty 由 UI 侧置位）。

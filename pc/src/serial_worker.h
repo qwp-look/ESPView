@@ -42,6 +42,7 @@
 #include "host_tcp_transport.h"
 #include "input_event.h"
 #include "message.h"  // proto::CapabilitiesInfo（M7-D1 能力上行，纯 C++17）
+#include "physical_preview_state.h"  // pc::PhysicalPreviewState（M7-D2 预览快照，纯 C++17）
 #include "pc_transport.h"
 #include "runtime_stats.h"  // proto::Severity / proto::DiagnosticsRing（M4 诊断）
 #include "serial_transport.h"
@@ -184,6 +185,9 @@ signals:
     void displayModeAck(bool ok);
     // M7-D1：CAPABILITIES 解析成功（worker 线程 emit，QueuedConnection 投递 GUI）。
     void capabilitiesReceived(const espview::proto::CapabilitiesInfo& caps);
+    // M7-D2：PHYSICAL_PREVIEW 帧快照（worker 线程 emit；含像素副本，QueuedConnection
+    // 投递 GUI）。断线时 worker 发出清空后的快照（No Preview 语义）。
+    void previewFrame(const espview::pc::PhysicalPreviewState& state);
 
 private:
     void runLoop();  // Worker 线程入口
@@ -258,6 +262,10 @@ private:
     std::vector<uint8_t> displayModeQueue_;
     uint64_t modeSent_ = 0;
     uint64_t modeDropped_ = 0;
+
+    // M7-D2：Physical Preview 快照（仅 Worker 线程访问；去重/过期/会话语义
+    // 在模型内，GUI 只消费副本）。
+    espview::pc::PhysicalPreviewState previewState_;
 };
 
 }  // namespace pc
@@ -267,3 +275,5 @@ Q_DECLARE_METATYPE(espview::pc::WorkerStatus)
 Q_DECLARE_METATYPE(espview::pc::WorkerStats)
 // M7-D1：CAPABILITIES 纯值类型（queued 连接需要 metatype；无 Qt 依赖）。
 Q_DECLARE_METATYPE(espview::proto::CapabilitiesInfo)
+// M7-D2：PhysicalPreviewState（含 1KB 像素副本；queued 连接需要 metatype）。
+Q_DECLARE_METATYPE(espview::pc::PhysicalPreviewState)

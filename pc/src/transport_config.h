@@ -140,10 +140,13 @@ inline bool applyCliOverrides(TransportConfig& cfg, const std::vector<std::strin
 // M7-C3：新增 display/mode（Display Mode UI）、ui/language（i18n）、
 // split/drawerVisible + split/drawerWidth（Split Drawer 布局）——均为
 // 非凭据 UI 状态键，与任务书 §十五 一致。
+// M7-D2：新增 ui/previewEnabled（Physical Preview 使能开关；PhysicalPreviewState
+// toSettingsMap 唯一键，AE.5）。
 inline std::vector<std::string> persistedSettingsKeys() {
     return {"transport/type",  "uart/port",       "uart/baud",
             "tcp/port",        "window/size",     "display/mode",
-            "ui/language",     "split/drawerVisible",
+            "ui/language",     "ui/previewEnabled",
+            "split/drawerVisible",
             "split/drawerWidth"};
 }
 }  // namespace pc

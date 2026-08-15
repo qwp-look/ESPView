@@ -114,6 +114,38 @@ struct CapabilitiesInfo {
     uint8_t sceneSupport = 0;
 };
 
+// ---- PHYSICAL_PREVIEW (0x13)（M7-D2 AE.2 冻结 payload；v0.1 定长 1032 字节 LE）----
+
+// AE.2：payload 定长（< 1032B 丢弃；> 1032B 忽略尾部）。
+inline constexpr size_t kPhysicalPreviewPayloadSize = 1032;
+// AE.2：pixels 起始偏移（8 = frameId2 + width2 + height2 + pixelFormat1 + flags1）。
+inline constexpr size_t kPhysicalPreviewPixelOffset = 8;
+// AE.2：pixels 字节数（128x64 页式 1bpp）。
+inline constexpr size_t kPhysicalPreviewPixelBytes = 1024;
+
+// PHYSICAL_PREVIEW 解析结果（AE.2 字段全集；pixels 不驻留于本结构——
+// 解析方经 onPhysicalPreview 回调直接引用 payload 数据，见 protocol_endpoint.h）。
+struct PhysicalPreviewInfo {
+    uint16_t frameId = 0;
+    uint16_t width = 0;
+    uint16_t height = 0;
+    PhysicalPixelFormat pixelFormat = PhysicalPixelFormat::kMono1;
+    uint8_t flags = 0;
+};
+
+// 构造 PHYSICAL_PREVIEW（AE.2 布局；无 ACK_REQ，fire-and-forget）。违规输入返回
+// nullopt：width/height 须 1..4096；pixelFormat 仅 kMono1（v0.1 唯一合法值）；
+// flags 仅 bit0（保留位必须为 0）；pixels 不得为 nullptr。
+std::optional<Message> makePhysicalPreview(uint16_t frameId, uint16_t width,
+                                           uint16_t height,
+                                           PhysicalPixelFormat pixelFormat,
+                                           uint8_t flags, const uint8_t* pixels);
+
+// 解析 PHYSICAL_PREVIEW（AE.3）：< 1032B → false；> 1032B 忽略尾部；
+// pixelFormat 白名单兜底（v0.1 唯一合法值 kMono1，未知值映射 kMono1，
+// 杜绝 UI 数值注入）；width/height 以 wire 字段为准（AE.2）。
+bool parsePhysicalPreview(BytesView payload, PhysicalPreviewInfo& out);
+
 // 构造 CAPABILITIES（AD.2 布局；无 ACK_REQ，fire-and-forget）。违规输入返回 nullopt：
 //   width/height 须 1..4096；physWidth/physHeight 0=未知 或 1..4096；
 //   pixelFormat 仅 kRgb565；physPixelFormat 仅 kRgb565/kMono1；

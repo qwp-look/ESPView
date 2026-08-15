@@ -13,6 +13,8 @@ void runFramePipelineTests();
 void runProtocolEndpointTests();
 void runEndpointConcurrencyTests();
 void runCapabilitiesTests();
+void runPhysicalPreviewTests();
+void runOledPreviewTests();
 void runStreamingEncoderTests();
 void runInputTests();
 void runLvglAdapterTests();
@@ -29,6 +31,7 @@ void runTransportPipelineTests();
 void runOledTests();
 void runOledStatusTests();
 void runPhysicalRendererTests();
+void runPhysicalPreviewStateTests();
 
 int main() {
     // 无缓冲：测试名实时输出，便于定位挂起/超时位置（与 pc 测试工具一致）。
@@ -54,6 +57,10 @@ int main() {
     runEndpointConcurrencyTests();
     std::printf("[capabilities]\n");
     runCapabilitiesTests();
+    std::printf("[physical_preview]\n");
+    runPhysicalPreviewTests();
+    std::printf("[oled_preview]\n");
+    runOledPreviewTests();
     std::printf("[streaming_encoder]\n");
     runStreamingEncoderTests();
     std::printf("[input]\n");
@@ -84,6 +91,8 @@ int main() {
     runOledStatusTests();
     std::printf("[physical_renderer]\n");
     runPhysicalRendererTests();
+    std::printf("[physical_preview_state]\n");
+    runPhysicalPreviewStateTests();
     std::printf("----\nchecks: %d, failures: %d\n", espview::proto::test::gChecks,
                 espview::proto::test::gFailures);
     return espview::proto::test::gFailures == 0 ? 0 : 1;

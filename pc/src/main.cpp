@@ -79,6 +79,7 @@
 #include "physical_status.h"   // parsePhysicalStatusLine（M7-C3 遥测）
 #include "serial_worker.h"
 #include "split_drawer.h"
+#include "physical_preview_widget.h"  // M7-D2：物理预览 widget
 #include "transport_config.h"  // TransportConfig / validateTransportConfig（M6-D）
 #include "virtual_screen_widget.h"
 
@@ -221,6 +222,14 @@ public:
         connect(&manager_, &ConnectionManager::capabilitiesReceived, this,
                 [this](const espview::proto::CapabilitiesInfo& caps) {
                     onCapabilitiesReceived(caps);
+                });
+        // M7-D2：PHYSICAL_PREVIEW 帧快照 → 预览 widget（widget 在 buildSplitDrawer 创建；
+        // 信号仅在连接后到达，届时已非空）。
+        connect(&manager_, &ConnectionManager::previewFrame, this,
+                [this](const espview::pc::PhysicalPreviewState& state) {
+                    if (previewWidget_ != nullptr) {
+                        previewWidget_->setFrame(state);
+                    }
                 });
         // M7-C3：语言切换（只改文案，不触碰 transport / display / framebuffer）。
         connect(langSel_, &LanguageSelector::languageChanged, this,
@@ -634,6 +643,10 @@ private:
     void buildSplitDrawer() {
         screenSplitter_ = new QSplitter(Qt::Horizontal, this);
         drawer_ = new SplitDrawer(&settings_, this);
+        // M7-D2：物理预览 widget 插入抽屉顶部（分区标题 + 位图 + 状态）。
+        previewWidget_ = new PhysicalPreviewWidget(drawer_);
+        drawer_->addExternalWidget("Physical Preview", previewWidget_);
+        previewWidget_->loadSettings(settings_);  // ui/previewEnabled（白名单键）
         screenSplitter_->addWidget(screen_);
         screenSplitter_->addWidget(drawer_);
         screenSplitter_->setStretchFactor(0, 1);
@@ -685,6 +698,9 @@ private:
             if (entry.first != nullptr && entry.second != nullptr) {
                 entry.first->setText(tr_(entry.second));
             }
+        }
+        if (previewWidget_ != nullptr) {
+            previewWidget_->setUiLanguage(static_cast<int>(lang_));
         }
         transportCombo_->setItemText(0, tr_("TCP"));
         transportCombo_->setItemText(1, tr_("UART"));
@@ -978,6 +994,9 @@ private:
             // 统一管理（去抖 + 显式保存），此处不重复写。
         }
         drawer_->saveSettings();
+        if (previewWidget_ != nullptr) {
+            previewWidget_->saveSettings(settings_);  // ui/previewEnabled（白名单键）
+        }
     }
 
     // M4：四域状态面板（Connection / Display / Protocol / Heartbeat / Input）。
@@ -1163,6 +1182,7 @@ private:
     SplitDrawer* drawer_ = nullptr;
     QSplitter* screenSplitter_ = nullptr;
     QTimer* modeWatchdog_ = nullptr;
+    PhysicalPreviewWidget* previewWidget_ = nullptr;  // M7-D2：物理预览 widget
     UiLang lang_ = UiLang::kEnglish;
     espview::display::PhysicalStatus physSnapshot_;    // 最近遥测快照（GUI 线程）
     espview::display::PhysicalCapabilitySnapshot physCap_;  // M7-C4：能力/健康收敛点
@@ -1183,6 +1203,8 @@ private:
 int main(int argc, char** argv) {
     // queued signal 需要运行时注册的自定义类型（Q_DECLARE_METATYPE 之上）
     qRegisterMetaType<espview::pc::DisplayFrame>("espview::pc::DisplayFrame");
+    // M7-D2：PhysicalPreviewState（queued 连接需要运行时注册）。
+    qRegisterMetaType<espview::pc::PhysicalPreviewState>("espview::pc::PhysicalPreviewState");
     qRegisterMetaType<espview::pc::DisplayRect>("espview::pc::DisplayRect");
     qRegisterMetaType<espview::pc::WorkerStats>("espview::pc::WorkerStats");
     qRegisterMetaType<espview::pc::WorkerStatus>("espview::pc::WorkerStatus");

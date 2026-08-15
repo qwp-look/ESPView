@@ -177,6 +177,7 @@ void SplitDrawer::buildUi() {
     auto* contentLayout = new QVBoxLayout(content);
     contentLayout->setContentsMargins(0, 0, 0, 0);
     contentLayout->setSpacing(4);
+    contentLayout_ = contentLayout;  // M7-D2：addExternalWidget 插入点
 
     const QFont fixed = QFontDatabase::systemFont(QFontDatabase::FixedFont);
     QFont sectionFont = font();
@@ -231,6 +232,21 @@ void SplitDrawer::buildUi() {
     // 随 DPI 自动缩放），不硬编码像素阈值做布局判断。
     const int layoutMin = contentLayout->minimumSize().width() + 12;
     minWidgetWidth_ = qBound(kMinDrawerWidth, layoutMin, kMaxDrawerWidth);
+}
+
+// M7-D2：外部预览 widget 插入抽屉顶部（分区标题 + widget）。
+void SplitDrawer::addExternalWidget(const char* sectionKey, QWidget* widget) {
+    if (sectionKey == nullptr || widget == nullptr || contentLayout_ == nullptr) {
+        return;
+    }
+    QFont sectionFont = font();
+    sectionFont.setBold(true);
+    auto* header = new QLabel(t(sectionKey), this);
+    header->setFont(sectionFont);
+    sectionHeaderKeys_.emplace_back(header, sectionKey);
+    const int insertAt = 0;  // 顶部（诊断分区之上）
+    contentLayout_->insertWidget(insertAt, header);
+    contentLayout_->insertWidget(insertAt + 1, widget);
 }
 
 void SplitDrawer::configureForm(QFormLayout* form) {

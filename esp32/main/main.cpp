@@ -275,6 +275,36 @@ void sendCapabilitiesMessage() {
              static_cast<unsigned>(caps.modeMask));
 }
 
+// ---- M7-D2：Physical Preview 上行（AE.3）----
+// 默认 2Hz（500ms 节拍）；仅 CONNECTED + OLED 存在时发送。用 endpoint 的
+// tryTransmit 路径（sendPhysicalPreview 内部）：锁忙/背压整帧丢弃，绝不阻塞
+// 会话任务（M6-D：sessionLoop 不得阻塞在流式大帧的 sendMutex_ 之后）。
+// 槽内容由 OLED 任务在内容确定点 store()（应用帧/诊断页快照）；帧去重/过期
+// 由 PC 侧按 frameId 判定（AE.3）。transport 相关频率（115200→1Hz、
+// 921600→5Hz、TCP→5-10Hz）为后续精调项，v0.1 固定默认 2Hz。
+#if CONFIG_ESPVIEW_OLED_ENABLE
+inline constexpr uint64_t kPreviewIntervalMs = 500;  // 默认 2Hz
+void sendPhysicalPreviewMessage() {
+    if (!g_oled || g_endpoint.state() != SessionState::kConnected) {
+        return;
+    }
+    const auto payload = g_oled->previewSlot().makePhysicalPreviewPayload();
+    if (payload.empty()) {
+        return;  // 槽无效（未开始刷新/已 reset）
+    }
+    // slot 载荷即 AE.2 1032B 布局：复用 parse 提取 info，再经 endpoint 发送。
+    espview::proto::PhysicalPreviewInfo info;
+    if (!espview::proto::parsePhysicalPreview(
+            espview::proto::BytesView(payload.data(), payload.size()), info)) {
+        return;
+    }
+    const auto r = g_endpoint.sendPhysicalPreview(
+        info, payload.data() + espview::proto::kPhysicalPreviewPixelOffset);
+    ESP_LOGD(kTag, "PREVIEW sent r=%d id=%u", static_cast<int>(r),
+             static_cast<unsigned>(info.frameId));
+}
+#endif  // CONFIG_ESPVIEW_OLED_ENABLE
+
 void onSessionState(SessionState s) {
     ESP_LOGI(kTag, "session state -> %d", static_cast<int>(s));
     if (s == SessionState::kDisconnected) {
@@ -285,7 +315,19 @@ void onSessionState(SessionState s) {
     // M7-D1：每会话 CONNECTED 后发送一次 CAPABILITIES（重连重发，AD.3）。
     if (s == SessionState::kConnected) {
         sendCapabilitiesMessage();
+#if CONFIG_ESPVIEW_OLED_ENABLE
+        // M7-D2（AE.3）：握手重置预览槽 frameId/清槽（重连后 PC 首帧无条件接受）。
+        if (g_oled) {
+            g_oled->previewSlot().reset();
+        }
+#endif
     }
+#if CONFIG_ESPVIEW_OLED_ENABLE
+    if (s == SessionState::kDisconnected && g_oled) {
+        // M7-D2（AE.3）：断线清槽（下一会话握手再 reset；PC 侧断线清空预览位图）。
+        g_oled->previewSlot().reset();
+    }
+#endif
 #if CONFIG_ESPVIEW_APP_LVGL
     if (g_lvgl) {
         g_lvgl->onSessionState(s);
@@ -619,6 +661,17 @@ void sessionLoop(void*) {
         }
 #endif
         g_endpoint.tick();
+#if CONFIG_ESPVIEW_OLED_ENABLE
+        // M7-D2（AE.3）：2Hz 节拍发送 Physical Preview（内部 tryTransmit，非阻塞）。
+        if (g_oled && g_endpoint.state() == SessionState::kConnected) {
+            static uint64_t lastPreviewMs = 0;
+            const uint64_t now = monotonicMs();
+            if (lastPreviewMs == 0 || now - lastPreviewMs >= kPreviewIntervalMs) {
+                lastPreviewMs = now;
+                sendPhysicalPreviewMessage();
+            }
+        }
+#endif
         vTaskDelay(pdMS_TO_TICKS(200));
     }
 }

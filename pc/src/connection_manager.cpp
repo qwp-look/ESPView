@@ -16,6 +16,9 @@ ConnectionManager::ConnectionManager(QObject* parent) : QObject(parent) {
     // M7-D1：CAPABILITIES 能力快照转发（与其它 Worker signal 同模式，queued）。
     connect(&worker_, &SerialWorker::capabilitiesReceived, this,
             &ConnectionManager::capabilitiesReceived);
+    // M7-D2：PHYSICAL_PREVIEW 帧快照转发（与其它 Worker signal 同模式，queued）。
+    connect(&worker_, &SerialWorker::previewFrame, this,
+            &ConnectionManager::previewFrame);
 }
 
 ConnectionManager::~ConnectionManager() {

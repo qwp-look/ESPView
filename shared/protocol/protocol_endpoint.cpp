@@ -361,6 +361,24 @@ SendResult ProtocolEndpoint::sendError(ErrorCode errorCode, std::string_view tex
     return transmit(*err, /*requireConnected=*/false);
 }
 
+SendResult ProtocolEndpoint::sendPhysicalPreview(const PhysicalPreviewInfo& info,
+                                                  const uint8_t* pixels) {
+    const auto msg = makePhysicalPreview(info.frameId, info.width, info.height,
+                                         info.pixelFormat, info.flags, pixels);
+    if (!msg.has_value()) {
+        return SendResult::kInvalidMessage;
+    }
+    // AE.3：无 ACK_REQ（fire-and-forget）；仅 CONNECTED 可发送。
+    // 用 tryTransmit（非阻塞 + 尽力 sink）：preview 是丢得起的数据面，锁忙/背压
+    // 时整帧丢弃（AE.3「背压整帧丢弃」），绝不让会话任务阻塞在长流式帧后。
+    const SendResult r = tryTransmit(*msg, /*requireConnected=*/true,
+                                     /*isRetry=*/false);
+    if (r == SendResult::kOk) {
+        ++stats_.txPhysicalPreview;
+    }
+    return r;
+}
+
 SendResult ProtocolEndpoint::sendCapabilities(const CapabilitiesInfo& caps) {
     const auto msg = makeCapabilities(
         caps.virtualPresent, caps.physicalPresent, caps.width, caps.height,
@@ -477,6 +495,9 @@ void ProtocolEndpoint::handleMessage(const Message& msg) {
             return;
         case MessageType::kCapabilities:
             handleCapabilities(msg);
+            return;
+        case MessageType::kPhysicalPreview:
+            handlePhysicalPreview(msg);
             return;
         case MessageType::kFrameBegin:
         case MessageType::kFrameRect:
@@ -624,6 +645,24 @@ void ProtocolEndpoint::handleCapabilities(const Message& msg) {
     ++stats_.rxCapabilities;
     if (cb_.onCapabilities) {
         cb_.onCapabilities(info);
+    }
+}
+
+void ProtocolEndpoint::handlePhysicalPreview(const Message& msg) {
+    // AE.3：短包/非法 payload 仅计数丢弃，不 failSession（数据面，与 FRAME_* 一致）。
+    if (msg.payload.size() < kPhysicalPreviewPayloadSize) {
+        ++stats_.physicalPreviewDropped;
+        return;
+    }
+    PhysicalPreviewInfo info;
+    if (!parsePhysicalPreview(BytesView(msg.payload.data(), msg.payload.size()), info)) {
+        ++stats_.physicalPreviewDropped;
+        return;
+    }
+    ++stats_.rxPhysicalPreview;
+    if (cb_.onPhysicalPreview) {
+        cb_.onPhysicalPreview(info, msg.payload.data() + kPhysicalPreviewPixelOffset,
+                              kPhysicalPreviewPixelBytes);
     }
 }
 

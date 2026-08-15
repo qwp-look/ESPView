@@ -2297,6 +2297,29 @@ caps.canReadback 保持 false。wire additive：不修改 Packet Header/CRC/
   或按 Kconfig 默认开启需在 D2 实现时定夺并记录。
 - 本消息不含任何凭据。
 
+### AE.6 已实现（M7-D2，2026-08-15）
+
+- shared/protocol：新增 `kPhysicalPreview=0x13`；`PhysicalPreviewInfo` +
+  `makePhysicalPreview()`/`parsePhysicalPreview()`（1032B 定长 LE；<1032B
+  丢弃、>1032B 忽略尾部、未知 pixelFormat 兜底 kMono1）。
+- ProtocolEndpoint：`kPhysicalPreview` 分派（非法 payload 仅计数
+  `physicalPreviewDropped`，不 failSession）；`onPhysicalPreview` 回调
+  （info + pixels 指针，回调期间有效）；`sendPhysicalPreview()` 走
+  tryTransmit（非阻塞；锁忙/背压整帧丢弃，AE.3）；统计 rx/txPhysicalPreview。
+- shared/oled：`OledPreviewSlot`（seqlock 无锁；store/snapshot/reset/
+  makePhysicalPreviewPayload）；`OledDisplay` 持有预览槽并在 taskLoop 两个
+  内容确定点 store（应用帧 memcpy 后、诊断页 renderStatus 后）。
+- ESP32：`esp32/components/oled` 复用 oled_preview.cpp；main.cpp 在
+  sessionLoop 以 500ms（默认 2Hz）节拍、仅 CONNECTED 时经
+  makePhysicalPreviewPayload → sendPhysicalPreview 上行；握手/断线 reset 槽。
+- PC：SerialWorker 持有 PhysicalPreviewState（worker 线程写：会话/断线
+  语义 + setFrame 去重）→ previewFrame 信号（queued）→ ConnectionManager
+  转发 → main.cpp 接线 PhysicalPreviewWidget（Split Drawer 顶部，经
+  SplitDrawer::addExternalWidget）；i18n 词条 + `ui/previewEnabled`
+  QSettings 白名单键。
+- 验证：host 383,672 checks / 0 failures；Qt 构建通过；ESP32 构建通过。
+  真实硬件 OLED 预览验收见 M7-E 硬件阶段。
+
 ============================================================
 AF. M7-D3 Wi-Fi Provisioning Protocol（2026-08-15 设计冻结；wire additive）
 ============================================================
