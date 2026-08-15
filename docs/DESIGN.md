@@ -1994,3 +1994,163 @@ Display state 可视化面板、transport-aware display configuration。wire for
 - 未实现：OLED 像素级镜像（wire gap，需新增 ESP32→PC Message，属 C4+）、Wi-Fi
   credential 传输（C5）、C5 wizard、OTA/Touch/压缩。本阶段不修改 wire format、
   不改 OLED renderer、不重新实现 PhysicalDisplaySink。
+
+============================================================
+AC. M7-C4 Qt UX / Capability / Physical Diagnostics semantics（2026-08-15 实测；wire format 未修改）
+============================================================
+
+### AC.1 定位
+
+M7-C4 在冻结的 C3 基础上做 UX/能力/诊断产品化：PhysicalCapabilitySnapshot
+（能力/健康分离收敛点）、Display Mode 卡片化 UI、Split Drawer 三区侧栏、
+i18n 完整化、Transport/Display switch 互斥、会话 epoch 帧门控、诊断环加锁。
+wire format 零改动（无新增 Message；无 Physical framebuffer uplink；不修改
+Packet Header/CRC/Frame 语义）。
+
+### AC.2 Capability policy（PC 侧收敛，无 wire 上行）
+
+- 协议 v0.1 无 capability uplink：HELLO mode_mask 是固件编译期常量，SET_MODE
+  ACK ok 只证明"请求被接受"。PC 侧唯一真实可观测源 = ERROR 文本遥测 oled 行。
+- 新增 `shared/display/physical_capability_snapshot.{h,cpp}`（纯 C++17 值类型，
+  espview_display 静态库）：单一收敛点，消费方不再各自 `if (oled ok)`。
+  语义分层：
+  - `capabilityKnown` —— 本会话曾见 `oled ok=1`（学习结果，只置位）；管门控；
+  - `healthy` —— 最近遥测 oledOk（动态）；管降级；
+  - `telemetryFresh` —— 会话内最近收到过 oled 行（stale 判定）；
+  - `provenance` —— 当前 kOledTelemetry；为未来 CAPABILITIES 上行预留扩展点。
+- 修复 M7-C3 一次性闩锁缺陷：断开（Disconnected/Error）→ `resetPhysicalCapability()`
+  撤销学习结果（跨会话残留清除）；健康降级（ok=0）→ `onPhysicalDegraded` 走
+  routerState=kDegraded，不撤销 capabilityKnown（门控不随健康抖动）。
+- 分辨率/格式推断：SSD1306/SH1106 → 128x64、mono=1bpp、canReadback=false
+  （与 ESP32 侧 PhysicalDisplaySink::init 落定值一致；标注为推断 provenance，
+  不冒充设备声明）；未知控制器 → 0x0（不伪造）。
+- 能力/健康接线映射：main.cpp onDiagAdded → snapshot 派生 → capabilityKnown
+  上升沿调 `onPhysicalAvailable(true)`；known 后 `onPhysicalDegraded(!healthy)`。
+  status_panel / split_drawer 仍直读 PhysicalStatus valid 标志（各自正确，
+  不做第二套推断）。
+
+### AC.3 Display UI state machine（冻结 + P1 补强）
+
+- 状态：selectedMode / appliedMode / routerState / physicalAvailable /
+  sessionConnected / switchingInProgress / fullResyncPending / applyEnabled /
+  waitingForConnection / pendingInterruptedApply / lastError。
+- 新增 `pendingInterruptedApply`（P1-1）：在线 Apply 在飞（SET_MODE 已发、ACK
+  未回）被断线打断 → onDisconnected 记录；重连后 needsAutoSend 条件扩展为
+  `(waitingForConnection || pendingInterruptedApply) && selected != applied`，
+  自动补发一次（单飞行 + 30s 看门狗），消除"切换意图静默丢失"。
+- UI 呈现（display_mode_widget 卡片化）：每模式显示名称 + 描述 + Virtual 侧 +
+  Physical 侧状态；selected != applied 时橙色加粗差异（Selected/Applied/Router
+  三行），绝不只显示单个 Mode 值。
+- 门控：`physicalAvailable=false` → 物理相关模式不可选（Unavailable）；
+  `switchingInProgress` → Apply 禁用；`fullResyncPending` → 只收 FULL。
+
+### AC.4 Safe display switch / Transport 互斥（§六）
+
+- Display switch（VirtualOnly↔PhysicalOnly↔Mirror↔Split）：独立 sendDisplayMode
+  队列 + ACK + 30s 看门狗 + FULL resync；保留会话，不复用 switchTransport。
+- Transport switch（UART↔TCP）：M6-D 语义保持（stop/join → 新 transport →
+  FULL 判 CONNECTED）。
+- 互斥：beginSwitch 期间强制 Display Mode Apply 禁用（两套 switch transaction
+  不打架）；abortSwitch / 完成恢复由 DisplayUiState 状态机收敛。语言切换 /
+  Drawer resize / QSettings load 不触发 reconnect、不需要 FULL。
+
+### AC.5 Session epoch 帧门控（P1-2）
+
+- DisplayFrame 增加 `sessionId`（传输会话 epoch）；SerialWorker 每次 runLoop
+  入口 `sessionId_ = ++sessionCounter_`（原子），onFrameCommit 打戳。
+- GUI：beginSwitch 置 currentSessionId_=0，Connected 时更新为
+  manager_.sessionId()；onFrameReady 只处理 `frame.sessionId==currentSessionId_`
+  的帧 —— 消除 transport switch 后旧会话 stale FULL 伪造"CONNECTED (FULL
+  resync done)"的误判（TCP 下 ~2% 量级）。
+
+### AC.6 DiagnosticsRing 线程安全（P1-3）
+
+- `shared/protocol/runtime_stats.h/.cpp`：DiagnosticsRing 全访问（push/clear/
+  size/items/last）加 mutex；修复 transport RX 线程（setStateCallback）与
+  worker 线程并发 pushDiag 的无锁 deque 并发写 UB。last() 返回指针仅限测试/
+  单线程调试（生产无并发调用）。
+
+### AC.7 Split Drawer（产品化，Diagnostics only）
+
+- QSplitter 右侧三区文本面板：Physical Display（Controller/Resolution/I2C/
+  State/Scene/Last Flush/Errors）、Wi-Fi/TCP（SSID/RSSI/Channel/IP/TCP
+  status/Session/Frame/Heap）、Session/State（彩色横幅 + Last refresh + stale）。
+- 行为：标题栏收起、拖拽宽度 [200,480]（Qt 层；SplitState 模型保持 [200,560]
+  超集）、DPI aware（QFontMetrics 推导最小宽，无硬编码像素阈值）、QScrollArea
+  纵向滚动、300ms 去抖持久化 split/drawerVisible + split/drawerWidth。
+- stale 判定：kStaleThresholdMs=5000（遥测 ≥1Hz，5s 无数据即 Stale）；
+  1Hz 检查；clearStatus 清除时间戳。
+- 性能：setPhysicalStatus 只存快照 + ≥200ms 节流（实际写 label ≤5Hz）；
+  禁止 50Hz 重绘；无 QImage copy storm。
+- 不伪造：本阶段不绘制 OLED 像素（见 AC.10 决策）。
+
+### AC.8 i18n（完整化）
+
+- trText(key) 目录机制（key=英文原文；未知 key 回退英文）：217 key 英文 +
+  217 key 中文（i18n_test 1296 checks）。WorkerStats 动态统计、连接/切换/
+  重连状态、错误原因、Drawer/面板/模式 UI 全部走目录；无硬编码英文格式串。
+- 运行时切换：只重翻译 UI；不 disconnect/reconnect/switch mode/clear
+  framebuffer（路径审计确认：onLanguageChanged → retranslateUi，无 manager_
+  调用、无 screen_->clearDisplay）。
+
+### AC.9 QSettings
+
+- 白名单 9 键保持（transport/type、uart/port、uart/baud、tcp/port、window/size、
+  display/mode、ui/language、split/drawerVisible、split/drawerWidth）；无凭据键
+  （结构性保证）。QSettings load 不触发 reconnect（restoreDisplayModeFromSettings
+  只改 selectedMode，能力未知前仅 VirtualOnly 可恢复）。
+
+### AC.10 Physical preview 决策（正式冻结）
+
+- **Path A（本阶段冻结）**：Split Drawer = Physical Diagnostics/Status only。
+  当前 wire format 不携带 Physical framebuffer uplink（ESP→PC 数据面仅 HELLO、
+  FRAME_*（Virtual RGB565）、ERROR 文本遥测、PING/PONG/ACK；PixelFormat 无
+  1bpp 类型；OLED canReadback=false 冻结），因此无法在 Drawer 显示真实 OLED
+  像素，也不伪造预览。
+- **Path B（未来，C4+ 输入）**：PHYSICAL_PREVIEW 建议消息（TYPE 0x13 空槽；
+  payload = frameId u16 + width u16 + height u16 + pixelFormat u8（kMono1 新枚举）
+  + flags u8 + pixels[1024]，共 1032B < 4096 单包，无需 CHUNKED；fire-and-forget
+  （与 FRAME_* 数据面一致）；每帧完整快照自重同步；带宽：UART 115200 ≈ 91ms/帧
+  （1fps 占 ~91% 链路）、921600 ≈ 11.4ms/帧、TCP ≈ 1.7ms/帧；ESP32 侧 1KB 权威
+  fb 免重采样）。本阶段不实施、不修改 wire。
+
+### AC.11 Wi-Fi UI boundary
+
+- 禁止：SSID/Password/TCP server IP/Port 下发（协议无对应 Message；C5 解决）。
+- 允许：Wi-Fi Status 展示（SSID 当前网络名或安全占位、RSSI、Channel、IP、
+  TCP 状态）；绝不显示密码、不新增 credential storage。
+
+### AC.12 Host 测试（M7-C4）
+
+- physical_capability_snapshot_test（+55 checks）：初始/学习（SSD1306→128x64）/
+  健康降级保持门控/跨会话撤销/未知控制器不伪造/场景派生/学习单调性。
+- display_ui_state / physical_status / split_state 扩展（+221 checks，G 代理）：
+  selected!=applied、capability gate、watchdog 代理、open/close/resize/persist/
+  restore、stale/disconnected diagnostics 等（任务书 §十六 30 项矩阵覆盖）。
+- 协议套件最终 224,777 checks / 0 failures；transport_config 91/0；
+  i18n_test 1296/0；verify_host.bat ALL PASS。
+
+### AC.13 Qt / ESP32 构建与实测（2026-08-15）
+
+- verify_qt.bat ALL PASS；espview_virtual_display.exe clean build 零警告
+  （-Wall -Wextra -Wpedantic）；offscreen 冒烟 --autoclose-ms 2000 EXIT 0。
+- ESP32（uart_hw 配置）idf.py build 通过（shared 修改在 ESP-IDF 侧编译 OK）。
+- 真实硬件（COM4 @ 115200，OLED 0x3C，UART 验证固件，Agent H 基线）：
+  - 四模式矩阵：VirtualOnly/PhysicalOnly/Mirror/Split 各 ×5 连续切换（F11 钩子
+    20 次 + 每模式 offscreen Qt 会话），全 st=2(Connected)，scene 映射
+    0/3→Diagnostics、1/2→Application 全部正确；Qt 侧验证：PhysicalOnly 0 FULL
+    PNG（No signal）、其余模式各 1 张 FULL PNG。
+  - Input 回归：矩阵 tx=300（含 40×F11）→ ESP32 rx +280 精确（F11 被调试钩子
+    拦截不计入），0 丢失；长稳 tx=39 → +25 精确；mouse/key/wheel 切换前后无粘滞。
+  - 长稳：UART 连续 660.2s（11.0 分钟）：0 crash、0 decoder/CRC/seq 错误
+    （ESP32 侧 sess2 e=0 c=0 s=0）、14 次切换均 FULL 提交、仅 1 帧背压丢弃、
+    heap free 156.5–167.0 KB 振荡无持续下降、OLED err=0 ok=1 全程。
+    已知：PC RX 11 分钟内 1 次瞬态 seq-gap（CH340 丢 1 包，会话自恢复，可接受）。
+  - TCP：当前 uart_hw 基线固件 ESPVIEW_TRANSPORT_TCP=false，TCP 不可用
+    （如实记录；TCP 生产固件验证留待后续里程碑）。
+
+### AC.14 边界声明
+
+- 未实现：OLED 像素级预览（wire gap，AC.10 Path B 冻结为 C4+）、Wi-Fi
+  credential（C5）、OTA/Touch/压缩。不修改 wire format、不改 OLED renderer、
+  不重新实现 PhysicalDisplaySink/DisplayRouter/ProtocolEndpoint/FrameAssembler。

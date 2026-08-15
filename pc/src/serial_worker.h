@@ -166,6 +166,10 @@ public:
     // 未连接时丢弃并计数，不发送（ACK 结果经 displayModeAck 回 GUI，queued）。
     void sendDisplayMode(uint8_t mode);
 
+    // M7-C4 P1-2：当前传输会话 epoch（跨线程安全）。每次 runLoop 入口递增；
+    // GUI 以此丢弃旧会话 stale 帧（switchTransport 后的残帧）。
+    uint64_t sessionId() const { return sessionCounter_.load(); }
+
 signals:
     void frameReady(const DisplayFrame& frame);  // 已提交帧（queued 投递 GUI）
     void statusChanged(WorkerStatus status, const QString& text);
@@ -219,6 +223,7 @@ private:
     uint64_t lastTxBytes_ = 0;
     uint64_t framesAtLastStats_ = 0;
     uint64_t reconnectCount_ = 0;
+    uint64_t sessionId_ = 0;  // 仅 Worker 线程：本会话 epoch
     proto::DiagnosticsRing diag_;
 
     // ---- Transport RX 线程 → Worker 线程 ----
@@ -228,6 +233,7 @@ private:
     IPcTransport::State transportState_ = IPcTransport::State::Disconnected;
 
     // ---- 跨线程（GUI 可调用 start/stop / sendInput）----
+    std::atomic<uint64_t> sessionCounter_{0};  // 每次 runLoop 入口递增
     std::atomic<bool> stop_{false};
     std::atomic<bool> threadAlive_{false};  // M6-D：runLoop 存活标志
     std::thread thread_;

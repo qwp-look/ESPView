@@ -20,6 +20,7 @@ void runRemoteDisplayTests();
 void runDisplayRouterTests();
 void runDisplayUiStateTests();
 void runPhysicalStatusTests();
+void runPhysicalCapabilitySnapshotTests();
 void runSplitStateTests();
 void runTransportManagerTests();
 void runTransportSinkTests();
@@ -65,6 +66,7 @@ int main() {
     runDisplayUiStateTests();
     std::printf("[physical_status]\n");
     runPhysicalStatusTests();
+    runPhysicalCapabilitySnapshotTests();
     std::printf("[split_state]\n");
     runSplitStateTests();
     std::printf("[transport_manager]\n");

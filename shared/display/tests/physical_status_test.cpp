@@ -14,6 +14,8 @@
 #include <limits>
 #include <string_view>
 
+#include "display_capabilities.h"
+#include "display_router.h"
 #include "physical_status.h"
 #include "test_util.h"
 
@@ -23,6 +25,11 @@ using espview::display::controllerCodeName;
 using espview::display::mergePhysicalStatus;
 using espview::display::OledControllerCode;
 using espview::display::parsePhysicalStatusLine;
+using espview::display::DisplayCapabilities;
+using espview::display::DisplayRouteMode;
+using espview::display::DisplaySinkKind;
+using espview::display::PhysicalScene;
+using espview::display::RouterState;
 using espview::display::PhysicalStatus;
 
 void testOledLine() {
@@ -349,6 +356,160 @@ void testClamp() {
     }
 }
 
+// M7-C4 §16-16/17/18 支撑：capability 值模型（DisplayCapabilities / sink 类别 /
+// 场景 / 模式枚举数值与遥测对齐）。
+void testCapabilityModel() {
+    // 默认能力 = 虚拟 sink（320x240 RGB565 16bpp，非单色，不可读回）。
+    DisplayCapabilities def;
+    CHECK_EQ(def.width, 0);
+    CHECK_EQ(def.height, 0);
+    CHECK_EQ(def.color, 16u);
+    CHECK(!def.mono);
+    CHECK(!def.canReadback);
+    CHECK_EQ(static_cast<int>(def.sinkKind), static_cast<int>(DisplaySinkKind::kVirtual));
+    // sink 类别数值：0=Virtual / 1=Physical / 2=Diagnostic。
+    CHECK_EQ(static_cast<int>(DisplaySinkKind::kVirtual), 0);
+    CHECK_EQ(static_cast<int>(DisplaySinkKind::kPhysical), 1);
+    CHECK_EQ(static_cast<int>(DisplaySinkKind::kDiagnostic), 2);
+    // 物理 OLED 能力（128x64 单色 1bpp，不支持读回）。
+    DisplayCapabilities oled;
+    oled.width = 128;
+    oled.height = 64;
+    oled.mono = true;
+    oled.color = 1;
+    oled.canReadback = false;
+    oled.sinkKind = DisplaySinkKind::kPhysical;
+    CHECK(oled.mono);
+    CHECK_EQ(oled.color, 1u);
+    CHECK_EQ(static_cast<int>(oled.sinkKind), static_cast<int>(DisplaySinkKind::kPhysical));
+    // 诊断 sink 类别（诊断页不进入路由扇出）。
+    DisplayCapabilities diag;
+    diag.sinkKind = DisplaySinkKind::kDiagnostic;
+    CHECK_EQ(static_cast<int>(diag.sinkKind), static_cast<int>(DisplaySinkKind::kDiagnostic));
+    // 场景枚举数值与 mod scene= 对齐：0=Diagnostics / 1=Application。
+    CHECK_EQ(static_cast<int>(PhysicalScene::kDiagnostics), 0);
+    CHECK_EQ(static_cast<int>(PhysicalScene::kApplication), 1);
+    // 路由模式数值与 mod sw= 对齐：Mirror=2 / Split=3。
+    CHECK_EQ(static_cast<int>(DisplayRouteMode::kMirror), 2);
+    CHECK_EQ(static_cast<int>(DisplayRouteMode::kSplit), 3);
+}
+
+// M7-C4 §16-16 diagnostics only / §16-17 application capable / §16-18 mirror
+// capable：mod 行 scene/mode 遥测驱动能力展示。
+void testCapabilityScenesAndMirror() {
+    // §16-16：diagnostics only —— 物理侧场景为 Diagnostics。
+    {
+        PhysicalStatus s;
+        CHECK(parsePhysicalStatusLine("mod sw=1 st=2 scene=0", s));
+        CHECK(s.modeValid);
+        CHECK_EQ(s.mode, static_cast<uint8_t>(DisplayRouteMode::kPhysicalOnly));
+        CHECK_EQ(s.routerState, static_cast<uint8_t>(RouterState::kConnected));
+        CHECK_MSG(s.physicalScene == static_cast<uint8_t>(PhysicalScene::kDiagnostics),
+                  "M7-C4: scene=0 must map to diagnostics-only capability");
+    }
+    // §16-17：application capable —— 物理侧场景为 Application。
+    {
+        PhysicalStatus s;
+        CHECK(parsePhysicalStatusLine("mod sw=1 st=2 scene=1", s));
+        CHECK_MSG(s.physicalScene == static_cast<uint8_t>(PhysicalScene::kApplication),
+                  "M7-C4: scene=1 must map to application-capable capability");
+    }
+    // §16-18：mirror capable —— Mirror 模式 + 应用场景 + 降级路由。
+    {
+        PhysicalStatus s;
+        CHECK(parsePhysicalStatusLine("mod sw=2 st=3 scene=1", s));
+        CHECK_MSG(s.mode == static_cast<uint8_t>(DisplayRouteMode::kMirror),
+                  "M7-C4: sw=2 must map to Mirror route mode");
+        CHECK_EQ(s.routerState, static_cast<uint8_t>(RouterState::kDegraded));
+        CHECK_EQ(s.physicalScene, static_cast<uint8_t>(PhysicalScene::kApplication));
+    }
+    // Split 模式数值对齐。
+    {
+        PhysicalStatus s;
+        CHECK(parsePhysicalStatusLine("mod sw=3 st=2 scene=0", s));
+        CHECK_EQ(s.mode, static_cast<uint8_t>(DisplayRouteMode::kSplit));
+        CHECK_EQ(s.physicalScene, static_cast<uint8_t>(PhysicalScene::kDiagnostics));
+    }
+}
+
+// M7-C4 §16-29：stale diagnostics —— 无任何遥测行时快照为 stale（valid=false），
+// 坏行不产生数据；部分组有效时其余组仍 stale；合并不伪造数据。
+void testStaleDiagnostics() {
+    // 全新快照 = 尚无任何遥测行 → 全部组 stale。
+    PhysicalStatus s;
+    CHECK(!s.anyValid());
+    CHECK(!s.oledValid);
+    CHECK(!s.transportValid);
+    CHECK(!s.memValid);
+    CHECK(!s.displayValid);
+    CHECK(!s.sessionValid);
+    CHECK(!s.modeValid);
+    // stale 默认值 = GUI「无数据」语义（无信号 / 未知控制器 / 断开 / 不健康）。
+    CHECK_EQ(s.rssiDbm, -128);
+    CHECK_EQ(s.oledController, OledControllerCode::kUnknown);
+    CHECK(!s.oledOk);
+    CHECK_EQ(s.sessionState, 0u);
+    // 坏行不产生数据 → 仍 stale。
+    CHECK(!parsePhysicalStatusLine("garbage", s));
+    CHECK(!s.anyValid());
+    // 只收到部分组：已收组 not stale，其余组仍 stale。
+    PhysicalStatus t;
+    CHECK(parsePhysicalStatusLine("oled a=0x3C c=SSD1306 err=0 ok=1", t));
+    CHECK(t.oledValid);
+    CHECK(!t.transportValid);
+    CHECK(!t.memValid);
+    CHECK(!t.displayValid);
+    CHECK(!t.sessionValid);
+    CHECK(!t.modeValid);
+    CHECK(t.anyValid());
+    // 合并：src 未生效组不得把 dst 变成 valid。
+    PhysicalStatus acc;
+    mergePhysicalStatus(t, acc);
+    CHECK(acc.oledValid);
+    CHECK(!acc.transportValid);
+    CHECK(!acc.memValid);
+    CHECK(acc.anyValid());
+    // 合并空组不破坏已有数据。
+    PhysicalStatus empty;
+    mergePhysicalStatus(empty, acc);
+    CHECK(acc.oledValid);
+    CHECK_EQ(acc.oledAddress, 0x3C);
+}
+
+// M7-C4 §16-30：disconnected diagnostics —— 会话断开时遥测仍有效（面板可显示
+// 「已断开」），字段展示断开/无路由/不健康语义。
+void testDisconnectedDiagnostics() {
+    // 对端会话断开：sess st=0，hello/ping 均未交换。
+    {
+        PhysicalStatus s;
+        CHECK(parsePhysicalStatusLine("sess st=0 h=0/0 p=0/0", s));
+        CHECK_MSG(s.sessionValid, "M7-C4: disconnected diagnostics line is still valid data");
+        CHECK_EQ(s.sessionState, 0u);  // proto::SessionState Disconnected
+        CHECK(!s.helloOk);
+        CHECK(!s.pingOk);
+        CHECK(s.anyValid());
+    }
+    // 无 router：st=-1 → 0xFF（未知），面板不显示伪正常状态。
+    {
+        PhysicalStatus s;
+        CHECK(parsePhysicalStatusLine("mod sw=0 st=-1 scene=-1", s));
+        CHECK_EQ(s.routerState, 0xFFu);
+        CHECK_EQ(s.physicalScene, 0xFFu);
+    }
+    // OLED 不健康 + 断开组合（诊断面板展示降级/不可用）。
+    {
+        PhysicalStatus s;
+        CHECK(parsePhysicalStatusLine("oled a=0x3C c=SSD1306 err=5 ok=0", s));
+        CHECK(!s.oledOk);
+        CHECK_EQ(s.oledErrCount, 5u);
+        CHECK(parsePhysicalStatusLine("sess st=0 h=0/0 p=0/0", s));
+        CHECK_EQ(s.sessionState, 0u);
+        CHECK(s.oledValid);
+        CHECK(s.sessionValid);
+        CHECK(s.anyValid());
+    }
+}
+
 }  // namespace
 
 void runPhysicalStatusTests() {
@@ -361,5 +522,9 @@ void runPhysicalStatusTests() {
     testModLine();
     testBadLines();
     testMerge();
+    testCapabilityModel();       // §16-16/17/18 支撑
+    testCapabilityScenesAndMirror();  // §16-16/17/18
+    testStaleDiagnostics();      // §16-29
+    testDisconnectedDiagnostics();    // §16-30
     testClamp();
 }

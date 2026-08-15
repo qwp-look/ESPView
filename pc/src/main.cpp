@@ -75,6 +75,7 @@
 #include "input_controller.h"
 #include "input_event.h"       // makeKeyEvent（M6-D：F12 远端切换协助）
 #include "language_selector.h"
+#include "physical_capability_snapshot.h"  // M7-C4：能力/健康分离收敛点
 #include "physical_status.h"   // parsePhysicalStatusLine（M7-C3 遥测）
 #include "serial_worker.h"
 #include "split_drawer.h"
@@ -103,15 +104,15 @@ void printUsage(const char* argv0) {
 QString severityName(int severity) {
     switch (severity) {
         case 0:
-            return QStringLiteral("INFO");
+            return QStringLiteral("Info");
         case 1:
-            return QStringLiteral("WARNING");
+            return QStringLiteral("Warning");
         case 2:
-            return QStringLiteral("ERROR");
+            return QStringLiteral("Error");
         case 3:
-            return QStringLiteral("CRITICAL");
+            return QStringLiteral("Critical");
     }
-    return QStringLiteral("?");
+    return QStringLiteral("Unknown");
 }
 
 QString severityColor(int severity) {
@@ -213,8 +214,7 @@ public:
                     modeWidget_->onAck(ok);
                     syncModeStateToUi();
                     statusBar()->showMessage(
-                        ok ? tr_("Success") + QStringLiteral(": SET_MODE")
-                           : tr_("Failure") + QStringLiteral(": SET_MODE"),
+                        ok ? tr_("Success: SET_MODE") : tr_("Failure: SET_MODE"),
                         3000);
                 });
         // M7-C3：语言切换（只改文案，不触碰 transport / display / framebuffer）。
@@ -235,10 +235,10 @@ public:
         if (!pngDumpDir.isEmpty()) {
             if (QDir().mkpath(pngDumpDir)) {
                 screen_->setPngDumpDir(pngDumpDir);
-                statusBar()->showMessage(QStringLiteral("PNG dump dir: %1").arg(pngDumpDir), 5000);
+                statusBar()->showMessage(tr_("PNG dump dir: %1").arg(pngDumpDir), 5000);
             } else {
                 statusBar()->showMessage(
-                    QStringLiteral("Cannot create dump dir: %1").arg(pngDumpDir), 5000);
+                    tr_("Cannot create dump dir: %1").arg(pngDumpDir), 5000);
             }
         }
 
@@ -269,6 +269,10 @@ protected:
 
 private slots:
     void onFrameReady(const DisplayFrame& frame) {
+        // P1-2：只处理当前传输会话的帧（transport switch 后旧会话 stale 帧丢弃）。
+        if (frame.sessionId != 0 && frame.sessionId != currentSessionId_) {
+            return;
+        }
         // M7-C3：模式切换 / 重连后的 FULL resync 门控 ——
         //   - switchingInProgress：模式切换中，旧模式帧不得上屏（只记录到达）；
         //   - fullResyncPending：等待新 FULL 期间 PARTIAL 不显示（重同步语义，
@@ -284,7 +288,7 @@ private slots:
         // M3：鼠标坐标 clamp 上界跟随对端分辨率
         inputController_->setDisplaySize(frame.width, frame.height);
         resLabel_->setText(QStringLiteral("%1x%2").arg(frame.width).arg(frame.height));
-        formatLabel_->setText(frame.pixelFormat == 0 ? QStringLiteral("RGB565")
+        formatLabel_->setText(frame.pixelFormat == 0 ? tr_("RGB565")
                                                      : QStringLiteral("0x%1")
                                                            .arg(frame.pixelFormat, 2, 16, QLatin1Char('0')));
         // M6-D §五：切换完成判定 —— 新 Transport 收到 FULL commit 才算 CONNECTED。
@@ -294,12 +298,12 @@ private slots:
             switchWatchdog_->stop();
             switching_ = false;
             applyBtn_->setEnabled(true);
-            switchStateLabel_->setText(QStringLiteral("CONNECTED (FULL resync done)"));
+            switchStateLabel_->setText(tr_("CONNECTED (FULL resync done)"));
             switchStateLabel_->setStyleSheet(QStringLiteral("color:#1b5e20;font-weight:bold;"));
             ++switchSuccesses_;
             updateSwitchStatsLabel();
             statusBar()->showMessage(
-                QStringLiteral("Transport switch OK (%1 ms)").arg(lastSwitchMs_), 5000);
+                tr_("Transport switch OK (%1 ms)").arg(lastSwitchMs_), 5000);
         }
         // M7-C3：FULL 帧提交 → Display Mode 模型 FULL resync 收敛。
         if (frame.frameType == 0) {
@@ -313,22 +317,22 @@ private slots:
     void onStatusChanged(WorkerStatus status, const QString& text) {
         switch (status) {
             case WorkerStatus::Connected:
-                connLabel_->setText(QStringLiteral("Transport ✓ / Session CONNECTED"));
+                connLabel_->setText(tr_("Transport ✓ / Session CONNECTED"));
                 connLabel_->setStyleSheet(QStringLiteral("color:#1b5e20;font-weight:bold;"));
                 break;
             case WorkerStatus::Connecting:
-                connLabel_->setText(QStringLiteral("Transport ✓ / Session CONNECTING"));
+                connLabel_->setText(tr_("Transport ✓ / Session CONNECTING"));
                 connLabel_->setStyleSheet(QStringLiteral("color:#e65100;font-weight:bold;"));
                 break;
             case WorkerStatus::Disconnected:
-                connLabel_->setText(QStringLiteral("DISCONNECTED"));
+                connLabel_->setText(tr_("DISCONNECTED"));
                 connLabel_->setStyleSheet(QStringLiteral("color:#b71c1c;font-weight:bold;"));
                 screen_->clearDisplay();  // 断线：清空/隐藏旧画面
                 resLabel_->setText(QStringLiteral("—"));
                 formatLabel_->setText(QStringLiteral("—"));
                 break;
             case WorkerStatus::Error:
-                connLabel_->setText(QStringLiteral("ERROR"));
+                connLabel_->setText(tr_("ERROR"));
                 connLabel_->setStyleSheet(QStringLiteral("color:#b71c1c;font-weight:bold;"));
                 screen_->clearDisplay();
                 if (switching_) {
@@ -342,11 +346,14 @@ private slots:
         statusPanel_->setWorkerStatus(status, text);
         auto s = modeWidget_->state();
         if (status == WorkerStatus::Connected) {
-            // 断线期间 Apply 过（waitingForConnection）且选择未应用 → 自动补发
-            // 一次 SET_MODE（单飞行 + 看门狗，失败回退选择，不重试循环）。
+            // 断线期间 Apply 过（waitingForConnection）或 Apply 在飞被断线打断
+            // （pendingInterruptedApply，P1-1）且选择未应用 → 自动补发一次
+            // SET_MODE（单飞行 + 看门狗，失败回退选择，不重试循环）。
             const bool needsAutoSend =
-                s.waitingForConnection && s.selectedMode != s.appliedMode;
+                (s.waitingForConnection || s.pendingInterruptedApply) &&
+                s.selectedMode != s.appliedMode;
             s.onConnected();  // 新会话 → fullResyncPending
+            currentSessionId_ = manager_.sessionId();  // P1-2：会话 epoch 更新
             if (needsAutoSend) {
                 s.onSwitchStart();  // 锁定本次实际发送模式
             }
@@ -358,11 +365,16 @@ private slots:
             }
         } else if (status == WorkerStatus::Disconnected || status == WorkerStatus::Error) {
             s.onDisconnected();
+            // M7-C4：会话断开 → 能力学习结果撤销（修复跨会话残留闩锁 bug：
+            // 重连到无 OLED 设备时门控不得沿用上一会话的 physicalAvailable）。
+            physCap_ = espview::display::resetPhysicalCapability();
+            s.onPhysicalAvailable(false);
+            s.onPhysicalDegraded(false);
             modeWidget_->setUiState(s);
             drawer_->clearStatus();  // 会话失联 → 抽屉物理状态清空（不伪造）
         }
         syncModeStateToUi();
-        statusBar()->showMessage(text);
+        statusBar()->showMessage(tr_(text.toUtf8().constData()));
     }
 
     // Port/Baud 显示（M6-D：来自当前配置；TCP 显示监听地址，UART 显示 COM/波特率）。
@@ -371,16 +383,16 @@ private slots:
             portLabel_->setText(QString::fromStdString(currentCfg_.uartPort));
             baudLabel_->setText(QString::number(currentCfg_.uartBaud));
         } else {
-            portLabel_->setText(QStringLiteral("TCP %1:%2")
+            portLabel_->setText(tr_("TCP %1:%2")
                                     .arg(QString::fromStdString(currentCfg_.tcpBind))
                                     .arg(currentCfg_.tcpPort));
-            baudLabel_->setText(QStringLiteral("TCP"));
+            baudLabel_->setText(tr_("TCP"));
         }
     }
 
     void onStatsChanged(const WorkerStats& st) {
         // Connection?Transport ??????????Session ??????
-        const char* ssName = "?";
+        const char* ssName = "Unknown";
         switch (st.sessionState) {
             case 0: ssName = "Disconnected"; break;
             case 1: ssName = "Connecting"; break;
@@ -389,12 +401,12 @@ private slots:
         }
         // M6-C：显示 Transport 类型（UART/TCP）；TCP 连接后追加对端地址。
         const QString kindName = st.transportKind == 1 ? QStringLiteral("TCP") : QStringLiteral("UART");
-        QString detail = QStringLiteral("Transport %1  ·  Session %2  ·  Reconnects %3")
+        QString detail = tr_("Transport %1  ·  Session %2  ·  Reconnects %3")
                              .arg(kindName)
-                             .arg(ssName)
+                             .arg(tr_(ssName))
                              .arg(st.reconnectCount);
         if (st.transportKind == 1 && st.transportPeer[0] != '\0') {
-            detail += QStringLiteral("  ·  Peer %1").arg(QString::fromUtf8(st.transportPeer));
+            detail += tr_("  ·  Peer %1").arg(QString::fromUtf8(st.transportPeer));
         }
         connDetailLabel_->setText(detail);
         updatePortLabels();  // 切换后配置可能变化（M6-D）
@@ -403,28 +415,28 @@ private slots:
         // 不把「server 监听地址」与「对端 peer 地址」混淆（§二）。
         if (st.transportKind == 1) {
             peerLabel_->setText(st.transportPeer[0] != '\0'
-                                    ? QStringLiteral("Peer: %1")
+                                    ? tr_("Peer: %1")
                                           .arg(QString::fromUtf8(st.transportPeer))
-                                    : QStringLiteral("Peer: —"));
-            clientLabel_->setText(QStringLiteral("Client: 1 / 1 (single)"));
+                                    : tr_("Peer: —"));
+            clientLabel_->setText(tr_("Client: 1 / 1 (single)"));
         } else {
-            peerLabel_->setText(QStringLiteral("Peer: —"));
-            clientLabel_->setText(QStringLiteral("Client: —"));
+            peerLabel_->setText(tr_("Peer: —"));
+            clientLabel_->setText(tr_("Client: —"));
         }
 
         // Display
-        framesLabel_->setText(QStringLiteral("%1 / %2")
+        framesLabel_->setText(tr_("%1 / %2")
                                   .arg(st.committedFrames)
                                   .arg(st.discardedFrames));
-        fpsLabel_->setText(QStringLiteral("%1 fps · last id=%2 %3")
+        fpsLabel_->setText(tr_("%1 fps · last id=%2 %3")
                                .arg(st.effectiveFps, 0, 'f', 1)
                                .arg(st.lastFrameId)
-                               .arg(st.lastFrameType == 0 ? QStringLiteral("FULL")
-                                                          : QStringLiteral("PARTIAL")));
+                               .arg(st.lastFrameType == 0 ? tr_("FULL")
+                                                          : tr_("PARTIAL")));
         if (st.discardedFrames > 0) {
             discardLabel_->setText(
-                QStringLiteral("%1 @ %2 ms")
-                    .arg(QString::fromLatin1(proto::toString(
+                tr_("%1 @ %2 ms")
+                    .arg(tr_(proto::toString(
                              static_cast<proto::FrameDiscardReason>(st.lastDiscardReason))))
                     .arg(st.lastDiscardTimeMs));
         } else {
@@ -435,47 +447,47 @@ private slots:
             resLabel_->setText(QStringLiteral("%1x%2").arg(st.peerWidth).arg(st.peerHeight));
         }
         if (formatLabel_->text() == QStringLiteral("—") && st.peerPixelFormat == 0) {
-            formatLabel_->setText(QStringLiteral("RGB565"));
+            formatLabel_->setText(tr_("RGB565"));
         }
 
         // Protocol
-        rxLabel_->setText(QStringLiteral("%1 B (↑ %2 B/s)")
+        rxLabel_->setText(tr_("%1 B (↑ %2 B/s)")
                               .arg(st.rxBytes)
                               .arg(st.rxBytesPerSec, 0, 'f', 0));
-        txLabel_->setText(QStringLiteral("%1 B (↑ %2 B/s)")
+        txLabel_->setText(tr_("%1 B (↑ %2 B/s)")
                               .arg(st.txBytes)
                               .arg(st.txBytesPerSec, 0, 'f', 0));
-        pktLabel_->setText(QStringLiteral("pkts %1 · rxMsg %2 · txMsg %3")
+        pktLabel_->setText(tr_("pkts %1 · rxMsg %2 · txMsg %3")
                                .arg(st.packetsRx)
                                .arg(st.rxMessages)
                                .arg(st.txMessages));
-        errLabel_->setText(QStringLiteral("decode %1 · CRC %2 · seqGap %3 · session %4")
+        errLabel_->setText(tr_("decode %1 · CRC %2 · seqGap %3 · session %4")
                                .arg(st.decoderErrors)
                                .arg(st.crcErrors)
                                .arg(st.seqGaps)
                                .arg(st.sessionErrors));
 
         // Heartbeat
-        hbLabel_->setText(QStringLiteral("PING sent %1 / recv %2 · PONG sent %3 / recv %4 · timeouts %5")
+        hbLabel_->setText(tr_("PING sent %1 / recv %2 · PONG sent %3 / recv %4 · timeouts %5")
                               .arg(st.pingSent)
                               .arg(st.pingReceived)
                               .arg(st.pongSent)
                               .arg(st.pongReceived)
                               .arg(st.heartbeatTimeouts));
         if (st.rttValid) {
-            rttLabel_->setText(QStringLiteral("%1 ms (min %2 / avg %3 / max %4, n=%5)")
+            rttLabel_->setText(tr_("%1 ms (min %2 / avg %3 / max %4, n=%5)")
                                    .arg(st.rttMs)
                                    .arg(st.rttMinMs)
                                    .arg(st.rttAvgMs)
                                    .arg(st.rttMaxMs)
                                    .arg(st.rttSamples));
         } else {
-            rttLabel_->setText(QStringLiteral("N/A"));  // 无测量 ≠ 0ms
+            rttLabel_->setText(tr_("N/A"));  // 无测量 ≠ 0ms
         }
 
         // Input
         const InputController::Stats& is = inputController_->stats();
-        inputLabel_->setText(QStringLiteral("%1 / %2 / %3 / %4")
+        inputLabel_->setText(tr_("%1 / %2 / %3 / %4")
                                  .arg(st.inputSent)
                                  .arg(st.inputDropped)
                                  .arg(is.unsupported)
@@ -492,7 +504,7 @@ private slots:
                                           static_cast<qint64>(ts))
                                           .toLocalTime()
                                           .toString(QStringLiteral("HH:mm:ss.zzz")))
-                                 .arg(severityName(severity), -8)
+                                 .arg(tr_(severityName(severity).toUtf8().constData()), -8)
                                  .arg(source)
                                  .arg(msg);
         // M6-D 调试：追加到 --diag-log 文件（完整 ERROR 文本通道，不受 50 条 ring 限制）
@@ -524,21 +536,26 @@ private slots:
             physSnapshot_ = parsed;
             statusPanel_->setPhysicalStatus(physSnapshot_);
             drawer_->setPhysicalStatus(physSnapshot_);
-            // capability 推断：OLED 遥测 ok=1 是当前 wire 唯一真实可观测源
-            // （模式只读；HELLO mode_mask 为编译期常量，不得作为物理可用证明）。
-            if (!physicalSeen_ && physSnapshot_.oledValid && physSnapshot_.oledOk) {
-                physicalSeen_ = true;
-                auto s = modeWidget_->state();
+            // M7-C4：能力/健康分离 —— 单一收敛点 PhysicalCapabilitySnapshot。
+            // capabilityKnown（曾见 ok=1，学习结果只置位、断开才撤销）只管门控；
+            // healthy（最近遥测 ok）管降级；provenance 为未来 CAPABILITIES 上行预留。
+            const bool wasKnown = physCap_.capabilityKnown;
+            physCap_ = espview::display::makePhysicalCapabilitySnapshot(physSnapshot_, physCap_);
+            auto s = modeWidget_->state();
+            if (!wasKnown && physCap_.capabilityKnown) {
                 s.onPhysicalAvailable(true);
-                modeWidget_->setUiState(s);
-                syncModeStateToUi();
             }
+            if (physCap_.capabilityKnown) {
+                s.onPhysicalDegraded(!physCap_.healthy);
+            }
+            modeWidget_->setUiState(s);
+            syncModeStateToUi();
         }
     }
 
     void saveSnapshot() {
         if (!screen_->hasImage()) {
-            statusBar()->showMessage(QStringLiteral("No image to save yet"), 3000);
+            statusBar()->showMessage(tr_("No image to save yet"), 3000);
             return;
         }
         const QString path = QFileDialog::getSaveFileName(
@@ -548,9 +565,9 @@ private slots:
             return;
         }
         if (screen_->savePng(path)) {
-            statusBar()->showMessage(QStringLiteral("Saved %1").arg(path), 5000);
+            statusBar()->showMessage(tr_("Saved %1").arg(path), 5000);
         } else {
-            statusBar()->showMessage(QStringLiteral("Failed to save %1").arg(path), 5000);
+            statusBar()->showMessage(tr_("Failed to save %1").arg(path), 5000);
         }
     }
 
@@ -615,7 +632,7 @@ private:
             modeWidget_->onAck(false);  // 超时 → 回退选择 + 错误（不无限等待）
             syncModeStateToUi();
             statusBar()->showMessage(
-                tr_("Failure") + QStringLiteral(": SET_MODE timeout"), 5000);
+                tr_("Failure: SET_MODE timeout"), 5000);
         }
     }
     void onLanguageChanged(int lang) {
@@ -718,13 +735,13 @@ private:
         tcpLay->addStretch(1);
         transportGrid_->addWidget(tcpCfgWidget_, 2, 0, 1, 6);
 
-        peerLabel_ = new QLabel(QStringLiteral("Peer: —"), this);
+        peerLabel_ = new QLabel(tr_("Peer: —"), this);
         transportGrid_->addWidget(peerLabel_, 3, 0, 1, 3);
-        clientLabel_ = new QLabel(QStringLiteral("Client: —"), this);
+        clientLabel_ = new QLabel(tr_("Client: —"), this);
         transportGrid_->addWidget(clientLabel_, 3, 3, 1, 3);
 
         switchStatsLabel_ =
-            new QLabel(QStringLiteral("Switches 0 · OK 0 · Fail 0 · Last —"), this);
+            new QLabel(tr_("Switches 0 · OK 0 · Fail 0 · Last —"), this);
         transportGrid_->addWidget(switchStatsLabel_, 4, 0, 1, 6);
 
         onTransportComboChanged(transportCombo_->currentIndex());
@@ -772,17 +789,24 @@ private:
         if (switching_) {
             return;  // §五.1：disable duplicate clicks
         }
+        // §六：Display switching 进行中 → Transport switch Apply 禁用
+        // （两套 switch transaction 互斥；等 SET_MODE ACK 收敛后再切换）。
+        if (modeWidget_->state().switchingInProgress) {
+            statusBar()->showMessage(
+                tr_("Display mode switch in progress — wait for ACK"), 3000);
+            return;
+        }
         const TransportConfig target = readConfigFromUi();
         const std::string verr = validateTransportConfig(target);
         if (!verr.empty()) {
-            abortSwitch(QString::fromStdString(verr));  // 本地非法配置（不切换）
+            abortSwitch(tr_(verr.c_str()));  // 本地非法配置（不切换）
             return;
         }
         // 幂等：Worker 存活且配置相同 → 无操作（已运行中）。失败态（lastSwitchFailed_）
         // 允许重新 Apply 重试，不陷入“已运行”死循环。
         if (!lastSwitchFailed_ && manager_.isRunning() && target == currentCfg_) {
             statusBar()->showMessage(
-                QStringLiteral("Already running this transport configuration"), 3000);
+                tr_("Already running this transport configuration"), 3000);
             return;
         }
         beginSwitch(target);
@@ -792,9 +816,18 @@ private:
         switching_ = true;
         lastSwitchFailed_ = false;
         applyBtn_->setEnabled(false);
+        // §六：Transport switching 与 Display switching 互斥——切换期间禁用
+        // Display Mode Apply（防两套 switch transaction 打架；恢复由状态机
+        // onFullCommit/onDisconnected 收敛，abortSwitch 显式恢复）。
+        {
+            auto ms = modeWidget_->state();
+            ms.applyEnabled = false;
+            modeWidget_->setUiState(ms);
+        }
+        currentSessionId_ = 0;  // P1-2：等待新会话 Connected 更新 epoch
         ++switchCount_;
         lastSwitchError_.clear();
-        switchStateLabel_->setText(QStringLiteral("TRANSPORT SWITCHING ..."));
+        switchStateLabel_->setText(tr_("TRANSPORT SWITCHING ..."));
         switchStateLabel_->setStyleSheet(QStringLiteral("color:#e65100;font-weight:bold;"));
         updateSwitchStatsLabel();
         // §十二：切换后不保留旧 Transport 的 stale 画面；等新 FULL 再恢复。
@@ -817,7 +850,7 @@ private:
         lastSwitchMs_ = steadyMs() - t0;
         currentCfg_ = target;
         if (!ok) {
-            abortSwitch(QStringLiteral("invalid transport config (switch not performed)"));
+            abortSwitch(tr_("invalid transport config (switch not performed)"));
             return;
         }
         // 异步完成判定：新 Transport 收到 FULL commit（onFrameReady）→ CONNECTED。
@@ -833,10 +866,17 @@ private:
         switchPendingFull_ = false;
         switchWatchdog_->stop();
         applyBtn_->setEnabled(true);
+        // §六：Transport/Display 互斥解除——恢复 Display Mode Apply
+        // （模式自身 switching 由 DisplayUiState 状态机管理）。
+        {
+            auto ms = modeWidget_->state();
+            ms.applyEnabled = !ms.switchingInProgress;
+            modeWidget_->setUiState(ms);
+        }
         lastSwitchFailed_ = true;
         ++switchFailures_;
         lastSwitchError_ = reason;
-        switchStateLabel_->setText(QStringLiteral("Switch failed: %1").arg(reason));
+        switchStateLabel_->setText(tr_("Switch failed: %1").arg(reason));
         switchStateLabel_->setStyleSheet(QStringLiteral("color:#b71c1c;font-weight:bold;"));
         updateSwitchStatsLabel();
     }
@@ -858,13 +898,13 @@ private:
         const uint64_t elapsed = steadyMs() - switchStartMs_;
         // UART FULL ≈13.2s；TCP ≈250ms；30s 上限足够，避免无限等待（§五）。
         if (elapsed >= 30000) {
-            abortSwitch(QStringLiteral("timeout: no FULL commit within 30s"));
+            abortSwitch(tr_("timeout: no FULL commit within 30s"));
         }
     }
 
     void updateSwitchStatsLabel() {
         switchStatsLabel_->setText(
-            QStringLiteral("Switches %1 · OK %2 · Fail %3 · Last %4 ms · LastErr %5")
+            tr_("Switches %1 · OK %2 · Fail %3 · Last %4 ms · LastErr %5")
                 .arg(switchCount_)
                 .arg(switchSuccesses_)
                 .arg(switchFailures_)
@@ -1086,8 +1126,9 @@ private:
     QSplitter* screenSplitter_ = nullptr;
     QTimer* modeWatchdog_ = nullptr;
     UiLang lang_ = UiLang::kEnglish;
-    espview::display::PhysicalStatus physSnapshot_;  // 最近遥测快照（GUI 线程）
-    bool physicalSeen_ = false;  // 已收到 OLED ok=1 遥测 → physicalAvailable
+    espview::display::PhysicalStatus physSnapshot_;    // 最近遥测快照（GUI 线程）
+    espview::display::PhysicalCapabilitySnapshot physCap_;  // M7-C4：能力/健康收敛点
+    uint64_t currentSessionId_ = 0;  // P1-2：当前传输会话 epoch（0 = 无会话）
     uint64_t modeSwitchStartMs_ = 0;
     std::vector<std::pair<QLabel*, const char*>> retranslateLabels_;  // i18n 重刷
     QLabel* uartPortTitle_ = nullptr;

@@ -40,6 +40,7 @@ struct DisplayFrame {
     uint16_t height = 0;      // 逻辑分辨率高（240）
     uint16_t rectCount = 0;   // 实际 FRAME_RECT 数
     uint32_t byteCount = 0;   // 像素总字节数
+    uint64_t sessionId = 0;   // 传输会话 epoch（P1-2：stale 帧门控；0 = 未知）
     std::vector<DisplayRect> rects;
 };
 

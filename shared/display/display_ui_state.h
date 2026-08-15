@@ -79,6 +79,7 @@ public:
     bool fullResyncPending = false;   // 重连/切换后等待新 FULL 帧
     bool applyEnabled = true;         // switching 期间 false
     bool waitingForConnection = false;// 断开时点了 Apply → "Waiting for connection"
+    bool pendingInterruptedApply = false;// 在飞 Apply 被断线打断 → 重连后补发（P1-1）
     std::string lastError;            // 最近一次错误（空 = 无错误）
 
     // ---- 转移方法 ----

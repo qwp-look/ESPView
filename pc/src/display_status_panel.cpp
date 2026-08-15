@@ -368,14 +368,14 @@ void DisplayStatusPanel::refreshTransport() {
     }
     setValue(transport_.state, workerStateText(workerStatus_), st);
     setValue(transport_.detail,
-             workerText_.isEmpty() ? t("N/A") : workerText_,
+             workerText_.isEmpty() ? t("N/A") : t(workerText_.toUtf8().constData()),
              workerStatus_ == 2 ? PanelState::kActive : PanelState::kUnavailable);
     setValue(transport_.reconnect,
              k ? fmtU64(stats_.reconnectCount) : t("N/A"),
              k ? PanelState::kActive : PanelState::kUnavailable);
     if (phys_.transportValid) {
         const QString v =
-            QStringLiteral("%1 dBm / ch %2")
+            t("%1 dBm / ch %2")
                 .arg(phys_.rssiDbm)
                 .arg(phys_.channel);
         const PanelState rs =
@@ -417,7 +417,7 @@ void DisplayStatusPanel::refreshSession() {
     }
 
     if (hasStats_ && stats_.rttValid) {
-        setValue(session_.rtt, QStringLiteral("%1 ms").arg(stats_.rttMs),
+        setValue(session_.rtt, t("%1 ms").arg(stats_.rttMs),
                  PanelState::kActive);
     } else {
         setValue(session_.rtt, t("N/A"), PanelState::kUnavailable);
@@ -436,7 +436,7 @@ void DisplayStatusPanel::refreshVirtual() {
 
     if (hasStats_ && stats_.peerWidth > 0 && stats_.peerHeight > 0) {
         setValue(virtual_.resolution,
-                 QStringLiteral("%1 x %2").arg(stats_.peerWidth).arg(stats_.peerHeight),
+                 t("%1 x %2").arg(stats_.peerWidth).arg(stats_.peerHeight),
                  PanelState::kActive);
     } else {
         setValue(virtual_.resolution, t("N/A"), PanelState::kUnavailable);
@@ -490,7 +490,7 @@ void DisplayStatusPanel::refreshPhysical() {
                 .arg(phys_.oledAddress, 2, 16, QLatin1Char('0'))
                 .toUpper();
         setValue(physical_.oled,
-                 QStringLiteral("%1 @ %2 (%3)").arg(ctrl, addr,
+                 t("%1 @ %2 (%3)").arg(ctrl, addr,
                                                     phys_.oledOk ? t("OK") : t("Fault")),
                  phys_.oledOk ? PanelState::kActive : PanelState::kDegraded);
     } else {
@@ -507,7 +507,7 @@ void DisplayStatusPanel::refreshPhysical() {
 
     if (phys_.memValid) {
         setValue(physical_.heap,
-                 QStringLiteral("%1 / %2 / %3")
+                 t("%1 / %2 / %3")
                      .arg(phys_.heapFree)
                      .arg(phys_.heapLargest)
                      .arg(phys_.heapMinFree),
@@ -552,7 +552,7 @@ void DisplayStatusPanel::refreshErrors() {
     if (hasStats_) {
         const uint64_t total = stats_.decoderErrors + stats_.crcErrors + stats_.seqGaps;
         setValue(errors_.protocol,
-                 QStringLiteral("%1 / %2 / %3")
+                 t("%1 / %2 / %3")
                      .arg(stats_.decoderErrors)
                      .arg(stats_.crcErrors)
                      .arg(stats_.seqGaps),
@@ -565,7 +565,7 @@ void DisplayStatusPanel::refreshErrors() {
         const uint64_t esp = phys_.displayValid ? phys_.framesDropped : 0;
         const uint64_t host = hasStats_ ? stats_.discardedFrames : 0;
         setValue(errors_.dropped,
-                 QStringLiteral("ESP %1 / host %2").arg(esp).arg(host),
+                 t("ESP %1 / host %2").arg(esp).arg(host),
                  (esp + host) == 0 ? PanelState::kActive : PanelState::kDegraded);
     } else {
         setValue(errors_.dropped, t("N/A"), PanelState::kUnavailable);

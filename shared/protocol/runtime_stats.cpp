@@ -29,6 +29,7 @@ void DiagnosticsRing::push(uint64_t timestampMs, Severity severity, std::string 
 }
 
 void DiagnosticsRing::push(const DiagnosticEntry& e) {
+    std::lock_guard<std::mutex> lk(mutex_);
     items_.push_back(e);
     while (items_.size() > capacity_) {
         items_.pop_front();
@@ -36,14 +37,23 @@ void DiagnosticsRing::push(const DiagnosticEntry& e) {
 }
 
 void DiagnosticsRing::clear() {
+    std::lock_guard<std::mutex> lk(mutex_);
     items_.clear();
 }
 
+size_t DiagnosticsRing::size() const {
+    std::lock_guard<std::mutex> lk(mutex_);
+    return items_.size();
+}
+
 std::vector<DiagnosticEntry> DiagnosticsRing::items() const {
+    std::lock_guard<std::mutex> lk(mutex_);
     return std::vector<DiagnosticEntry>(items_.begin(), items_.end());
 }
 
 const DiagnosticEntry* DiagnosticsRing::last() const {
+    // 并发 push 会使返回指针失效；生产代码不并发调用（仅测试/调试）。
+    std::lock_guard<std::mutex> lk(mutex_);
     return items_.empty() ? nullptr : &items_.back();
 }
 

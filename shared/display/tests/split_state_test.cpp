@@ -210,6 +210,106 @@ void testPersistenceCombinations() {
     CHECK_EQ(s.drawerWidth(), 510);
 }
 
+// M7-C4 §16-24/25：drawer open / close 语义（含宽度跨开合保留与幂等）。
+void testOpenCloseSemantics() {
+    SplitState s;
+    CHECK_MSG(!s.drawerVisible(), "M7-C4: drawer must default to closed");
+    CHECK_EQ(s.drawerWidth(), SplitState::kDefaultDrawerWidth);
+
+    // open：可见 + 默认宽度；幂等。
+    s.open();
+    CHECK_MSG(s.drawerVisible(), "M7-C4: open() must show the drawer");
+    CHECK_EQ(s.drawerWidth(), SplitState::kDefaultDrawerWidth);
+    s.open();
+    CHECK(s.drawerVisible());
+
+    // 调宽后 close：隐藏但宽度保留；再 open：宽度不变。
+    s.setDrawerWidth(440);
+    s.close();
+    CHECK_MSG(!s.drawerVisible(), "M7-C4: close() must hide the drawer");
+    CHECK_EQ(s.drawerWidth(), 440);
+    s.close();
+    CHECK(!s.drawerVisible());
+    s.open();
+    CHECK(s.drawerVisible());
+    CHECK_EQ(s.drawerWidth(), 440);
+
+    // toggle：反向切换。
+    s.toggle();
+    CHECK(!s.drawerVisible());
+    s.toggle();
+    CHECK(s.drawerVisible());
+}
+
+// M7-C4 §16-26：drawer resize（夹取 + 跨状态保留）。
+void testResizeSemantics() {
+    SplitState s;
+    // 收起状态也可调整宽度（进入 Split 前预置）。
+    s.resize(400);
+    CHECK_EQ(s.drawerWidth(), 400);
+    CHECK(!s.drawerVisible());
+
+    // 夹取边界。
+    s.resize(-1);
+    CHECK_EQ(s.drawerWidth(), SplitState::kMinDrawerWidth);
+    s.resize(SplitState::kMaxDrawerWidth + 100);
+    CHECK_EQ(s.drawerWidth(), SplitState::kMaxDrawerWidth);
+
+    // 宽度跨 open/close 保留。
+    s.open();
+    s.resize(500);
+    s.close();
+    CHECK_EQ(s.drawerWidth(), 500);
+    s.open();
+    CHECK_EQ(s.drawerWidth(), 500);
+
+    // 默认宽度常量与夹取一致。
+    CHECK_EQ(SplitState::clampWidth(SplitState::kDefaultDrawerWidth),
+             SplitState::kDefaultDrawerWidth);
+    CHECK_EQ(SplitState::clampWidth(0), SplitState::kMinDrawerWidth);
+}
+
+// M7-C4 §16-27/28：persist / restore（序列化键值 → 新实例恢复）。
+void testPersistRestore() {
+    // 键名固定（Qt 层 QSettings 桥接契约）。
+    CHECK(std::string(SplitState::kKeyDrawerVisible) == "split/drawerVisible");
+    CHECK(std::string(SplitState::kKeyDrawerWidth) == "split/drawerWidth");
+
+    // 打开 + 调宽后持久化，再恢复到全新实例。
+    SplitState s;
+    s.open();
+    s.resize(470);
+    const SettingsMap map = s.toSettingsMap();
+    CHECK_EQ(map.size(), static_cast<std::size_t>(2));
+
+    SplitState restored;  // 默认收起 + 默认宽度
+    CHECK(restored.fromSettingsMap(map));
+    CHECK_MSG(restored.drawerVisible(), "M7-C4: restore must apply drawer visibility");
+    CHECK_MSG(restored.drawerWidth() == 470, "M7-C4: restore must apply drawer width");
+
+    // 收起 + 夹取宽度持久化 → 恢复出收起状态。
+    SplitState c;
+    c.close();
+    c.resize(9999);
+    const SettingsMap closedMap = c.toSettingsMap();
+    SplitState rc;
+    CHECK(rc.fromSettingsMap(closedMap));
+    CHECK(!rc.drawerVisible());
+    CHECK_EQ(rc.drawerWidth(), SplitState::kMaxDrawerWidth);
+
+    // 全未知键：返回 false 且状态不变。
+    SplitState u;
+    u.open();
+    SettingsMap unknown = {{"split/other", "1"}};
+    CHECK(!u.fromSettingsMap(unknown));
+    CHECK(u.drawerVisible());
+
+    // 空 map：返回 false 且状态不变。
+    const SettingsMap empty;
+    CHECK(!u.fromSettingsMap(empty));
+    CHECK(u.drawerVisible());
+}
+
 }  // namespace
 
 void runSplitStateTests() {
@@ -218,5 +318,8 @@ void runSplitStateTests() {
     testResize();
     testSettingsPersistence();
     testPersistenceCombinations();
+    testOpenCloseSemantics();  // §16-24/25
+    testResizeSemantics();     // §16-26
+    testPersistRestore();      // §16-27/28
     std::printf("[split_state] done\n");
 }

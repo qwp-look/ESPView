@@ -42,6 +42,7 @@ bool DisplayUiState::applyRequested() {
 
 void DisplayUiState::onSwitchStart() {
     pendingApplyMode_ = selectedMode;  // 锁定本次实际发送的模式
+    pendingInterruptedApply = false;
     switchingInProgress = true;
     applyEnabled = false;
     routerState = UiRouterState::kSwitching;
@@ -55,6 +56,7 @@ void DisplayUiState::onAck(bool ok) {
     if (!switchingInProgress) {
         return;  // stale ACK（已超时/断线清理）：忽略
     }
+    pendingInterruptedApply = false;
     switchingInProgress = false;
     applyEnabled = true;
     fullResyncPending = ok;  // ACK ok 后设备已应用 → 等 FULL resync 帧
@@ -71,6 +73,7 @@ void DisplayUiState::onAck(bool ok) {
 }
 
 void DisplayUiState::onConnected() {
+    pendingInterruptedApply = false;
     sessionConnected = true;
     waitingForConnection = false;
     fullResyncPending = true;   // 新会话必须 FULL resync
@@ -81,6 +84,9 @@ void DisplayUiState::onConnected() {
 }
 
 void DisplayUiState::onDisconnected() {
+    // P1-1：在飞 Apply（SET_MODE 已发、ACK 未回）被断线打断 → 记录
+    // interrupted-apply，重连后由接线方自动补发（不能静默丢失切换意图）。
+    pendingInterruptedApply = switchingInProgress;
     sessionConnected = false;
     switchingInProgress = false;
     applyEnabled = true;        // 断开时允许点击 Apply → waitingForConnection

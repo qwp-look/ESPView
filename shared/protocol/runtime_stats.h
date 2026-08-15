@@ -16,6 +16,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <deque>
+#include <mutex>
 #include <optional>
 #include <string>
 #include <vector>
@@ -50,14 +51,18 @@ public:
     void push(uint64_t timestampMs, Severity severity, std::string source, std::string message);
     void push(const DiagnosticEntry& e);
     void clear();
-    size_t size() const { return items_.size(); }
+    // P1-3：size/capacity/items/last 与 push 并发安全（mutex 保护）。
+    size_t size() const;
     size_t capacity() const { return capacity_; }
     // 按时间顺序返回全部条目（最旧在前；副本）。
     std::vector<DiagnosticEntry> items() const;
+    // 最近一条（生产代码无并发调用；返回指针在随后 push 后可能失效，
+    // 仅限测试/单线程调试使用）。
     const DiagnosticEntry* last() const;
 
 private:
     size_t capacity_;
+    mutable std::mutex mutex_;
     std::deque<DiagnosticEntry> items_;
 };
 

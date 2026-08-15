@@ -10,6 +10,7 @@ add_library(espview_display STATIC
     display_ui_state.cpp
     physical_status.cpp
     split_state.cpp
+    physical_capability_snapshot.cpp
 )
 target_include_directories(espview_display PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}

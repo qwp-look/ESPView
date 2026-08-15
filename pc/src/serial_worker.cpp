@@ -239,6 +239,7 @@ void SerialWorker::emitStats() {
 }
 
 void SerialWorker::runLoop() {
+    sessionId_ = ++sessionCounter_;  // P1-2：新传输会话 epoch（跨线程读安全）
     threadAlive_.store(true);
     // ---- 激活 Transport（M6-A：UART / TCP 二选一；上层协议完全透明）----
     // 必须在 sink / 回调桥接之前：它们引用 transport_。
@@ -309,6 +310,7 @@ void SerialWorker::runLoop() {
         currentFrame_.height = f.height;
         currentFrame_.rectCount = f.rectCount;
         currentFrame_.byteCount = f.byteCount;
+        currentFrame_.sessionId = sessionId_;  // P1-2：打戳，GUI 按 epoch 门控
         ++committedFrames_;
         lastFrameId_ = f.frameId;
         lastFrameType_ = static_cast<uint8_t>(f.frameType);
