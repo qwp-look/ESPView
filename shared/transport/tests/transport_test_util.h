@@ -35,6 +35,11 @@ public:
     void setCapabilities(const TransportCapabilities& caps) { caps_ = caps; }
     // 固定返回结果（默认 kOk）。
     void setSendResult(SendStatus r) { fixedSendResult_ = r; sendSeq_.clear(); }
+    // M7-B：diagSnapshot 可观测字段（默认值保持既有测试行为）。
+    void setRxBytes(uint64_t v) { rxBytes_ = v; }
+    void setReconnectCount(uint64_t v) { reconnectCount_ = v; }
+    void setApInfo(int8_t rssi, uint8_t ch) { apInfoValid_ = true; rssi_ = rssi; channel_ = ch; }
+    void clearApInfo() { apInfoValid_ = false; }
     // 按序返回（队列用完后回落到 fixedSendResult_）。
     void setSendSequence(std::vector<SendStatus> seq) { sendSeq_ = std::move(seq); }
 
@@ -77,6 +82,17 @@ public:
     void setStateCallback(StateCallback cb) override { stateCb_ = std::move(cb); }
     const TransportCapabilities& capabilities() const override { return caps_; }
     size_t mtu() const override { return caps_.mtu; }
+    uint64_t reconnectCount() const override { return reconnectCount_; }
+    uint64_t txBytes() const override { return sentBytes_; }
+    uint64_t rxBytes() const override { return rxBytes_; }
+    bool wifiApInfo(int8_t* rssiOut, uint8_t* channelOut) const override {
+        if (!apInfoValid_) {
+            return false;
+        }
+        *rssiOut = rssi_;
+        *channelOut = channel_;
+        return true;
+    }
 
     // ---- 测试辅助 ----
     void setState(State s) {
@@ -103,6 +119,11 @@ private:
     size_t closeCount_ = 0;
     size_t sendCount_ = 0;
     uint64_t sentBytes_ = 0;
+    uint64_t rxBytes_ = 0;
+    uint64_t reconnectCount_ = 0;
+    bool apInfoValid_ = false;
+    int8_t rssi_ = -128;
+    uint8_t channel_ = 0;
     std::vector<uint8_t> txData_;
     std::vector<State> stateLog_;
 

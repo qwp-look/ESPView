@@ -1,0 +1,91 @@
+menu "OLED Diagnostics Display"
+
+config ESPVIEW_OLED_ENABLE
+    bool "Enable M7-A independent OLED status display"
+    default n
+    help
+        M7-A：独立的 OLED 状态显示（128x64 SSD1306/SH1106，I2C）。
+        低优先级任务（默认 2，低于 session=5 / stats=3）周期渲染
+        StatusSnapshot（main 注入）并上传 framebuffer。
+        OLED 组件协议无关：不依赖 protocol/display/lvgl，绝不触碰
+        protocol sendMutex / Transport。禁用时零代码路径（main 集成
+        全部 #if CONFIG_ESPVIEW_OLED_ENABLE 保护）。
+
+config ESPVIEW_OLED_SDA_GPIO
+    int "OLED I2C SDA GPIO number"
+    default 21
+    range 0 39
+
+config ESPVIEW_OLED_SCL_GPIO
+    int "OLED I2C SCL GPIO number"
+    default 22
+    range 0 39
+
+config ESPVIEW_OLED_I2C_CLK_HZ
+    int "OLED I2C clock frequency (Hz)"
+    default 400000
+    range 100000 1000000
+
+config ESPVIEW_OLED_ADDR_AUTO
+    bool "Auto-detect OLED I2C address (probe 0x08..0x77)"
+    default y
+    help
+        M7-A：启动时用 i2c_master_probe 扫描 0x08..0x77，优先
+        0x3C/0x3D，否则取首个响应地址。扫描无响应则按 refresh
+        周期重试（有界 re-init，带退避）。
+
+config ESPVIEW_OLED_ADDR
+    int "OLED I2C address (7-bit raw; used when auto is off)"
+    default 0x3C
+    range 0x08 0x77
+    depends on !ESPVIEW_OLED_ADDR_AUTO
+
+choice ESPVIEW_OLED_CONTROLLER
+    prompt "OLED controller type"
+    default ESPVIEW_OLED_CONTROLLER_AUTO
+    help
+        M7-A：AUTO = 探测地址后默认 SSD1306（无回读，无法可靠区分
+        控制器型号）；SSD1306/SH1106 强制指定（如 132x64 GDDRAM
+        变体）。命令序列差异见 shared/oled/oled_cmd.cpp。
+
+config ESPVIEW_OLED_CONTROLLER_AUTO
+    bool "Auto (default SSD1306)"
+
+config ESPVIEW_OLED_CONTROLLER_SSD1306
+    bool "SSD1306 (128x64)"
+
+config ESPVIEW_OLED_CONTROLLER_SH1106
+    bool "SH1106 (132x64 GDDRAM, column offset 2)"
+
+endchoice
+
+config ESPVIEW_OLED_REFRESH_MS
+    int "OLED refresh period (ms)"
+    default 500
+    range 100 60000
+
+config ESPVIEW_OLED_TASK_STACK
+    int "OLED task stack size (bytes)"
+    default 4096
+    range 2048 16384
+
+config ESPVIEW_OLED_TASK_PRIORITY
+    int "OLED task priority (must stay below session=5 / stats=3)"
+    default 2
+    range 1 2
+
+config ESPVIEW_OLED_I2C_TIMEOUT_MS
+    int "OLED I2C transaction timeout (ms)"
+    default 50
+    range 5 1000
+
+config ESPVIEW_OLED_MAX_REINIT
+    int "Consecutive I2C errors before bus reset/re-init"
+    default 3
+    range 1 100
+    help
+        M7-A 错误恢复：连续失败达该阈值触发一次 bus reset / 重建
+        （带指数退避）；每个故障窗口重初始化轮数有界（kMaxReinitCycles），
+        冷却期后才会再次尝试 —— 不允许无限重置循环。错误计数只增不减。
+
+endmenu

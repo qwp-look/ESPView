@@ -121,7 +121,28 @@ ITransport* TransportManager::transport() const {
     return current_.get();
 }
 
-const TransportCapabilities& TransportManager::capabilities() const {
+TransportDiagSnapshot TransportManager::diagSnapshot() const {
+    TransportDiagSnapshot s;
+    std::lock_guard<std::mutex> st(stateMutex_);
+    s.type = currentType_;
+    if (current_ != nullptr) {
+        s.connected = current_->isConnected();
+        s.reconnectCount = current_->reconnectCount();
+        s.txBytes = current_->txBytes();
+        s.rxBytes = current_->rxBytes();
+        int8_t rssi = -128;
+        uint8_t ch = 0;
+        if (current_->wifiApInfo(&rssi, &ch)) {
+            s.rssi = rssi;
+            s.channel = ch;
+        }
+    }
+    return s;
+}
+
+TransportCapabilities TransportManager::capabilities() const {
+    // M7-B：按值返回 —— 锁内拷贝，消除锁释放后返回引用指向已切换 Transport 的
+    // 悬垂窗口（原实现返回 current_->capabilities() 的引用，锁外即失效）。
     std::lock_guard<std::mutex> st(stateMutex_);
     static const TransportCapabilities kNone{};
     return current_ != nullptr ? current_->capabilities() : kNone;

@@ -23,6 +23,22 @@
 > +3（126 checks）、transport_config_test 67 checks、协议套件 208,951 checks 全 0 failure；
 > 30 分钟 TCP 长稳 heap 平坦（hb/ha=231352）、sess2 全 0、输入/PARTIAL 正常；TCP reconnect
 > stress 10/10 OK；AP outage 仍 deferred。详见 X 节。wire format 不变。
+> **修订记录（M7-A, 2026-08-15）**：独立 OLED 状态显示（128×64 I2C SSD1306/SH1106，
+> SDA=GPIO21 SCL=GPIO22）。OLED 组件协议无关（零依赖 protocol/display/lvgl/transport），
+> 低优先级任务 1s 刷新状态页（transport/session/IP/RSSI/FRM/ERR/HEAP/UP），1KB 页式
+> framebuffer 按 ≤32B 分段上传；有界错误恢复（3 轮 re-init + 指数退避 + 冷却，禁无限重置）；
+> 实机探测 0x3C/SSD1306，15 分钟 298 条诊断行 err=0 ok=1，0 CRC/bad_magic，OLED 不污染
+> 协议链路；host 210,504 checks / 0 failures。wire format 不变。详见 Y 节。
+> **修订记录（M7-B, 2026-08-15）**：OLED 生产语义收尾（M7-A 架构审计 3 个 Mandatory 修复）。
+> OLED/I2C 生命周期（M#1）：stop() 只置停止标志 + 有界等待，I2C 资源释放仅发生在任务
+> 退出路径，消除“任务内 transmit 与释放竞争”UAF；Transport 快照（M#2）：statsLoop 不再
+> 锁外解引用 transport 裸指针（新增 TransportManager::diagSnapshot() 值语义 +
+> capabilities() 按值返回 + reconnectCount 原子化）；OledStatus 可观测性（M#3）：新增
+> state 枚举（kDisabled…kStopping）与 lastFlushDurationMs；statsLoop 新增 `mem` 堆诊断行
+> （h/lg/mn）；pc_oled_monitor.py 重写（HELLO 握手、主动 1s PING、ERROR 负载头剥离、
+> 堆趋势 5% 泄漏判定）。实测：30 分钟 UART 长跑 heap first=160096/last=168568（+8472）、
+> 0 CRC；TCP reconnect stress 10/10 OK（~2.0s/轮）；host 218,625 checks / 0 failures；
+> 生产固件 1,092,448 B（app 余量 48%）。wire format 不变。详见 Z 节。
 
 ---
 
@@ -746,6 +762,8 @@ ESPView/
 | M6-B | Flash 分区扩容（4 MiB flash + custom partition table + single factory app 2 MiB、no OTA）+ TCP 性能 5 轮实测（FULL/PARTIAL/RTT）+ power-save 对比实验 + host/ESP32 回归 （wire format 未修改） | ✅ 完成（2026-08-14 真实硬件 COM4：固件 1,027,488 B、app 余量 51%；详见 U 章） |
 
 | M6-C | Runtime Transport Selection + Transport-aware TX Pacing（TransportManager + capabilities 模型；UART 保持 115200 pacing、TCP 取消 UART 固定节流；有界 TX 队列 + 整帧丢弃 + 控制公平；safe switch + 会话重置 + FULL resync；host transport tests；真实硬件双向运行时切换与断线重连验收；wire format 未修改） | ✅ 完成（2026-08-14 真实硬件 COM4：UART 13.2s/FULL 无回归，TCP 235–254ms/FULL、qp=2、0 drop；TCP↔UART 运行时切换零协议错误；断线重连 FULL resync；host 208910 checks / 0 failures；详见 V 章） |
+| M7-A | 独立 OLED 状态显示（128×64 I2C SSD1306/SH1106，SDA=GPIO21 SCL=GPIO22；状态页 = transport/session/IP/RSSI/FRM/ERR/HEAP/UP；1KB 页式 fb + ≤32B 分段上传；有界错误恢复；wire format 未修改） | ✅ 完成（2026-08-15 真实硬件：probe 0x3C/SSD1306、15min 298 行 err=0 ok=1、0 CRC/bad_magic；host 210,504 checks / 0 failures；详见 Y 节） |
+| M7-B | OLED 生产语义收尾（M7-A 审计 Mandatory 修复：OLED/I2C 生命周期、Transport 快照、OledStatus 可观测性；statsLoop `mem` 堆诊断行；pc_oled_monitor.py 重写；wire format 未修改） | ✅ 完成（2026-08-15 真实硬件：30 分钟 UART 长跑 heap +8472、0 CRC；TCP reconnect stress 10/10 OK；host 218,625 checks / 0 failures；详见 Z 节） |
 | M6(未来) | 真实 LCD (DEVICE/MIRROR)、触摸（INPUT_TOUCH）、TinyUSB、运行时 DisplayMode | 未开始 |
 
 ### M2 前置架构冻结（M1-3D 检查）
@@ -805,6 +823,8 @@ M2 不负责：LVGL、真实 LCD、Mirror、触摸、Wi-Fi、高 FPS、复杂 UI
 9. M5-B（LVGL Input Device，wire format 未修改）：`shared/input/lvgl_adapter.{h,cpp}`（`LvglInputAdapter`，纯 C++17 无 LVGL 依赖：pointer 状态缓存 + 点击保持窗口 + key ring buffer + wheel accumulator + 统计）+ `shared/input/hid_lvgl_keymap.{h,cpp}`（HID usage → LVGL key code）+ `esp32/components/lvgl_port/src/lvgl_indev.cpp`（POINTER / KEYPAD / ENCODER 三个 `lv_indev_drv_t` read_cb）+ `esp32/components/lvgl_port/src/lvgl_app.cpp`（交互 demo UI：Button A/B + Counter + Keyboard/Mouse 标签 + group 导航）+ `esp32/main`（InputManager → LvglInputAdapter 接线 + `inp3` 统计行）+ host 单测 `shared/protocol/tests/lvgl_adapter_test.cpp`（§19 十五项 + 点击保持/集成扩展）。
 
 10. M6-A（Wi-Fi STA + TCP Transport，wire format 未修改）：`esp32/components/espview/include/espview/wifi_sta.hpp` + `src/wifi_sta.cpp`（STA 初始化/连接/GOT_IP/自动重连，凭据仅经 Kconfig 注入）+ `include/espview/tcp_transport.hpp` + `src/tcp_transport.cpp`（link 任务 + RX 任务 + sendAll，ITransport 同构）+ `esp32/components/espview/Kconfig`（ESPVIEW_TRANSPORT choice + TCP/Wi-Fi 配置，Wi-Fi 凭据默认空、只在本机未跟踪 sdkconfig 填写）+ `esp32/main/main.cpp`（编译期 Transport 选择，上层完全透明）+ PC 侧 `pc/src/pc_transport.h`（IPcTransport 抽象）+ `pc/src/host_tcp_transport.{h,cpp}`（HostTcpTransport 客户端 + TcpListener 服务端，WinSock2）+ `pc/src/serial_transport.{h,cpp}`（HostUartTransport 收敛到 IPcTransport）+ `pc/src/serial_worker.{h,cpp}`（TransportKind kUart/kTcp，TCP Server 模式：bindListen → acceptOne → pump → re-accept）+ `pc/src/connection_manager` / `main.cpp`（--transport uart|tcp --tcp-bind --tcp-port CLI）+ host loopback 测试 `pc/src/tcp_transport_test.cpp`（§二十八 1-19）。
+
+11. M7-A（独立 OLED 状态显示，wire format 未修改）：`shared/oled/`（`oled_fb` 1KB 页式 fb + 8×8 字体、`oled_cmd` SSD1306/SH1106 命令序列与上传分段生成，纯 C++17 零平台依赖）+ `esp32/components/oled/`（`oled_i2c` v6.0.2 新 I2C 驱动 `driver/i2c_master.h` 封装、`oled_controller` 控制器解析、`status_ui` 状态页渲染、`oled_display` 低优先级任务 + 有界错误恢复、Kconfig 默认 n）+ `esp32/main`（`oledStatusSnapshot` provider + 启停接线 + `oled` 诊断行，全部 `#if CONFIG_ESPVIEW_OLED_ENABLE` 保护）+ host 单测 `shared/oled/tests/oled_test.cpp`（1,553 checks）+ `scripts/pc_oled_monitor.py`（被动串口监控 `oled` 诊断行）。
 
 下一步（M6）：真实 LCD（DEVICE/MIRROR）、触摸（INPUT_TOUCH）、TinyUSB、运行时 DisplayMode；输入侧扩展项：GUI 层 MouseMove 节流/合并在发端调优、ESP32 输入防抖、输入宏/录制/回放、游戏手柄、修饰键在 LVGL 侧的合成（当前为 capability limitation，见 S.7）。ESP32 侧 `IDisplay` / `RemoteDisplay` 属于 M2/M5 范围，本设计已为其预留接口（D 节）。
 
@@ -1560,3 +1580,192 @@ InputManager / RemoteDisplay`；TCP 不新增任何 Message / Packet / CRC 变�
   transport_manager.{cpp,h}、shared/transport/transport.h、pc/src/transport_config.h、
   esp32/main/main.cpp、esp32/main/Kconfig、esp32/sdkconfig.defaults、
   pc/src/tcp_transport_test.cpp、pc/src/transport_config_test.cpp。
+## Y. M7-A 独立 OLED 状态显示（2026-08-15 实测；wire format 未修改）
+
+M7-A 新增一块 128×64 I2C OLED（SSD1306/SH1106 兼容），作为**独立的诊断/状态显示**
+（transport/session/IP/RSSI/帧数/错误/堆/运行时间）。它不是 LVGL 的显示后端，不承载
+Application 画面；**OLED 显示内容永远不是权威 framebuffer**（ESP32 的 LVGL/RGB565
+画面仍是唯一权威）。wire format / Packet Header / CRC / Message / CHUNKED / Frame 语义
+全部不变；OLED 组件零依赖 protocol/display/lvgl/transport。
+
+### Y.1 硬件接线（实测 2026-08-15）
+
+- OLED I2C：SDA → GPIO21，SCL → GPIO22，VCC → 3.3V，GND → GND；
+- GPIO21/22 无冲突（非 strapping/flash/ADC，工程内零引用；VSPI 默认 IO_MUX 不影响
+  I2C matrix 路由）；
+- 板级无外部上拉 → 驱动开启内部上拉（`enable_internal_pullup=1`；400kHz 下够用，
+  高速场景建议外接上拉）；
+- I2C 时钟 400kHz；地址自动探测 0x08..0x77（优先 0x3C/0x3D）；实测探测到 **0x3C**。
+- 控制器探测只能确认地址、无法可靠区分 SSD1306/SH1106 → Kconfig 提供
+  AUTO（默认 SSD1306）/ 强制 SSD1306 / 强制 SH1106；实测 AUTO → SSD1306。
+  SSD1306 = 128×64 GDDRAM（0x21/0x22 水平寻址）；SH1106 = 132×64（列偏移 2，
+  逐页 0xB0|page + 列地址命令），命令序列差异见 `shared/oled/oled_cmd.cpp`。
+  **segment remap 固定 OFF（0xA0）+ 页内列序反转上传**：实机首版（0xA1）与
+  0xA0 对照均呈现水平镜像（控制器疑似忽略 remap 命令）→ 2026-08-15 最终修正为
+  按页反转列序上传（地址列 C ← fb 列 127-C，页顺序 0..7 不变，垂直不受影响；
+  golden bytes 同步更新）；COM scan 保持 0xC8（dec），垂直方向实测正常。
+   反转上传后整串方向正确，但单个字形仍左右镜像 → 根因是 `drawText` 按 **bit7=最左**
+   读取内置字体（每个字形内部被镜像）→ 改为按 **bit0=最左** 逐列转置（字体表本身
+   即 bit0=最左约定：'C'={0x3C,0x66,0x03,...} 按 bit0 读为开口向右的正 C）；
+   '/'、'\' 两个字形在 bit0 约定下原数据即方向正确，无需互换；host golden bytes
+   同步重算。
+
+### Y.2 驱动/组件结构（冻结）
+
+- `shared/oled/`：`OledFb`（128×64 1bpp 页式 fb，8 pages × 128B = **1KB** + 内置
+  8×8 ASCII 字体）、`oled_cmd`（SSD1306/SH1106 init/on/off/contrast 命令序列 +
+  帧上传分段生成），纯 C++17 零平台依赖，host 单测 golden bytes / 分段边界；
+- `esp32/components/oled/`：
+  - `OledI2c`：ESP-IDF v6.0.2 **新 I2C 驱动** `driver/i2c_master.h`
+    （`i2c_new_master_bus` + `i2c_master_probe` + `i2c_master_bus_add_device` +
+    `i2c_master_transmit`）；**bus 级无 clk_speed_hz，速率在设备级 `scl_speed_hz`**；
+    `trans_queue_depth=0` 同步模式（异步模式与 `i2c_master_probe` 不兼容，驱动源码
+    明确 warning）；`allow_pd=0`；每次 transmit ≤32B 分段；
+  - `OledDisplay`：低优先级任务 + 有界错误恢复；`status_ui`：状态页渲染；
+  - Kconfig：`ESPVIEW_OLED_ENABLE` 默认 **n**（禁用时零代码路径）、SDA=21/SCL=22、
+    I2C 400kHz、ADDR_AUTO、控制器 choice、REFRESH 1000ms、任务栈 4096/优先级 2、
+    I2C 超时 50ms、MAX_REINIT 3。
+
+### Y.3 线程与刷新模型（冻结）
+
+- 独立 `espview_oled` 任务（优先级 2 < stats=3 < session=5）；每 refreshMs(1s)
+  调用 main 注入的 StatusProvider（`StatusSnapshot` 值语义）→ 渲染进 1KB fb →
+  按段上传（每段 ≤32B 含控制字节）；
+- OLED 任务**绝不触碰 protocol sendMutex / Transport**；状态快照字段由 main 填充
+  （读原子/普通量，与 statsLoop 同一约定）；**绝不显示/打印 Wi-Fi SSID/密码**；
+- IP 获取按 transport 类型门控：仅 TCP 模式取 esp_netif IP 且判空（UART-only 下
+  esp_netif 未初始化不可取 IP，显示 "--"）。
+
+### Y.4 错误恢复（冻结）
+
+- 错误计数只增（errorCount / refreshCount / lastErrorMs 原子）；连续失败达
+  MAX_REINIT 触发恢复：① bus_reset + 重发 init/清屏（用现有设备句柄）；② 失败则
+  整体重建（bus → probe → addDevice → init）；
+- 每个故障窗口重初始化轮数有界（kMaxReinitCycles=3）+ 指数退避 0.5s→30s +
+  30s 冷却，**不允许无限重置循环**；degraded 时仍按 refresh 周期尝试；
+- stop() 置停止标志 + 通知唤醒 + 有界等待任务退出（2s），幂等可重复调用。
+
+### Y.5 状态页（8 行 × 8px 字体）
+
+`ESPView` / `UART|TCP + 会话状态` / `IP --|<ip>` / `RSSI CH`（TCP 且 apInfo 有效）/
+`FRM <n>` / `ERR <n>` / `HEAP <n>` / `UP hh:mm:ss`；计数 clamp 防溢出 128px 行宽。
+
+### Y.6 诊断通道（ERROR 文本行，非 wire 格式）
+
+statsLoop 每 3s 追加一行（≤64B，makeError 限制）：
+`oled a=<addr> c=<ctrl> err=<errCount> ok=<0|1>`；err 计数 clamp 到 5 位；
+经现有 ERROR 消息通道上报，不修改协议。
+
+### Y.7 实测结果（2026-08-15 真实硬件，CH340 COM4 @ 115200，UART transport 验收模式）
+
+- 探测：`a=0x3C c=SSD1306`；初始化/清屏成功；`ok=1`；
+- 首版实机发现字体水平镜像（"ESPView"→"weivpse"）→ 0xA0/0xA1 remap 对照均镜像，
+  按页反转列序上传后整串方向正确、但字形仍单个左右镜像 → `drawText` 改为按 bit0=最左
+  读取字体（字形内部翻转修复），host golden bytes 同步重算；
+- 15 分钟稳定性：298 条 `oled` 行全部 `err=0 ok=1`（errorCount 只增、末值仍 0）；
+- 协议零污染：采集期间 0 CRC 错误 / 0 bad magic / 0 protocol errors；
+- LVGL+UART 帧流同场验证：FULL=153600B + PARTIAL=6392B（dirty 4.16%），
+  0 CRC / 0 mismatch（`pc_com3_lvgl_sanity.py` PASS）；
+- 构建与 host：OLED_ENABLE=y / =n 双配置 ESP32 构建通过（-Wall -Werror 零警告）；
+  host 全量 **210,504 checks / 0 failures**（新增 OLED host 测试 1,553 checks）；
+  ctest 1/1。
+
+### Y.8 边界声明
+
+- OLED 是诊断显示，不是 LVGL 输出 / HardwareDisplay / Mirror；不改变 DisplayMode
+  架构与 Application 代码；
+- 不显示 SSID/密码；Wi-Fi 凭据仍只存在于未跟踪本地 `esp32/sdkconfig`；
+- 不修改 wire format / flash 分区 / LVGL 路径；`scripts/pc_oled_monitor.py`（被动
+  串口监控 OLED 诊断行）为新增脚本，不进入协议链路。
+
+
+## Z. M7-B OLED 生产语义收尾（2026-08-15；wire format 未修改）
+
+M7-B 是 M7-A 的生产化收尾：不改变 OLED 显示内容与协议，只修复架构审计（Agent 1）
+给出的 3 个 Mandatory 问题（OLED/I2C 生命周期、Transport 生命周期、状态可观测性），
+并补充 statsLoop `mem` 堆诊断行与 `pc_oled_monitor.py` 握手/保活/错误解析重写。
+wire format / Packet Header / CRC / Message / CHUNKED / Frame 语义零改动。
+
+### Z.1 定位（重申，未变）
+
+- OLED 是 Diagnostic Sink（诊断显示），不是显示后端；不进入 DisplayMode /
+  Application 代码路径；状态页内容沿用 Y.5，本阶段不新增页面。
+
+### Z.2 OLED/I2C 生命周期（审计 M#1，已修复）
+
+- `stop()` 只置停止标志 + 通知唤醒 + 等待任务退出；**I2C 资源（bus/device）释放
+  只发生在 taskLoop 退出路径**，绝不在 stop() 调用线程释放（消除“任务内 transmit 与
+  释放竞争”导致的 UAF）；
+- join 超时（2s）时保留 task_ 句柄并进入 kStopping 态，禁止 start() 重启同一实例；
+  析构提供 15s 兜底等待，仍不退出则 `i2c_.release()`——宁可泄漏资源也绝不释放仍可能
+  被任务访问的内存；
+- `uploadFrame` / `executeInitSequence` 每段 transmit 前检查 `running_` 停止谓词
+  （原子），使停止请求可中断长上传；
+- `taskExited_` / `running_` 改为 release/acquire 语义，消除编译器重排风险。
+
+### Z.3 Transport 快照（审计 M#2，已修复）
+
+- statsLoop 不再在锁外解引用 `g_mgr.transport()` 裸指针；TransportManager 新增
+  `diagSnapshot()`（`TransportDiagSnapshot` 值语义：kind/connected/reconnectCount/
+  txBytes/rxBytes/wifiApInfo），一次临界区内复制，锁外安全消费；
+- `capabilities()` 改为按值返回（同上生命周期安全）；
+- `tcp_transport` 的 `reconnectCount_` 原子化。
+
+### Z.4 OledStatus 可观测性（审计 M#3，已修复）
+
+- `OledStatus` 新增 `state`（`OledState` 枚举：kDisabled/kInitializing/kReady/
+  kDegraded/kStopping，原子）与 `lastFlushDurationMs`（最近一次整页上传耗时）；
+- `errorCount` / `refreshCount` / `lastErrorMs` 沿用 Y.4 只增原子约定不变。
+
+### Z.5 statsLoop `mem` 诊断行（M7-B 新增，非 wire 格式）
+
+- statsLoop 每 3s 追加一行（≤64B，makeError 限制）：
+  `mem h=<freeHeap> lg=<largestBlock> mn=<minFreeHeap>`；
+- 值来源：`esp_get_free_heap_size` / `heap_caps_get_largest_free_block` /
+  `esp_get_minimum_free_heap_size`；
+- 用途：长稳堆趋势监控（host monitor 判定末值比初值低 5% 判泄漏）；不修改协议。
+
+### Z.6 pc_oled_monitor.py 更新（M7-B 重写，非 wire 格式）
+
+- HELLO 握手：先等 ESP32 启动 HELLO 再发本端；兼容已运行场景（3s 未收到则主动发）；
+- 主动每 1s PING 维持会话（原因：FULL 153600B @115200 ≈13.5s 期间 ESP32 自身 PING
+  被 sendMutex 放弃，仅被动回 PONG 会触发 5s peer timeout）；
+- ERROR 负载解析修正：必须剥离 3 字节头（u16 errorCode + u8 msgLen），此前未剥离
+  导致 `startswith("oled")` 不命中；
+- `mem` 行解析 + 堆趋势判定（末值比初值低 5% 判泄漏）+ 8 位 clamp。
+
+### Z.7 回归与构建（M7-B）
+
+- host 全量 **218,625 checks / 0 failures**；ctest 1/1；
+  verify_host / verify_qt / verify_lvgl（host）全部 PASS；
+- ESP32 构建（-Wall -Werror 零警告）：
+  - 生产 OLED=y（TCP）：**1,092,448 B**（app 余量 48%）；
+  - OLED=n：**1,062,512 B**；
+  - 测试 profile（UART + TEST_TRANSPORT_SWITCH=y + OLED=y）：**449,744 B**；
+- 修复：`esp32/components/oled/CMakeLists.txt` 源路径补 ${CMAKE_CURRENT_LIST_DIR}
+  前缀（否则 ESP32 构建必炸）；GCC16 `-Warray-bounds` 误报在
+  `remote_display_test.cpp` 单文件抑制；
+- `shared/transport/tests/transport_manager_test.cpp` 新增 `diagSnapshot` vs
+  `switchTo` 双线程并发压力测试。
+
+### Z.8 实测（2026-08-15 真实硬件 COM4 @ 115200 / TCP）
+
+- 30 分钟稳定性长跑（UART 测试固件 + `pc_oled_monitor.py --duration 1800`）：
+  - 1800.1s，597 条 `oled` 行全 `err=0 ok=1`，final_oledErrorCount=0；
+  - heap：first=160096 last=168568 **delta=+8472**（mn=156508，无泄漏趋势）；
+  - 0 CRC / 0 bad magic / 0 protocol errors；rx_ping 完整；RESULT PASS；
+- LVGL sanity（`pc_com3_lvgl_sanity.py --watch 30`）：FULL=153600B + PARTIAL=6392B
+  （dirty 4.16%），0 CRC / 0 mismatch；
+- input_send_test（9 事件 mouse/key/wheel）：rx=9 dropped=0，0 CRC/seq；
+- TCP reconnect stress（生产 OLED=y TCP 固件，PC 当前局域网 IP:8765）：
+  初始 FULL 连接成功；10 轮 GUI kill/重启 → ESP32 重连 + HELLO + FULL resync
+  全部 OK（**rounds=10 ok=10 fail=0**，每轮 ~2.0s）；0 CRC / 0 seqGap / 0 session
+  错误；OLED 状态行全程 `err=0 ok=1`。
+
+### Z.9 边界声明
+
+- 本阶段不实现：新 Transport、LVGL 后端变更、DisplayMode 变更、输入扩展、压缩、
+  TinyUSB、真实 LCD、AP outage 实测；
+- OLED 仍是诊断显示，永不成为权威 framebuffer；状态页不显示 SSID/密码；
+- 不修改 wire format / 分区 / Kconfig 默认值语义；`mem` 行与 monitor 脚本均不在
+  协议链路内。

@@ -22,6 +22,12 @@
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "esp_heap_caps.h"  // heap_caps_get_largest_free_block / MALLOC_CAP_DEFAULT
+#include "esp_system.h"     // esp_get_free_heap_size / esp_get_minimum_free_heap_size
+#if CONFIG_ESPVIEW_OLED_ENABLE
+#include "esp_netif.h"
+#include "oled/oled_display.hpp"
+#endif
 
 #include "espview/tcp_transport.hpp"
 #include "espview/uart_transport.hpp"
@@ -104,9 +110,11 @@ std::atomic<bool> g_sinkActive{false};
 std::atomic<uint64_t> g_switchEntryMs{0};
 std::atomic<uint64_t> g_switchExitMs{0};
 std::atomic<bool> g_switchActive{false};
+#endif
+// M6-D 诊断：session/stats 任务句柄（供 TEST_TRANSPORT_SWITCH 调试命令报告任务状态；
+// 任务循环无条件记录，故无条件声明；生产固件 =n 时仅赋值、不被读取）。
 TaskHandle_t g_sessionTask = nullptr;
 TaskHandle_t g_statsTask = nullptr;
-#endif
 
 // g_endpoint / g_testPattern / g_lvgl / monotonicMs 定义在文件下方；回调与 sink 提前引用需要前向声明。
 extern ProtocolEndpoint g_endpoint;
@@ -116,6 +124,51 @@ extern std::unique_ptr<espview::LvglPort> g_lvgl;
 extern std::unique_ptr<TestPattern> g_testPattern;
 #endif
 uint64_t monotonicMs();
+#include "esp_heap_caps.h"  // heap_caps_get_largest_free_block / MALLOC_CAP_DEFAULT
+#include "esp_system.h"     // esp_get_free_heap_size / esp_get_minimum_free_heap_size
+#if CONFIG_ESPVIEW_OLED_ENABLE
+extern std::unique_ptr<espview::oled::OledDisplay> g_oled;  // 定义在文件下方
+#endif
+
+#include "esp_heap_caps.h"  // heap_caps_get_largest_free_block / MALLOC_CAP_DEFAULT
+#include "esp_system.h"     // esp_get_free_heap_size / esp_get_minimum_free_heap_size
+#if CONFIG_ESPVIEW_OLED_ENABLE
+// M7-A：OLED 状态快照 provider（main 侧填充；OLED 组件不理解字段含义）。
+// 读取线程安全：g_endpoint.stats()/g_endpoint.state()/g_transportState 与
+// statsLoop 同一约定（普通量/原子）；OLED 任务绝不触碰 protocol sendMutex /
+// Transport。安全：绝不显示/打印 SSID/密码。
+espview::oled::StatusSnapshot oledStatusSnapshot() {
+    espview::oled::StatusSnapshot snap;
+    const SessionStats& st = g_endpoint.stats();
+    snap.sessionState = static_cast<uint8_t>(g_endpoint.state());
+    snap.frameCount = g_endpoint.frameStats().commits();
+    snap.errorCount = st.errors;
+    snap.uptimeMs = monotonicMs();
+    snap.freeHeap = esp_get_free_heap_size();
+    snap.minFreeHeap = esp_get_minimum_free_heap_size();
+    snap.largestBlock = heap_caps_get_largest_free_block(MALLOC_CAP_DEFAULT);
+    // M7-B：统一走 diagSnapshot()（值语义，stateMutex_ 内读，switchTo 并发安全）。
+    const espview::transport::TransportDiagSnapshot diag = g_mgr.diagSnapshot();
+    const bool isTcp = diag.type == espview::transport::TransportType::kTcp;
+    snap.transportType = isTcp ? 1u : 0u;
+    snap.transportConnected = diag.connected;
+    if (isTcp) {
+        esp_netif_t* netif = esp_netif_get_handle_from_ifkey("WIFI_STA_DEF");
+        esp_netif_ip_info_t ipInfo;
+        if (netif != nullptr && esp_netif_get_ip_info(netif, &ipInfo) == ESP_OK) {
+            std::snprintf(snap.ip, sizeof(snap.ip), IPSTR, IP2STR(&ipInfo.ip));
+        } else {
+            std::snprintf(snap.ip, sizeof(snap.ip), "--");
+        }
+        snap.apInfoValid = diag.rssi != -128;
+        snap.rssi = diag.rssi;
+        snap.channel = diag.channel;
+    } else {
+        std::snprintf(snap.ip, sizeof(snap.ip), "--");
+    }
+    return snap;
+}
+#endif
 
 // M6-C：paced/unpaced 发送统一收口（§八–§十）。所有发送经 TransportManager
 // 发送门串行化；paced（UART）背压时按 wire 速率重试，unpaced（TCP）单次尝试
@@ -282,6 +335,7 @@ void reportInputStats() {
         g_endpoint.sendMessage(*m4);
     }
 
+#if CONFIG_ESPVIEW_TEST_TRANSPORT_SWITCH
     // M6-D 诊断（ERROR 文本通道）：发送门/切换活性 + 会话/统计任务状态。
     //   dbg2 s=sinkActive sinkAgeMs w=switchActive switchAgeMs ts=sessionTaskState tr=statsTaskState
     const uint64_t nowDbg = monotonicMs();
@@ -308,6 +362,7 @@ void reportInputStats() {
     if (m5.has_value()) {
         g_endpoint.sendMessage(*m5);
     }
+#endif  // CONFIG_ESPVIEW_TEST_TRANSPORT_SWITCH
 }
 
 void onFrameCommit(const CommittedFrame& frame) {
@@ -429,32 +484,77 @@ void statsLoop(void*) {
             // 计数可见地 clamp 到 4 位（≤9999）：运行时 ≤64B（makeError 限制）。
             {
                 char trxBuf[96];
-                auto* t = g_mgr.transport();
-                const uint64_t rcV = t != nullptr ? t->reconnectCount() : 0;
-                const uint64_t txV = t != nullptr ? t->txBytes() : 0;
-                const uint64_t rxV = t != nullptr ? t->rxBytes() : 0;
+                // M7-B：改用 diagSnapshot 值语义快照（锁内拷贝）：原 transport()
+                // 裸指针在锁外解引用，switchTo 并发时存在 use-after-free。
+                const auto diag = g_mgr.diagSnapshot();
                 const uint32_t swC = g_mgr.switchCount() < 9999u ? g_mgr.switchCount() : 9999u;
-                const uint32_t rcC = rcV < 9999u ? static_cast<uint32_t>(rcV) : 9999u;
-                const uint32_t txC = txV < 9999u ? static_cast<uint32_t>(txV) : 9999u;
-                const uint32_t rxC = rxV < 9999u ? static_cast<uint32_t>(rxV) : 9999u;
-                int8_t rssi = -128;
-                uint8_t ch = 0;
-                const bool apOk = t != nullptr && t->wifiApInfo(&rssi, &ch);
+                const uint32_t rcC = diag.reconnectCount < 9999u
+                                          ? static_cast<uint32_t>(diag.reconnectCount)
+                                          : 9999u;
+                const uint32_t txC = diag.txBytes < 9999u
+                                          ? static_cast<uint32_t>(diag.txBytes)
+                                          : 9999u;
+                const uint32_t rxC = diag.rxBytes < 9999u
+                                          ? static_cast<uint32_t>(diag.rxBytes)
+                                          : 9999u;
                 std::snprintf(trxBuf, sizeof(trxBuf),
                               "trx tr=%d st=%u sw=%u rc=%u tx=%u rx=%u rssi=%d ch=%u",
-                              g_mgr.current() == espview::transport::TransportType::kTcp ? 1 : 0,
+                              diag.type == espview::transport::TransportType::kTcp ? 1 : 0,
                               static_cast<unsigned>(g_transportState.load()),
                               static_cast<unsigned>(swC),
                               static_cast<unsigned>(rcC),
                               static_cast<unsigned>(txC),
                               static_cast<unsigned>(rxC),
-                              apOk ? static_cast<int>(rssi) : -128,
-                              apOk ? static_cast<unsigned>(ch) : 0u);
+                              static_cast<int>(diag.rssi),
+                              static_cast<unsigned>(diag.channel));
                 const auto mTrx = makeError(ErrorCode::kNone, trxBuf);
                 if (mTrx.has_value()) {
                     g_endpoint.sendMessage(*mTrx);
                 }
             }
+            // M7-B：内存诊断行（ERROR 文本通道，非 wire 格式）：
+            //   mem h=<freeHeap> lg=<largestBlock> mn=<minFreeHeap>
+            // 计数 clamp 到 8 位（heap ≤ 99,999,999B）；行 ≤64B（makeError 限制）。
+            {
+                char memBuf[96];
+                const uint64_t freeH = static_cast<uint64_t>(esp_get_free_heap_size());
+                const uint64_t minH = static_cast<uint64_t>(esp_get_minimum_free_heap_size());
+                const uint64_t lgH = static_cast<uint64_t>(
+                    heap_caps_get_largest_free_block(MALLOC_CAP_DEFAULT));
+                const auto clamp8 = [](uint64_t v) { return v < 100000000u ? v : 99999999u; };
+                std::snprintf(memBuf, sizeof(memBuf),
+                              "mem h=%llu lg=%llu mn=%llu",
+                              static_cast<unsigned long long>(clamp8(freeH)),
+                              static_cast<unsigned long long>(clamp8(lgH)),
+                              static_cast<unsigned long long>(clamp8(minH)));
+                const auto mMem = makeError(ErrorCode::kNone, memBuf);
+                if (mMem.has_value()) {
+                    g_endpoint.sendMessage(*mMem);
+                }
+            }
+#include "esp_heap_caps.h"  // heap_caps_get_largest_free_block / MALLOC_CAP_DEFAULT
+#include "esp_system.h"     // esp_get_free_heap_size / esp_get_minimum_free_heap_size
+#if CONFIG_ESPVIEW_OLED_ENABLE
+            //   oled a=<addr> c=<ctrl> err=<errCount> ok=<0|1>
+            // 计数 clamp 到 5 位（≤99999）；行 ≤64B（makeError 限制）。
+            if (g_oled) {
+                const espview::oled::OledStatus os = g_oled->status();
+                char oledBuf[96];
+                const uint64_t oledErr = os.errorCount < 99999u
+                                             ? os.errorCount
+                                             : 99999u;
+                std::snprintf(oledBuf, sizeof(oledBuf),
+                              "oled a=0x%02X c=%s err=%llu ok=%d",
+                              static_cast<unsigned>(os.address),
+                              espview::oled::controllerName(os.controller),
+                              static_cast<unsigned long long>(oledErr),
+                              os.ok ? 1 : 0);
+                const auto mOled = makeError(ErrorCode::kNone, oledBuf);
+                if (mOled.has_value()) {
+                    g_endpoint.sendMessage(*mOled);
+                }
+            }
+#endif
 #if CONFIG_ESPVIEW_APP_LVGL
             if (g_lvgl) {
                 g_lvgl->reportStats();  // M5-A：显示/堆统计（disp/disp2 行）
@@ -483,11 +583,15 @@ SendStatus mapTransportSend(espview::transport::SendStatus r) {
 }
 
 SendStatus transportSink(const uint8_t* data, size_t len) {
+#if CONFIG_ESPVIEW_TEST_TRANSPORT_SWITCH
     g_sinkEntryMs.store(monotonicMs());
     g_sinkActive.store(true);
+#endif
     const SendStatus r = mapTransportSend(g_sink.send(data, len));
+#if CONFIG_ESPVIEW_TEST_TRANSPORT_SWITCH
     g_sinkActive.store(false);
     g_sinkExitMs.store(monotonicMs());
+#endif
     return r;
 }
 
@@ -499,11 +603,15 @@ SendStatus transportSink(const uint8_t* data, size_t len) {
 SendStatus trySink(const uint8_t* data, size_t len) {
     // M6-C：单次尽力（PONG/ACK/PING/ACK 重试专用）：门忙/缓冲满立即返回背压，
     // 绝不进入 UART 式重试循环（阻塞 RX 线程/会话 tick）。
+#if CONFIG_ESPVIEW_TEST_TRANSPORT_SWITCH
     g_sinkEntryMs.store(monotonicMs());
     g_sinkActive.store(true);
+#endif
     const SendStatus r = mapTransportSend(g_sink.trySend(data, len));
+#if CONFIG_ESPVIEW_TEST_TRANSPORT_SWITCH
     g_sinkActive.store(false);
     g_sinkExitMs.store(monotonicMs());
+#endif
     return r;
 }
 
@@ -537,6 +645,13 @@ ProtocolEndpoint::Callbacks kEndpointCallbacks = [] {
 }();
 
 ProtocolEndpoint g_endpoint(kEndpointCfg, transportSink, trySink, kEndpointCallbacks, monotonicMs);
+
+#include "esp_heap_caps.h"  // heap_caps_get_largest_free_block / MALLOC_CAP_DEFAULT
+#include "esp_system.h"     // esp_get_free_heap_size / esp_get_minimum_free_heap_size
+#if CONFIG_ESPVIEW_OLED_ENABLE
+// M7-A：独立 OLED 状态显示（组件协议无关；任务优先级 2 < stats=3/session=5）。
+std::unique_ptr<espview::oled::OledDisplay> g_oled;
+#endif
 
 #if CONFIG_ESPVIEW_APP_LVGL
 // M5-A LVGL Port：display driver + flush_cb + TX 任务 + 统计。
@@ -601,6 +716,43 @@ extern "C" void app_main() {
              g_mgr.transport() != nullptr ? g_mgr.transport()->mtu() : 0);
 #if CONFIG_ESPVIEW_APP_LVGL
     updateFlushWaitFromTransport();
+#endif
+
+#include "esp_heap_caps.h"  // heap_caps_get_largest_free_block / MALLOC_CAP_DEFAULT
+#include "esp_system.h"     // esp_get_free_heap_size / esp_get_minimum_free_heap_size
+#if CONFIG_ESPVIEW_OLED_ENABLE
+    // M7-A：独立 OLED 状态显示（低优先级任务；OLED 组件协议无关，状态由
+    // oledStatusSnapshot 注入；绝不触碰 protocol sendMutex / Transport）。
+    {
+        espview::oled::OledConfig oledCfg;
+        oledCfg.sdaGpio = CONFIG_ESPVIEW_OLED_SDA_GPIO;
+        oledCfg.sclGpio = CONFIG_ESPVIEW_OLED_SCL_GPIO;
+        oledCfg.clkHz = CONFIG_ESPVIEW_OLED_I2C_CLK_HZ;
+#if CONFIG_ESPVIEW_OLED_ADDR_AUTO
+        oledCfg.addrAuto = true;
+#else
+        oledCfg.addrAuto = false;
+        oledCfg.address = static_cast<uint8_t>(CONFIG_ESPVIEW_OLED_ADDR);
+#endif
+        oledCfg.refreshMs = CONFIG_ESPVIEW_OLED_REFRESH_MS;
+        oledCfg.taskStack = CONFIG_ESPVIEW_OLED_TASK_STACK;
+        oledCfg.taskPriority = CONFIG_ESPVIEW_OLED_TASK_PRIORITY;
+        oledCfg.i2cTimeoutMs = CONFIG_ESPVIEW_OLED_I2C_TIMEOUT_MS;
+        oledCfg.maxReinit = CONFIG_ESPVIEW_OLED_MAX_REINIT;
+#if CONFIG_ESPVIEW_OLED_CONTROLLER_SSD1306
+        oledCfg.controller = espview::oled::ControllerType::kSsd1306;
+#elif CONFIG_ESPVIEW_OLED_CONTROLLER_SH1106
+        oledCfg.controller = espview::oled::ControllerType::kSh1106;
+#endif
+        g_oled = std::make_unique<espview::oled::OledDisplay>(oledCfg,
+                                                              oledStatusSnapshot);
+        if (g_oled->start()) {
+            ESP_LOGI(kTag, "OLED display started");
+        } else {
+            ESP_LOGE(kTag, "OLED display start failed");
+            g_oled.reset();
+        }
+    }
 #endif
 
     xTaskCreate(sessionLoop, "espview_sess", 4096, nullptr, 5, nullptr);

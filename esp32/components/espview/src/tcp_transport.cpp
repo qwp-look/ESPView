@@ -330,7 +330,7 @@ void TcpTransport::linkLoop() {
         // ---- 阶段 2：TCP connect ----
         int fd = -1;
         if (!connectOnce(fd)) {
-            ++reconnectCount_;
+            reconnectCount_.fetch_add(1, std::memory_order_relaxed);
             xSemaphoreTake(linkWake_, pdMS_TO_TICKS(cfg_.reconnect_delay_ms));
             continue;
         }
@@ -351,7 +351,8 @@ void TcpTransport::linkLoop() {
         startRxTask();
         setState(State::Connected);
         wasConnected = true;
-        ESP_LOGI(kTag, "TCP CONNECTED (reconnect=%u)", static_cast<unsigned>(reconnectCount_));
+        ESP_LOGI(kTag, "TCP CONNECTED (reconnect=%u)",
+                 static_cast<unsigned>(reconnectCount_.load(std::memory_order_relaxed)));
 
         // ---- 阶段 3：等待断开/关闭通知（linkWake_ 事件 + 500ms 轮询兜底）----
         bool exitNow = false;
@@ -393,7 +394,7 @@ void TcpTransport::linkLoop() {
         if (wasConnected) {
             setState(State::Disconnected);
             wasConnected = false;
-            ++reconnectCount_;
+            reconnectCount_.fetch_add(1, std::memory_order_relaxed);
             ESP_LOGW(kTag, "TCP DISCONNECTED; reconnecting in %u ms",
                      static_cast<unsigned>(cfg_.reconnect_delay_ms));
         }

@@ -28,6 +28,7 @@ if(ESPVIEW_BUILD_TESTS)
     add_subdirectory(../display display_build)
     # M6-C：transport 层测试依赖 shared/transport（ITransport/TransportManager/TransportSink）。
     add_subdirectory(../transport transport_build)
+    # M7-A：OLED 层测试依赖 shared/oled（OledFb / 命令/分段生成）。
+    add_subdirectory(../oled oled_build)
     add_subdirectory(tests)
 endif()
-

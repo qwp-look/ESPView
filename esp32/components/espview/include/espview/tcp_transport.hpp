@@ -65,8 +65,11 @@ public:
     void setStateCallback(StateCallback cb) override;
     size_t mtu() const override;
 
-    // 诊断（日志用；不回绕）。
-    uint32_t reconnectCount() const { return reconnectCount_; }
+    // 诊断（日志用；不回绕）。M7-B：原子化 —— diagSnapshot 由 OLED 任务读取、
+    // link 任务写入，存在真实数据竞争（原裸 uint32_t 未同步）。
+    uint32_t reconnectCount() const {
+        return reconnectCount_.load(std::memory_order_relaxed);
+    }
     uint64_t rxBytes() const { return rxBytes_.load(); }
     uint64_t txBytes() const { return txBytes_.load(); }
     // M6-E §22：当前关联 AP 信息（rssi/channel；仅诊断，无 wire 影响）。
@@ -104,7 +107,7 @@ private:
     StateCallback stateCb_;
     State state_ = State::Disconnected;
 
-    uint32_t reconnectCount_ = 0;       // link 任务写，日志读（无并发要求）
+    std::atomic<uint32_t> reconnectCount_{0};  // link 任务写，OLED diag 任务读（M7-B 原子化）
     std::atomic<uint64_t> rxBytes_{0};  // 统计（§三十四 Transport 子域）
     std::atomic<uint64_t> txBytes_{0};
 };

@@ -20,6 +20,8 @@ void runRemoteDisplayTests();
 void runTransportManagerTests();
 void runTransportSinkTests();
 void runTransportPipelineTests();
+void runOledTests();
+void runOledStatusTests();
 
 int main() {
     // 无缓冲：测试名实时输出，便于定位挂起/超时位置（与 pc 测试工具一致）。
@@ -58,6 +60,10 @@ int main() {
     runTransportSinkTests();
     std::printf("[transport_pipeline]\n");
     runTransportPipelineTests();
+    std::printf("[oled]\n");
+    runOledTests();
+    std::printf("[oled_status]\n");
+    runOledStatusTests();
     std::printf("----\nchecks: %d, failures: %d\n", espview::proto::test::gChecks,
                 espview::proto::test::gFailures);
     return espview::proto::test::gFailures == 0 ? 0 : 1;

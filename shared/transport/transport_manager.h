@@ -41,6 +41,16 @@
 namespace espview {
 namespace transport {
 
+// M7-B：Transport 诊断快照（OLED provider / statsLoop 专用，值语义）。
+struct TransportDiagSnapshot {
+    TransportType type = TransportType::kUart;
+    bool connected = false;
+    uint64_t reconnectCount = 0;
+    uint64_t txBytes = 0;
+    uint64_t rxBytes = 0;
+    int8_t rssi = -128;
+    uint8_t channel = 0;
+};
 class TransportManager {
 public:
     // 创建具体 Transport（工厂持有配置；例如 ESP32 侧创建 UART/TCP adapter）。
@@ -73,11 +83,17 @@ public:
     // 当前 Transport 指针（nullptr = 未 open/失败）。仅供统计/日志读取，
     // 发送必须经 lockTransport()/tryLockTransport()。
     ITransport* transport() const;
-    const TransportCapabilities& capabilities() const;
+    // 当前 Transport 能力快照（按值返回：锁内拷贝，消除锁释放后引用悬垂窗口）。
+    TransportCapabilities capabilities() const;
     uint32_t switchCount() const { return switchCount_; }
     uint32_t switchFailures() const { return switchFailures_; }
     // 最近一次 open/switch 失败的简短描述（诊断用）。
     const char* lastError() const { return lastError_; }
+
+    // M7-B：线程安全诊断快照（值语义）。在 stateMutex_ 保护下读取当前
+    // Transport 的统计/连接/AP 信息；对端 switchTo/断线重建并发安全
+    // （内部经 shared_ptr 持引用，绝不暴露裸指针给调用方）。
+    TransportDiagSnapshot diagSnapshot() const;
 
     // ---- 回调 ----
     void setDataCallback(ITransport::DataCallback cb);

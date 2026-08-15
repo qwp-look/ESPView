@@ -5,6 +5,7 @@
 // 7 幂等语义、8 发送门、9 data 转发/切换窗口。
 // （8 FULL resync / 9 input state reset 的行为级验证在 transport_pipeline_test.cpp。）
 
+#include <atomic>
 #include <chrono>
 #include <cstdint>
 #include <cstdio>
@@ -22,6 +23,7 @@ namespace {
 using espview::transport::ITransport;
 using espview::transport::SendStatus;
 using espview::transport::TransportCapabilities;
+using espview::transport::TransportDiagSnapshot;
 using espview::transport::TransportManager;
 using espview::transport::TransportType;
 using espview::transport::test::FakeTransport;
@@ -117,7 +119,44 @@ void runTransportManagerTests() {
         mgr.close();
     }
 
-    // ---- 3. switch UART→TCP：旧 close、新 open、状态顺序、switchCount ----
+    // ---- 2b. diagSnapshot（M7-B：OLED provider / statsLoop 快照）----
+    {
+        std::vector<std::shared_ptr<FakeTransport>> owned;
+        FakeSetup setup;
+        TransportManager mgr = makeManager(owned, setup, TransportType::kUart);
+        mgr.open();
+        owned[0]->setRxBytes(456);
+        owned[0]->setReconnectCount(2);
+        owned[0]->setApInfo(-55, 6);
+        owned[0]->send(reinterpret_cast<const uint8_t*>("x"), 1);  // txBytes=1
+        const TransportDiagSnapshot s1 = mgr.diagSnapshot();
+        CHECK_EQ(s1.type, TransportType::kUart);
+        CHECK(s1.connected);
+        CHECK_EQ(s1.reconnectCount, 2u);
+        CHECK_EQ(s1.txBytes, 1u);
+        CHECK_EQ(s1.rxBytes, 456u);
+        CHECK_EQ(s1.rssi, -55);
+        CHECK_EQ(s1.channel, 6u);
+
+        owned[0]->clearApInfo();
+        const TransportDiagSnapshot s2 = mgr.diagSnapshot();
+        CHECK_EQ(s2.rssi, -128);
+        CHECK_EQ(s2.channel, 0u);
+
+        mgr.close();
+        const TransportDiagSnapshot s3 = mgr.diagSnapshot();
+        CHECK(!s3.connected);
+        CHECK_EQ(s3.reconnectCount, 0u);
+        CHECK_EQ(s3.txBytes, 0u);
+        CHECK_EQ(s3.rxBytes, 0u);
+        CHECK_EQ(s3.rssi, -128);
+
+        CHECK(mgr.switchTo(TransportType::kTcp));
+        const TransportDiagSnapshot s4 = mgr.diagSnapshot();
+        CHECK_EQ(s4.type, TransportType::kTcp);
+        CHECK(s4.connected);
+    }
+
     {
         std::vector<std::shared_ptr<FakeTransport>> owned;
         FakeSetup setup;
@@ -334,6 +373,48 @@ void runTransportManagerTests() {
         CHECK_EQ(owned[0]->stateLog()[2], ITransport::State::kDisconnected);
         CHECK_EQ(owned[0]->stateLog()[3], ITransport::State::kConnected);
         mgr.close();  // 独立 close：Disconnected 直接投递（行为不变）
+    }
+
+    // ---- 14. M7-B：diagSnapshot vs switchTo 并发压力（值语义快照不越界）----
+    // 一个线程循环 switchTo(UART→TCP→UART…)，另一个线程循环 diagSnapshot() 并
+    // 校验返回值不越界（type 为合法枚举、tx/rx 任意 uint64）；验证快照为锁内
+    // 值语义拷贝，不暴露裸指针（原 transport() 锁外解引用在 switchTo 并发下 UAF）。
+    {
+        std::vector<std::shared_ptr<FakeTransport>> owned;
+        FakeSetup setup;
+        TransportManager mgr = makeManager(owned, setup, TransportType::kUart);
+        CHECK(mgr.open());  // switchTo 要求 initial open
+        std::atomic<bool> stopFlag{false};
+        std::atomic<bool> invalidSeen{false};
+        std::atomic<uint64_t> sampleCount{0};
+        std::thread switcher([&]() {
+            while (!stopFlag.load(std::memory_order_relaxed)) {
+                mgr.switchTo(TransportType::kTcp);
+                mgr.switchTo(TransportType::kUart);
+            }
+        });
+        std::thread sampler([&]() {
+            while (!stopFlag.load(std::memory_order_relaxed)) {
+                const TransportDiagSnapshot s = mgr.diagSnapshot();
+                // 快照值语义：type 必须落在合法枚举内；tx/rx 为任意 uint64（只读）。
+                if (s.type != TransportType::kUart && s.type != TransportType::kTcp) {
+                    invalidSeen.store(true, std::memory_order_relaxed);
+                }
+                const uint64_t tx = s.txBytes;
+                const uint64_t rx = s.rxBytes;
+                (void)tx;
+                (void)rx;
+                sampleCount.fetch_add(1, std::memory_order_relaxed);
+            }
+        });
+        // 跑足够轮数（约 2 秒；两线程并发 switchTo/diagSnapshot）。
+        std::this_thread::sleep_for(std::chrono::seconds(2));
+        stopFlag.store(true, std::memory_order_relaxed);
+        switcher.join();
+        sampler.join();
+        CHECK(!invalidSeen.load(std::memory_order_relaxed));
+        CHECK(sampleCount.load(std::memory_order_relaxed) >= 100u);  // 并发采样确实发生
+        mgr.close();
     }
     std::printf("[transport_manager] done\n");
 }
