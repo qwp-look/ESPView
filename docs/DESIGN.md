@@ -2496,6 +2496,22 @@ M7-D4 冻结 PC 侧 Wi-Fi 配网向导：UI 状态机 `WifiWizardState`（纯 C+
   → kTcpConnected（phase=kTcpConnected）→ kFullResync → kDone（TCP 连后
   首帧 FULL commit）。
 
+**相位→步骤映射（M7-F 统一措辞；wire 不变，protocol.h 数值冻结）**：
+
+| WIFI_STATUS.phase（WifiStatusPhase 数值） | 向导推进 |
+|---|---|
+| `kConfigApplying=2` | kApplying(7) 停留至 WIFI_CONFIG ACK(ok) → kConnecting(8) |
+| `kWifiConnecting=3` / `kWifiConnected=4` | 观察（不单独推进） |
+| `kGotIp=5` | → kGotIp(9) |
+| `kTcpConnecting=6` | 观察（不单独推进；固件 TCP client 相位为 D6 遗留，见 AJ.10） |
+| `kTcpConnected=7` | → kTcpConnected(10) |
+| `kError=8` | → kError(13)（经错误码路由 retryStep） |
+
+命名注意：`WizardStep::kGotIp==9` / `WizardStep::kTcpConnected==10`
+是**向导步骤**枚举，与 `WifiStatusPhase::kGotIp==5` / `kTcpConnected==7`
+（协议相位）**数值不同、命名空间不同**；本文档统一用
+`WizardStep::` / `WifiStatusPhase::` 前缀区分（源码枚举名不改，wire 不变）。
+
 输入校验（本地，与 AF.2 wire 校验同规则）：
 
 - SSID：1..32 可见字节（0x20..0x7E）；
@@ -2622,7 +2638,7 @@ D6 不改 wire format；对 AF.2/AF.3/AF.4 冻结的协议内容零改动。
 - 现象（真实硬件，COM4/CH340，115200）：`WIFI_SCAN_REQ` → ACK(OK) 正常返回
   （~0.1s）；随后 Wi-Fi RF 上电（`esp_wifi_start` 的 PHY 校准）触发
   **CH340 USB 掉线**（PC 侧 ReadFile err=5 / PermissionError 5）并可**挂死
-  ESP32**（欠压；无复位横幅、无 HELLO，需手动复位恢复）。原始字节探针确认
+  ESP32**（疑似欠压；无复位横幅、无 HELLO，需手动复位恢复——软件侧无电气证据，不得写为「已证实欠压」）。原始字节探针确认
   掉线发生在扫描请求后 ~0.25s，与 RF 上电时序吻合。
 - 已尝试的软件降流组合（均无法完全避免掉线，但降低挂死概率）：
   1. `WIFI_SCAN_TYPE_PASSIVE` + `scan_time.passive=120`（无 probe 发射；
@@ -2631,9 +2647,12 @@ D6 不改 wire format；对 AF.2/AF.3/AF.4 冻结的协议内容零改动。
      CPU 固定 80MHz，整机电流降低；160MHz 下挂死率 ~100%，80MHz 下有存活
      案例）；
   3. `esp_wifi_set_max_tx_power(8)`（2dBm 最低发射功率）。
-- 结论：**该板卡 + USB 供电在 Wi-Fi RF 上电事件上为硬件电源/EMI 限制**，
-  软件无法可靠消除（boot 期预热同样掉线并挂死，已回退）。推荐硬件路径：
-  带供电 USB HUB / 外接 5V / 优质线材；固件扫描逻辑与协议路径已就绪。
+- 结论强度（M7-F 修订，不得再按「已证实」引用）：**Observed：Wi-Fi RF
+  上电与 CH340 掉线在时间上强相关（高可信假设）**；物理机制（电源余量 vs
+  EMI 耦合 vs CH340 驱动）未经电压/电流实测，**不得表述为「已证实」**。
+  软件降流组合可降低挂死概率但无法可靠消除掉线（boot 期预热同样掉线并
+  挂死，已回退）。推荐硬件路径：带供电 USB HUB / 外接 5V / 优质线材；
+  固件扫描逻辑与协议路径已就绪。
 
 ### AI.4 UART 协议路径验收（115200，真实硬件）
 
@@ -2790,6 +2809,13 @@ D6 不改 wire format；对 AF.2/AF.3/AF.4 冻结的协议内容零改动。
 
 ### AJ.7b A/B/C 实测结果（2026-08-16，外置 USB-SERIAL CH340 COM4 @ 115200）
 
+> **M7-F 结论强度修正（F1/F4，2026-08-16）**：A/B/C 实验存在配置漂移——
+> `esp32/build/mode_c/config/sdkconfig.h` 实测为 `OLED_ENABLE=y +
+> TRANSPORT_TCP=y`（M7-E 期间共享 `esp32/sdkconfig` 被后续构建覆盖），
+> mode_c 并未真正 `OLED=n`。因此「OLED 与掉线无关」**不得再作为结论**，
+> 降级为高可信假设（见 AK.3/AK.4）。F4 已实施 per-profile sdkconfig 隔离
+> 防止复发。A/B/C 原始记录保留如下（observed behavior）。
+
 - 实验条件：用户已更换为**外置** USB-SERIAL CH340 模块（COM4，非板载
   CH340）；ESP32 UART0 @ 115200 直连该模块，DTR→GPIO0、RTS→EN 已接线
   （复位脉冲可正常触发 ESP32 复位并收到 ROM banner）。
@@ -2807,11 +2833,17 @@ D6 不改 wire format；对 AF.2/AF.3/AF.4 冻结的协议内容零改动。
   - 掉线后 COM4 重新枚举、close+reopen 可恢复句柄；但 ESP32 对被动
     PC HELLO 无响应（Win32 无复位探针 12s 窗口零响应），且未观察到
     brownout 复位循环横幅 —— 与 D6 AI.3「欠压挂死」记录一致。
-  - mode_c（OLED=n）与 mode_b（OLED=y）掉线行为相同 → boot 期掉线与
-    OLED 刷新无关；mode_a 与 mode_b 的 boot 配置相同（OLED=y），预期
-    行为一致。
+  - mode_c 与 mode_b 掉线行为相同；但 F1 取证显示 mode_c 实为 OLED=y
+    （sdkconfig 漂移），A/B/C 无法判别 OLED 变量 → 该结论撤销，见上文
+    修正声明。
   - **扫描期 A/B/C 对比在当下硬件上不可达**：全部模式止步于 boot+握手
     阶段，未进入 WIFI_SCAN_REQ；无法取得扫描期判别数据。
+  - **F1 判别实验（win32_com_probe，M7-F）**：`uart_hw`（UART transport，
+    boot 期无 RF）`--pulse-reset` 全程 45s **无掉线**，t=663ms 收到被动
+    HELLO（`ESPV...espview-esp32`）；对照 TCP/RF 固件（mode_b/c，boot 期
+    Wi-Fi RF 上电）~747ms 处 CH340 掉线（err=5），重枚举后 27s 零响应。
+    → **boot 期掉线触发事件 = Wi-Fi RF 上电（高可信假设）**；物理机制
+    （电源余量 / EMI / 驱动）未证实（AK.4）。
 - 判定纪律：以上为 observed behavior，不构成「电源不足已证实」；与
   AI.3/AJ.2 高可信假设一致（USB 供电路径瞬态余量不足）。推荐硬件路径：
   带供电 USB HUB / 外接 5V 供电 / 换回板载 CH340 / 优质线材。供电改善后
@@ -2859,3 +2891,93 @@ D6 不改 wire format；对 AF.2/AF.3/AF.4 冻结的协议内容零改动。
 - `scripts/espview_e_ab_harness.py` + `scripts/README.md`：A/B/C 实验。
 - 回归：host 384,438 + 192 checks / 0 failures；ctest 2/2；Qt build PASS；
   ESP32 uart_hw/oled_hw/oled_off/oled_diag 全 profile build PASS。
+
+## AK. M7-F Hardware Path Diagnosis + Wi-Fi Provisioning Productionization（2026-08-16 冻结）
+
+### AK.1 定位
+
+M7-F 两条并行主线：
+- Track A：定位「外置 CH340 / USB / ESP32 boot 期掉线」——只做证据收集与
+  判别实验，严格区分 Observed / Hypothesis / Confirmed Causality。
+- Track B：把 Wi-Fi Provisioning + Wizard + Recovery + TCP handoff +
+  Production profile 做成完整、可审计、可恢复的最终功能（软件侧已完成并
+  冻结）。
+
+红线：**「Observed USB disconnect」不得写成「Confirmed brownout」**；
+只有电压/电流实测或可靠硬件资料才能升级为 Confirmed。
+
+### AK.2 判别实验与取证（F1–F4，2026-08-16）
+
+- F1 工具：`pc/src/win32_com_probe.cpp`（Win32 最小串口探针：不断言
+  DTR/RTS、`--pulse-reset` EN 复位脉冲、掉线检测 + close/reopen 重枚举、
+  结构化 `[evt] t=+<ms>` 日志）+ `esp32/main/main.cpp` boot 插桩
+  （reset reason / heap / 各初始化相位时间戳；不暴露密码）。
+- 判别实验（决定性）：`uart_hw`（UART transport，boot 无 RF）全程 45s
+  **无掉线**，t=663ms 收到被动 HELLO；TCP/RF 固件（mode_b/c）boot 期
+  ~747ms CH340 掉线（err=5）、重枚举后 27s 零响应。→ boot 期掉线触发
+  事件 = Wi-Fi RF 上电。
+- F4 取证：`esp32/build/mode_c/config/sdkconfig.h` = `OLED_ENABLE=y +
+  TRANSPORT_TCP=y` → M7-E mode_c 并非 OLED=n（共享 sdkconfig 漂移）；
+  已用 per-profile sdkconfig 隔离修复（AH.2 / F4）。
+
+### AK.3 Hardware Evidence Matrix
+
+| Test | Profile | OLED | Wi-Fi | Scan | COM | Result | Evidence |
+|---|---|---|---|---|---|---|---|
+| UART baseline（M6-C） | uart | y | off | n/a | 板载 CH340 COM4 | 稳定无掉线 | DESIGN V.7 |
+| M7-E A/B/C boot（mode_b） | mode_b | y（实配） | RF 上电 | 不可达 | 外置 CH340 COM4 | 掉线 ~0.5–1.5s | AJ.7b |
+| M7-E A/B/C boot（mode_c） | mode_c | y（漂移；本应 n） | RF 上电 | 不可达 | 外置 CH340 COM4 | 掉线同上 | AJ.7b + F1 sdkconfig.h 取证 |
+| M7-F F1 uart_hw（无 RF） | uart_hw | y | off | n/a | 外置 CH340 COM4 | 45s 无掉线；HELLO t=663ms | win32_com_probe --pulse-reset |
+| M7-F F1 TCP/RF（mode_b/c） | mode_b/c | y | RF 上电 | n/a | 外置 CH340 COM4 | boot ~747ms 掉线；重枚举后 27s 零响应 | win32_com_probe |
+| M7-F F2 provisioning 事务硬化 | uart_hw | y | — | host | n/a（host） | 事务状态机测试通过 | F2 |
+| M7-F F3 wizard hardening | — | — | — | host/Qt | n/a | Qt build + i18n + 恢复路径测试通过 | F3 |
+| M7-F F4 build/flash UX | 全部 | — | — | — | — | 退出码 / --dry-run / sdkconfig 隔离 验证通过 | F4 |
+
+### AK.4 结论强度分级
+
+| 强度 | 内容 | 依据 |
+|---|---|---|
+| Confirmed | 无（物理因果均未直接测量） | — |
+| High confidence | Wi-Fi RF 上电与 CH340 掉线时间强相关（判别实验：无 RF 的 uart_hw 全程不掉线 vs RF 固件 boot 期掉线） | AK.2 |
+| High confidence | M7-E mode_c 未真正 OLED=n（sdkconfig 漂移取证） | AK.2 |
+| Hypothesis | USB 供电路径瞬态余量不足（电源解释之一，未测电压/电流） | AI.3 / AJ.2 |
+| Unknown | 具体物理机制：电源余量 vs EMI 耦合 vs CH340 驱动 vs 复位源配置 | — |
+
+### AK.5 UART bootstrap 语义（F3 冻结）
+
+- UART 链路可用时：UART → HELLO → CAPABILITIES → Wizard → WIFI_SCAN_REQ
+  → WIFI_RESULT → 选择 SSID → WIFI_CONFIG → ACK → ESP32 Wi-Fi connect →
+  WIFI_STATUS → TCP connect → TCP HELLO → FULL → GUI 正常。
+- UART 链路不可用（掉线/无响应）：GUI 明确显示「UART bootstrap
+  unavailable / UART 引导链路不可用」，**不得伪装成「Wi-Fi 密码错误」**
+  （i18n：`"UART bootstrap unavailable"`）。
+
+### AK.6 工具链硬化（F4，AH.2 延续）
+
+- per-profile sdkconfig 隔离：`idf.py -D SDKCONFIG=build\<profile>\sdkconfig`
+  （首次从 `esp32\sdkconfig` 引导拷贝，保留引脚/波特率/凭据），共享
+  sdkconfig 不再被构建/烧录覆盖 → 根因修复 M7-E 配置漂移。
+- `espview_build.bat`：缺参/未知参数退出码 2；`espview_build_flash.bat
+  --check` 隐含 flash `--dry-run`（绝不真烧）。
+- `verify_lvgl.bat`：补 `scan_transaction_test` 目标（ctest 2/2）。
+- 凭据纪律不变：脚本不读不写 `esp32\sdkconfig` 内容；凭据仅存于本地未
+  跟踪 sdkconfig（.gitignore 覆盖 `esp32/sdkconfig*`）。
+
+### AK.7 边界
+
+- 不新增 wire 字段 / 不改协议（Packet / CRC / Message / Frame 冻结）；
+  M7-D 四消息族 wire 不动。
+- 禁止人为 AP outage；AP 不可见 / 错误密码 / 无效 TCP server 可测。
+- 不 OTA / FATFS / SPIFFS / 分区调整；4 MiB flash、2 MiB factory 不变。
+- 硬件掉线在当前链路下视为 environmental hardware blocker，不是软件 bug；
+  全部证据与判别实验记录保留。供电/线材改善后可直接复用
+  `espview_e_ab_harness.py`（F4 已改为每 mode 重新生成 sdkconfig）。
+
+### AK.8 已实现（M7-F，2026-08-16）
+
+- F1 `bd892d1`：win32_com_probe + boot 插桩 + pc/CMake 注册。
+- F2 `71217c9`：wifi_provisioning 事务硬化（timeout / retry / disconnect
+  收敛）。
+- F3 `456763a`：Qt wizard 硬化 + preview/OLED 修复（15 文件）。
+- F4 `5d758a2`：build/flash UX + per-profile sdkconfig 隔离（本文件
+  AI.3 / AJ.7b / AG.2 / AK 同步修订）。
