@@ -4,3 +4,6 @@
 # Binary assets
 *.png binary
 *.bin binary
+
+# cmd.exe requires CRLF .bat files on every checkout (incl. Linux CI)
+*.bat text eol=crlf

@@ -1,0 +1,113 @@
+name: esp32-ci
+
+on:
+  pull_request:
+    paths:
+      - 'esp32/**'
+      - 'shared/**'
+      - 'scripts/espview_profile*'
+      - 'scripts/ci_esp32*'
+      - 'examples/**'
+      - '.github/workflows/esp32-ci.yml'
+  push:
+    paths:
+      - 'esp32/**'
+      - 'shared/**'
+      - 'scripts/espview_profile*'
+      - 'scripts/ci_esp32*'
+      - 'examples/**'
+      - '.github/workflows/esp32-ci.yml'
+  workflow_dispatch:
+    inputs:
+      profile:
+        description: 'Profile(s) to build'
+        type: choice
+        options:
+          - all
+          - uart
+          - tcp
+          - oled
+          - oled-off
+          - diagnostic
+          - g1_a
+          - g1_b
+          - g1_c
+          - g1_d
+        default: all
+
+concurrency:
+  group: esp32-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  esp32-build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    container:
+      image: espressif/idf:v6.0.2
+    strategy:
+      fail-fast: false
+      matrix:
+        profile: ${{ fromJSON(inputs.profile == 'all' && '["uart","tcp","oled","oled-off","diagnostic","g1_a","g1_b","g1_c","g1_d"]' || (inputs.profile != '' && format('["{0}"]', inputs.profile)) || '["uart","tcp","diagnostic"]') }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Cache ESP-IDF managed components
+        uses: actions/cache@v4
+        with:
+          path: esp32/managed_components
+          key: ${{ runner.os }}-idf-${{ hashFiles('esp32/dependencies.lock') }}
+
+      - name: Validate profile
+        run: python3 scripts/espview_profile_sdkconfig.py --check ${{ matrix.profile }}
+
+      - name: Apply profile sdkconfig
+        run: python3 scripts/espview_profile_sdkconfig.py --apply ${{ matrix.profile }} --sdkconfig "$GITHUB_WORKSPACE/esp32/build/${{ matrix.profile }}/sdkconfig" --seed-defaults "$GITHUB_WORKSPACE/esp32/sdkconfig.defaults"
+
+      - name: Build firmware
+        working-directory: esp32
+        run: |
+          set -euo pipefail
+          . "$IDF_PATH/export.sh" >/dev/null
+          idf.py -B build/${{ matrix.profile }} -D SDKCONFIG="$GITHUB_WORKSPACE/esp32/build/${{ matrix.profile }}/sdkconfig" build 2>&1 | tee build/${{ matrix.profile }}/idf_build.log
+
+      - name: Verify build artifacts
+        working-directory: esp32
+        run: |
+          set -euo pipefail
+          . "$IDF_PATH/export.sh" >/dev/null
+          ls -l build/${{ matrix.profile }}/espview_esp32.bin
+          ls -l build/${{ matrix.profile }}/bootloader/bootloader.bin
+          ls -l build/${{ matrix.profile }}/partition_table/partition-table.bin
+          idf.py -B build/${{ matrix.profile }} size
+
+      - name: Generate checksums
+        working-directory: esp32
+        run: |
+          cd build/${{ matrix.profile }}
+          sha256sum espview_esp32.bin bootloader/bootloader.bin partition_table/partition-table.bin > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+
+      - name: Upload build artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: esp32-${{ matrix.profile }}
+          path: |
+            esp32/build/${{ matrix.profile }}/espview_esp32.bin
+            esp32/build/${{ matrix.profile }}/bootloader/bootloader.bin
+            esp32/build/${{ matrix.profile }}/partition_table/partition-table.bin
+            esp32/build/${{ matrix.profile }}/SHA256SUMS.txt
+          if-no-files-found: error
+
+      - name: Print build diagnostics
+        if: failure()
+        run: |
+          tail -n 120 esp32/build/${{ matrix.profile }}/idf_build.log 2>/dev/null || true
+          tail -n 120 esp32/build/${{ matrix.profile }}/CMakeFiles/CMakeError.log 2>/dev/null || true
+          find esp32/build/${{ matrix.profile }} -maxdepth 2 -type f -name '*.log' -exec tail -n 60 {} \; 2>/dev/null || true

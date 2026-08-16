@@ -1,0 +1,113 @@
+# ESPView Layer 1 fast CI: host-only verification.
+# Pure C++17 host suite in shared/protocol (+ shared/input/display/transport/oled/wifi),
+# MSYS2 MinGW host suite on Windows, plus docs/security/CRLF/YAML static checks.
+# Never flashes hardware, never touches COM ports, never reads sdkconfig content.
+name: fast-ci
+
+on:
+  pull_request:
+    branches:
+      - main
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+concurrency:
+  group: fast-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  host-ubuntu:
+    name: Host tests (Ubuntu, CMake + CTest)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure shared/protocol host build
+        run: cmake -S shared/protocol -B build/protocol -DCMAKE_BUILD_TYPE=Release -G "Unix Makefiles"
+
+      - name: Build host test targets
+        run: cmake --build build/protocol --target espview_protocol_tests scan_transaction_test -j "$(nproc)"
+
+      - name: Run ctest suite
+        run: |
+          set -euo pipefail
+          mkdir -p build/logs
+          ctest --test-dir build/protocol --output-on-failure 2>&1 | tee -a build/logs/host-tests.log
+
+      - name: Run host test binaries directly
+        run: |
+          set -euo pipefail
+          ./build/protocol/tests/espview_protocol_tests 2>&1 | tee -a build/logs/host-tests.log
+          ./build/protocol/wifi_build/scan_transaction_test 2>&1 | tee -a build/logs/host-tests.log
+
+      - name: Upload combined host test logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: host-ubuntu-test-logs
+          path: build/logs/
+          if-no-files-found: warn
+
+  host-windows:
+    name: Host tests (Windows, MSYS2 MinGW)
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up MSYS2 MinGW64 toolchain
+        uses: msys2/setup-msys2@v2
+        with:
+          # Reuse the runner image's preinstalled MSYS2 at C:\msys64 so
+          # verify_host.bat's default MINGW64_BIN=C:\msys64\mingw64\bin applies.
+          msystem: MINGW64
+          release: false
+          install: >-
+            mingw-w64-x86_64-gcc
+            mingw-w64-x86_64-cmake
+            mingw-w64-x86_64-ninja
+            mingw-w64-x86_64-make
+
+      - name: Run host verification suite
+        shell: pwsh
+        run: |
+          & cmd /c "scripts\verify_host.bat" 2>&1 | Tee-Object -FilePath verify-host.log
+          exit $LASTEXITCODE
+
+      - name: Upload host verification logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: host-windows-verify-logs
+          path: verify-host.log
+          if-no-files-found: warn
+
+  static-checks:
+    name: Static checks (docs, security, CRLF, YAML)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Syntax-check Python scripts
+        run: python3 -m py_compile scripts/check_docs.py scripts/security_scan.py scripts/check_bat_crlf.py
+
+      - name: Docs check
+        run: python3 scripts/check_docs.py
+
+      - name: Security scan
+        run: python3 scripts/security_scan.py
+
+      - name: CRLF check for .bat files
+        run: python3 scripts/check_bat_crlf.py
+
+      - name: Lint workflow YAML
+        run: |
+          python3 -m pip install --quiet pyyaml
+          python3 -c "import glob, yaml; files = sorted(glob.glob('.github/workflows/*.yml')); [yaml.safe_load(open(f, encoding='utf-8')) for f in files]; print(f'validated {len(files)} workflow YAML file(s)')"

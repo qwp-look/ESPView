@@ -1,0 +1,314 @@
+# ============================================================
+# ESPView release pipeline (tag-gated CD, manual-only fallback).
+#
+# SECURITY RED LINES (enforced by ci_collect_artifacts.py):
+#   * NEVER upload sdkconfig files (esp32/sdkconfig is gitignored and
+#     may contain Wi-Fi credentials), log files, or secrets to the
+#     GitHub Release or to CI artifacts.
+#   * Release assets are exactly: the three firmware bins per profile,
+#     SHA256SUMS.txt, and the docs archive.
+#
+# Trigger policy:
+#   * push of tags matching 'v*'   -> build + publish a GitHub Release
+#   * workflow_dispatch            -> manual release build (no tag push)
+#   * NEVER triggered automatically by pushes to main.
+# ============================================================
+name: release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  # contents: write is required for softprops/action-gh-release@v2 to
+  # upload assets and create the Release; pull-requests: read for PR tooling.
+  contents: write
+  pull-requests: read
+
+jobs:
+  # ---- gate 1: host suite (Linux) -----------------------------------
+  # Same as fast-ci host-ubuntu: shared/protocol cmake build + ctest +
+  # run the host test executables directly.
+  host-ubuntu:
+    name: host (ubuntu)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure shared/protocol host build
+        run: cmake -S shared/protocol -B build/protocol -DCMAKE_BUILD_TYPE=Release -G "Unix Makefiles"
+
+      - name: Build host test targets
+        run: cmake --build build/protocol --target espview_protocol_tests scan_transaction_test -j "$(nproc)"
+
+      - name: Run ctest suite
+        run: |
+          set -euo pipefail
+          mkdir -p build/logs
+          ctest --test-dir build/protocol --output-on-failure 2>&1 | tee -a build/logs/host-tests.log
+
+      - name: Run host test binaries directly
+        run: |
+          set -euo pipefail
+          ./build/protocol/tests/espview_protocol_tests 2>&1 | tee -a build/logs/host-tests.log
+          ./build/protocol/wifi_build/scan_transaction_test 2>&1 | tee -a build/logs/host-tests.log
+
+  # ---- gate 2: host suite (Windows / MSYS2) --------------------------
+  host-windows:
+    name: host (windows)
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up MSYS2 (MinGW64)
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW64
+          release: false
+          update: false
+          install: >-
+            mingw-w64-x86_64-gcc
+            mingw-w64-x86_64-cmake
+            mingw-w64-x86_64-ninja
+            mingw-w64-x86_64-make
+
+      - name: Verify host suite (verify_host.bat)
+        shell: cmd
+        run: cmd /c scripts\verify_host.bat
+
+  # ---- gate 3: Qt GUI build + offscreen smoke (Windows / MSYS2) ------
+  qt-windows:
+    name: qt (windows)
+    runs-on: windows-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up MSYS2 (MinGW64 + Qt6)
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW64
+          release: false
+          update: false
+          install: >-
+            mingw-w64-x86_64-gcc
+            mingw-w64-x86_64-cmake
+            mingw-w64-x86_64-ninja
+            mingw-w64-x86_64-make
+            mingw-w64-x86_64-qt6-base
+            mingw-w64-x86_64-qt6-serialport
+
+      - name: Build Qt GUI (verify_qt.bat)
+        shell: cmd
+        run: cmd /c scripts\verify_qt.bat
+
+      - name: Assert espview_virtual_display.exe exists
+        shell: pwsh
+        run: |
+          $exe = "build\verify_qt\espview_virtual_display.exe"
+          if (-not (Test-Path -LiteralPath $exe)) {
+            Write-Error "Build did not produce $exe"
+            exit 1
+          }
+          Write-Host "OK: $exe"
+
+      - name: Offscreen autoclose smoke (TCP server, no display)
+        shell: pwsh
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: |
+          $env:PATH = "C:\msys64\mingw64\bin;$env:PATH"
+          & "build\verify_qt\espview_virtual_display.exe" --transport tcp --tcp-bind 127.0.0.1 --tcp-port 18765 --autoclose-ms 1200 *> smoke.log
+          $code = $LASTEXITCODE
+          Write-Host "espview_virtual_display exit code: $code"
+          if ($code -ne 0) {
+            Get-Content smoke.log -ErrorAction SilentlyContinue
+            exit $code
+          }
+          Write-Host "--- smoke.log ---"
+          Get-Content smoke.log
+
+  # ---- gate 4: ESP32 production firmware (docker ESP-IDF) ------------
+  # Same build steps as esp32-ci.yml: profile sdkconfig apply (seeded from
+  # the tracked, credential-free esp32/sdkconfig.defaults only), idf.py
+  # build, verify bins, sha256sum; artifacts are named esp32-<profile>.
+  # The gitignored esp32/sdkconfig is never read and never uploaded.
+  esp32-prod:
+    name: esp32 (${{ matrix.profile }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    container:
+      image: espressif/idf:v6.0.2
+    strategy:
+      fail-fast: false
+      matrix:
+        profile: [uart, tcp, diagnostic]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Cache ESP-IDF managed components
+        uses: actions/cache@v4
+        with:
+          path: esp32/managed_components
+          key: ${{ runner.os }}-idf-${{ hashFiles('esp32/dependencies.lock') }}
+
+      - name: Validate profile
+        run: python3 scripts/espview_profile_sdkconfig.py --check ${{ matrix.profile }}
+
+      - name: Apply profile sdkconfig (whitelisted keys, seeded from defaults)
+        run: python3 scripts/espview_profile_sdkconfig.py --apply ${{ matrix.profile }} --sdkconfig "$GITHUB_WORKSPACE/esp32/build/${{ matrix.profile }}/sdkconfig" --seed-defaults "$GITHUB_WORKSPACE/esp32/sdkconfig.defaults"
+
+      - name: Build firmware (idf.py)
+        working-directory: esp32
+        run: |
+          set -euo pipefail
+          . "$IDF_PATH/export.sh" >/dev/null
+          idf.py -B build/${{ matrix.profile }} -D SDKCONFIG="$GITHUB_WORKSPACE/esp32/build/${{ matrix.profile }}/sdkconfig" build 2>&1 | tee build/${{ matrix.profile }}/idf_build.log
+
+      - name: Verify build artifacts
+        working-directory: esp32
+        run: |
+          set -euo pipefail
+          . "$IDF_PATH/export.sh" >/dev/null
+          ls -l build/${{ matrix.profile }}/espview_esp32.bin
+          ls -l build/${{ matrix.profile }}/bootloader/bootloader.bin
+          ls -l build/${{ matrix.profile }}/partition_table/partition-table.bin
+          idf.py -B build/${{ matrix.profile }} size
+
+      - name: Generate checksums
+        working-directory: esp32
+        run: |
+          cd build/${{ matrix.profile }}
+          sha256sum espview_esp32.bin bootloader/bootloader.bin partition_table/partition-table.bin > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+
+      - name: Upload firmware artifacts (esp32-${{ matrix.profile }})
+        uses: actions/upload-artifact@v4
+        with:
+          name: esp32-${{ matrix.profile }}
+          path: |
+            esp32/build/${{ matrix.profile }}/espview_esp32.bin
+            esp32/build/${{ matrix.profile }}/bootloader/bootloader.bin
+            esp32/build/${{ matrix.profile }}/partition_table/partition-table.bin
+            esp32/build/${{ matrix.profile }}/SHA256SUMS.txt
+          if-no-files-found: error
+
+  # ---- gate 5: docs + security static checks -------------------------
+  # Same checks as the docs-security workflow: check_docs.py,
+  # security_scan.py, check_bat_crlf.py, and a pyyaml lint of every
+  # workflow file. No build, no hardware, no network beyond pip.
+  docs-security:
+    name: docs + security
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install pyyaml
+        run: python3 -m pip install --quiet pyyaml
+
+      - name: Static docs check (check_docs.py)
+        run: python3 scripts/check_docs.py
+
+      - name: Security scan (security_scan.py)
+        run: python3 scripts/security_scan.py
+
+      - name: Batch CRLF check (check_bat_crlf.py)
+        run: python3 scripts/check_bat_crlf.py
+
+      - name: Lint workflow YAML files
+        run: |
+          python3 - <<'EOF'
+          import glob
+          import sys
+          import yaml
+
+          files = sorted(glob.glob(".github/workflows/*.yml") +
+                         glob.glob(".github/workflows/*.yaml"))
+          ok = True
+          for path in files:
+              try:
+                  with open(path, "r", encoding="utf-8") as fh:
+                      yaml.safe_load(fh)
+              except Exception as exc:
+                  print("YAML lint FAIL: %s: %s" % (path, exc))
+                  ok = False
+          print("YAML lint: checked %d workflow file(s)" % len(files))
+          if not ok:
+              sys.exit(1)
+          EOF
+
+  # ---- publish (only after every gate passes) ------------------------
+  release:
+    name: Publish release (${{ github.ref_name }})
+    needs: [host-ubuntu, host-windows, qt-windows, esp32-prod, docs-security]
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout (full history for the release body)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Download all firmware artifacts (esp32-*)
+        uses: actions/download-artifact@v4
+        with:
+          pattern: esp32-*
+          path: .
+
+      - name: Collect + rename release artifacts, write SHA256SUMS.txt
+        run: |
+          # ci_collect_artifacts.py refuses any path containing
+          # 'sdkconfig' or 'logs', so credentials/logs can never reach
+          # the GitHub Release.
+          python3 scripts/ci_collect_artifacts.py \
+            --sha "${{ github.sha }}" \
+            --tag "${{ github.ref_name }}" \
+            --out release \
+            --bin "uart:esp32-uart/espview_esp32.bin" \
+            --bin "uart:esp32-uart/bootloader.bin" \
+            --bin "uart:esp32-uart/partition-table.bin" \
+            --bin "tcp:esp32-tcp/espview_esp32.bin" \
+            --bin "tcp:esp32-tcp/bootloader.bin" \
+            --bin "tcp:esp32-tcp/partition-table.bin" \
+            --bin "diagnostic:esp32-diagnostic/espview_esp32.bin" \
+            --bin "diagnostic:esp32-diagnostic/bootloader.bin" \
+            --bin "diagnostic:esp32-diagnostic/partition-table.bin"
+
+      - name: Assemble docs archive
+        run: |
+          tar czf "release/espview-docs-${{ github.ref_name }}.tar.gz" \
+            README.md LICENSE docs scripts/README.md
+
+      - name: Generate release body (changelog head + commit sha list)
+        run: |
+          {
+            echo "ESPView ${{ github.ref_name }}"
+            echo
+            echo "## Changelog (head)"
+            head -n 40 docs/changelog.md
+            echo
+            echo "## Commits"
+            git log --oneline -n 30 "${{ github.sha }}"
+          } > "$RUNNER_TEMP/release-body.md"
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          body_path: ${{ runner.temp }}/release-body.md
+          files: |
+            release/espview-*.bin
+            release/bootloader-*.bin
+            release/partition-table-*.bin
+            release/SHA256SUMS.txt
+            release/espview-docs-${{ github.ref_name }}.tar.gz

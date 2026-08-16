@@ -1,0 +1,114 @@
+name: windows-ci
+
+on:
+  push:
+    paths:
+      - "pc/**"
+      - "shared/**"
+      - "scripts/**"
+      - "docs/**"
+      - "README.md"
+      - ".github/workflows/windows-ci.yml"
+  pull_request:
+    paths:
+      - "pc/**"
+      - "shared/**"
+      - "scripts/**"
+      - "docs/**"
+      - "README.md"
+      - ".github/workflows/windows-ci.yml"
+  workflow_dispatch:
+
+concurrency:
+  group: windows-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  qt-build:
+    name: Qt build (MinGW64)
+    runs-on: windows-latest
+    timeout-minutes: 40
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup MSYS2 (MinGW64 + Qt6)
+        uses: msys2/setup-msys2@v2
+        with:
+          # Reuse the runner image preinstalled MSYS2 at C:\msys64 so the
+          # default MINGW64_BIN=C:\msys64\mingw64\bin inside verify_qt.bat applies.
+          msystem: MINGW64
+          release: false
+          install: >-
+            mingw-w64-x86_64-gcc
+            mingw-w64-x86_64-cmake
+            mingw-w64-x86_64-ninja
+            mingw-w64-x86_64-make
+            mingw-w64-x86_64-qt6-base
+            mingw-w64-x86_64-qt6-serialport
+
+      - name: Build Qt GUI (scripts\verify_qt.bat)
+        run: cmd /c scripts\verify_qt.bat
+
+      - name: Assert espview_virtual_display.exe exists
+        shell: pwsh
+        run: |
+          $exe = "build\verify_qt\espview_virtual_display.exe"
+          if (-not (Test-Path -LiteralPath $exe)) {
+            Write-Error "Build did not produce $exe"
+            exit 1
+          }
+          Write-Host "OK: $exe"
+
+  qt-smoke:
+    name: Qt smoke (headless TCP + autoclose)
+    runs-on: windows-latest
+    needs: qt-build
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup MSYS2 (MinGW64 + Qt6)
+        uses: msys2/setup-msys2@v2
+        with:
+          # Same environment as qt-build so the Qt 6 runtime DLLs are available
+          # (C:\msys64\mingw64\bin) when the built exe runs headless.
+          msystem: MINGW64
+          release: false
+          install: >-
+            mingw-w64-x86_64-gcc
+            mingw-w64-x86_64-cmake
+            mingw-w64-x86_64-ninja
+            mingw-w64-x86_64-make
+            mingw-w64-x86_64-qt6-base
+            mingw-w64-x86_64-qt6-serialport
+
+      - name: Build Qt GUI (scripts\verify_qt.bat)
+        run: cmd /c scripts\verify_qt.bat
+
+      - name: Smoke test (headless TCP + autoclose)
+        shell: pwsh
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: |
+          $env:PATH = "C:\msys64\mingw64\bin;$env:PATH"
+          & "build\verify_qt\espview_virtual_display.exe" --transport tcp --tcp-bind 127.0.0.1 --tcp-port 18765 --autoclose-ms 1200 *> smoke.log
+          $code = $LASTEXITCODE
+          Write-Host "espview_virtual_display exit code: $code"
+          if ($code -ne 0) {
+            Get-Content smoke.log -ErrorAction SilentlyContinue
+            exit $code
+          }
+          Write-Host "--- smoke.log ---"
+          Get-Content smoke.log
+
+      - name: Upload smoke log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: qt-smoke-log
+          path: smoke.log

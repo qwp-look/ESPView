@@ -1,0 +1,92 @@
+# ============================================================
+# ESPView hardware smoke test (EXPERIMENTAL - opt-in only).
+#
+#   * Requires a HUMAN operator and physical hardware: a
+#     self-hosted Windows runner with an attached ESP32 board.
+#   * Triggered ONLY manually via workflow_dispatch.
+#   * NEVER part of the main CI gates; never runs on push/PR.
+#   * Builds + flashes real firmware to the attached board, runs
+#     a real UART protocol session test, and uploads the logs.
+# ============================================================
+name: hardware-smoke
+
+on:
+  workflow_dispatch:
+    inputs:
+      profile:
+        description: ESP32 build/flash profile
+        type: choice
+        options:
+          - uart
+          - tcp
+          - oled
+          - oled-off
+          - diagnostic
+          - g1_a
+          - g1_b
+          - g1_c
+          - g1_d
+        default: uart
+      port:
+        description: Serial port for the session test (e.g. COM3)
+        type: string
+        default: COM3
+
+jobs:
+  smoke:
+    name: smoke (${{ inputs.profile }})
+    # REQUIRED RUNNER: a self-hosted Windows runner with an attached
+    # ESP32 board (MSYS2 MinGW64 at C:\msys64 and the ESP-IDF v6.0.2
+    # PowerShell profile at C:\Espressif\tools\Microsoft.v6.0.2.PowerShell_profile.ps1).
+    runs-on: ['self-hosted', 'windows', 'esp32']
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Verify tools (MSYS2 + ESP-IDF profile env)
+        shell: powershell
+        run: |
+          # Mirrors the espview_build.bat preflight:
+          #   - MSYS2 MinGW64: g++, cmake, ctest under %MINGW64_BIN%
+          #   - ESP-IDF env:  dot-source the PowerShell profile, then
+          #     require idf.py on PATH.
+          $mingwBin = if ($env:MINGW64_BIN) { $env:MINGW64_BIN } else { 'C:\msys64\mingw64\bin' }
+          foreach ($tool in @('g++.exe', 'cmake.exe', 'ctest.exe')) {
+            if (-not (Test-Path (Join-Path $mingwBin $tool))) {
+              Write-Error "MSYS2 MinGW64 tool missing: $tool (expected in $mingwBin)"
+              exit 1
+            }
+          }
+          Write-Host "MSYS2 MinGW64 OK: $mingwBin"
+          $espIdfProfile = if ($env:ESPIDF_PROFILE) { $env:ESPIDF_PROFILE } else { 'C:\Espressif\tools\Microsoft.v6.0.2.PowerShell_profile.ps1' }
+          if (-not (Test-Path $espIdfProfile)) {
+            Write-Error "ESP-IDF PowerShell profile not found: $espIdfProfile"
+            exit 1
+          }
+          & { . $espIdfProfile }
+          if (-not (Get-Command idf.py -ErrorAction SilentlyContinue)) {
+            Write-Error 'idf.py not available after ESP-IDF profile load'
+            exit 1
+          }
+          idf.py --version
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Prepare smoke log dir
+        shell: cmd
+        run: if not exist build\smoke-logs mkdir build\smoke-logs
+
+      - name: Build + flash (profile=${{ inputs.profile }})
+        shell: cmd
+        run: cmd /c scripts\espview_build_flash.bat -b ${{ inputs.profile }} > build\smoke-logs\build-flash.log 2>&1
+
+      - name: Session test (port=${{ inputs.port }}, baud 115200)
+        shell: cmd
+        run: py scripts\pc_com3_session_test.py --port ${{ inputs.port }} --baud 115200 > build\smoke-logs\session-test.log 2>&1
+
+      - name: Upload smoke logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: hardware-smoke-${{ inputs.profile }}-logs
+          path: build/smoke-logs
+          if-no-files-found: warn
