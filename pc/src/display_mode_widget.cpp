@@ -390,6 +390,22 @@ void DisplayModeWidget::updateConditionLabel() {
     if (!state_.sessionConnected && state_.waitingForConnection) {
         text += QStringLiteral(" — ") + t("Waiting for connection");
     }
+    // M7-G3: model errors must have visible feedback (not hidden in tooltip only).
+    // States already carrying the error text stay as-is; any other pending error
+    // (ACK fail / timeout / rejected selection) becomes an explicit red Error.
+    const bool errorTextShown =
+        text == t("Disconnected") ||
+        text.startsWith(t("Disconnected") + QStringLiteral(" — ")) ||
+        text == t("Physical unavailable") || text == t("Switching") ||
+        text == t("Waiting for connection");
+    if (!state_.lastError.empty() && !errorTextShown) {
+        if (state_.lastError == "physical display unavailable") {
+            text = t("Physical unavailable");
+        } else {
+            text = t("Error");
+        }
+        color = QString::fromUtf8(kColorRed);
+    }
     conditionLabel_->setText(QStringLiteral("● ") + text);
     conditionLabel_->setStyleSheet(
         QStringLiteral("color:%1;font-weight:bold;").arg(color));

@@ -387,6 +387,12 @@ private slots:
             s.onPhysicalDegraded(false);
             modeWidget_->setUiState(s);
             drawer_->clearStatus();  // 会话失联 → 抽屉物理状态清空（不伪造）
+            // M7-G3: transport-level disconnect clears preview bitmap and capability
+            // metadata too (do not rely solely on worker session-level snapshot).
+            if (previewWidget_ != nullptr) {
+                previewWidget_->clear();
+                previewWidget_->setControllerName(QString());
+            }
         }
         syncModeStateToUi();
         statusBar()->showMessage(tr_(text.toUtf8().constData()));
@@ -551,6 +557,12 @@ private slots:
             physSnapshot_ = parsed;
             statusPanel_->setPhysicalStatus(physSnapshot_);
             drawer_->setPhysicalStatus(physSnapshot_);
+            // M7-G3: physical preview Controller row uses telemetry fact (oled line c=) -
+            // only updated when an oled line arrives; otherwise stays placeholder (no faking).
+            if (previewWidget_ != nullptr && physSnapshot_.oledValid) {
+                previewWidget_->setControllerName(QString::fromUtf8(
+                    espview::display::controllerCodeName(physSnapshot_.oledController)));
+            }
             // M7-C4：能力/健康分离 —— 单一收敛点 PhysicalCapabilitySnapshot。
             // capabilityKnown（曾见 ok=1，学习结果只置位、断开才撤销）只管门控；
             // healthy（最近遥测 ok）管降级；provenance 为未来 CAPABILITIES 上行预留。
@@ -591,6 +603,13 @@ private slots:
         snap.healthy = physCap_.healthy;
         snap.telemetryFresh = physCap_.telemetryFresh;
         physCap_ = snap;
+
+        // M7-G3: physical preview Controller row prefers wire capability fact
+        // (CAPABILITIES physController; telemetry inference is the fallback, same source).
+        if (previewWidget_ != nullptr) {
+            previewWidget_->setControllerName(QString::fromUtf8(
+                espview::display::controllerCodeName(snap.controller)));
+        }
 
         auto s = modeWidget_->state();
         s.onPhysicalAvailable(caps.physicalPresent);

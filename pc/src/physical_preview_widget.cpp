@@ -118,10 +118,12 @@ void PhysicalPreviewWidget::setFrame(const PhysicalPreviewState& snapshot) {
 }
 
 void PhysicalPreviewWidget::clear() {
-    // 只清帧：不动使能/语言/Controller（断线语义 AE.3：PC 断线清空预览位图）。
+    // 只清帧与能力元数据：不动使能/语言（断线语义 AE.3：PC 断线清空预览位图；
+    // M7-G3：Controller 属会话能力，跨会话不得残留 → 一并复位为占位）。
     const bool enabled = previewEnabled_;
     state_ = PhysicalPreviewState();
     previewEnabled_ = enabled;
+    controllerName_.clear();
     haveFrame_ = false;
     lastFrameAtMs_ = -1;
     if (imageLabel_ != nullptr) {

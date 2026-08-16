@@ -59,7 +59,8 @@ public:
     // snapshot.sessionConnected=false 或无像素 → 按无数据渲染（No Preview）。
     void setFrame(const PhysicalPreviewState& snapshot);
 
-    // 断线/清空：清除位图 → No Preview（灰）。
+    // 断线/清空：清除位图与 Controller 能力元数据 → No Preview（灰）；
+    // 跨会话不残留上次会话的能力事实（不伪造）。
     void clear();
 
     // 语言切换：重刷全部文案（状态/字段名/标题），不触碰帧与连接。

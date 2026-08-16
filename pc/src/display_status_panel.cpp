@@ -236,6 +236,8 @@ QString DisplayStatusPanel::routerStateText(uint8_t state) const {
             return t("Connected");
         case 3:
             return t("Degraded");
+        case 4:
+            return t("Unavailable");  // UiRouterState::kUnavailable
         case 0xFF:
             return t("Unavailable");
     }
@@ -531,6 +533,9 @@ void DisplayStatusPanel::refreshRouter() {
             break;
         case 0:
             ps = PanelState::kDisabled;
+            break;
+        case 4:
+            ps = PanelState::kUnavailable;
             break;
         case 0xFF:
         default:

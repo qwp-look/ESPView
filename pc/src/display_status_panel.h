@@ -59,7 +59,7 @@ public slots:
     void setStats(const espview::pc::WorkerStats& stats);
     // diagAdded 行解析合并后的 ESP32 遥测快照。
     void setPhysicalStatus(const espview::display::PhysicalStatus& ps);
-    // DisplayRouteMode 数值 0..3 + RouterState 数值 0..3（0xFF=未知）
+    // DisplayRouteMode 数值 0..3 + UiRouterState 数值 0..4（4=kUnavailable；0xFF=未知）
     // + FULL resync 挂起标志（mod 行 / SET_MODE ACK 通道）。
     void setModeState(int mode, int routerState, bool fullResyncPending);
     // 语言切换：只重刷文案，不触碰数据源 / 连接。
