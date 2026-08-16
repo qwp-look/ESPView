@@ -38,5 +38,9 @@ struct StatusSnapshot {
 
 void renderStatus(OledFb& fb, const StatusSnapshot& s);
 
+// M7-E：OLED 生命周期状态 -> 诊断显示串（与 esp32 侧 OledState 枚举数值对齐；
+// 0..4 既有值不变，5 = kSuspendedForWifiScan；shared 侧零平台依赖）。
+const char* oledStateName(uint8_t state);
+
 }  // namespace oled
 }  // namespace espview

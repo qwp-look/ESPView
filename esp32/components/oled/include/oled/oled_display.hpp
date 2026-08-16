@@ -47,12 +47,16 @@ namespace espview {
 namespace oled {
 
 // M7-B：OLED 生命周期状态（status().state；错误恢复期间保持 kDegraded）。
+// M7-E：kSuspendedForWifiScan 为 Wi-Fi 扫描挂起观察态（挂起是正交原子标志，
+// 不落 state_；status() 在挂起期间把它报告为 kSuspendedForWifiScan）。0..4
+// 既有数值保持不变。
 enum class OledState : uint8_t {
     kDisabled = 0,     // 任务未运行 / 已退出
     kInitializing = 1, // start() 成功，初始化中/待初始化
     kReady = 2,        // 初始化成功，正常刷新
     kDegraded = 3,     // 上传/初始化失败，恢复中
     kStopping = 4,     // stop() 已请求，等待任务退出
+    kSuspendedForWifiScan = 5,  // M7-E：Wi-Fi 扫描临界区挂起（I2C 流量=0，仅休眠）
 };
 
 // 只读状态快照（status() 返回；错误计数只增）。M7-B 增补 oled* 指标：
@@ -124,6 +128,17 @@ public:
     OledPreviewSlot& previewSlot() { return previewSlot_; }
     const OledPreviewSlot& previewSlot() const { return previewSlot_; }
 
+    // ---- M7-E：Wi-Fi 扫描暂停/恢复（跨任务安全；原子标志）----
+    // 扫描临界区期间挂起：taskLoop 跳过一切 I2C/provider/预览槽工作（I2C
+    // 流量=0，仅休眠），status().state 报告 kSuspendedForWifiScan。与 stop()/
+    // I2C 生命周期正交：挂起中 stop() 仍安全退出（I2C 资源仍由任务退出路径
+    // 释放）；恢复后按既有刷新节奏继续，previewSlot 保持最新帧语义。本特性
+    // 绝不关闭/重建 I2C bus，绝不 double-release。调用方：Wi-Fi 扫描任务
+    //（main/espview 侧）；OLED 任务自身不调用。
+    bool pauseForWifiScan();        // 幂等；任务未运行时 no-op（返回 true）；任务运行中置挂起
+    bool resumeAfterWifiScan();     // 幂等；清除挂起；返回本次调用前是否处于挂起
+    bool isSuspendedForWifiScan() const;  // 挂起查询
+
 private:
     static void taskEntry(void* arg);
     void taskLoop();
@@ -152,6 +167,7 @@ private:
     std::atomic<bool> taskExited_{false};
     TaskHandle_t task_ = nullptr;
     std::atomic<uint8_t> state_{static_cast<uint8_t>(OledState::kDisabled)};  // M7-B：生命周期状态
+    std::atomic<bool> suspendedForWifiScan_{false};  // M7-E：Wi-Fi 扫描挂起标志（正交于生命周期）
 
     // 状态快照（原子；status() 跨任务安全读取）。
     std::atomic<bool> ok_{false};

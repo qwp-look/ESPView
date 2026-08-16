@@ -1,4 +1,4 @@
-// ESPView M7-A/M7-B — OledDisplay 实现（低优先级任务 + 有界错误恢复）。
+// ESPView M7-A/M7-B/M7-E — OledDisplay 实现（低优先级任务 + 有界错误恢复）。
 //
 // 线程模型：
 //   - taskLoop 每 refreshMs：provider() → renderStatus → 分段上传；
@@ -11,6 +11,9 @@
 //   - M7-B：I2C 资源（bus/device）只在任务退出路径释放（taskLoop 结束处），
 //     stop() 只置停止标志 + 有界等待任务退出 —— 杜绝跨任务 i2c_del_master_bus
 //     与任务内 transmit/probe 并发的 use-after-free（DESIGN.md Z 节）。
+//   - M7-E：Wi-Fi 扫描临界区挂起（pauseForWifiScan/resumeAfterWifiScan 原子
+//     正交标志）：挂起期间 taskLoop 跳过一切 I2C/provider/预览槽工作（I2C
+//     流量=0，仅休眠），绝不关闭/重建 I2C bus；挂起中 stop() 仍安全退出。
 #include "oled/oled_display.hpp"
 
 #include <algorithm>
@@ -122,6 +125,9 @@ void OledDisplay::stop() {
     if (!running_.exchange(false, std::memory_order_release)) {
         return;  // 未运行
     }
+    // M7-E：挂起标志随 stop 清除（挂起是运行期正交状态；任务退出后不允许
+    // 残留挂起导致下次 start() 直接进入挂起）。I2C 资源仍由任务退出路径释放。
+    suspendedForWifiScan_.store(false, std::memory_order_release);
     state_.store(static_cast<uint8_t>(OledState::kStopping),
                  std::memory_order_relaxed);
     if (task_ != nullptr) {
@@ -166,8 +172,43 @@ OledStatus OledDisplay::status() const {
     s.lastErrorMs = lastErrorMs_.load(std::memory_order_relaxed);
     s.lastFlushMs = lastFlushMs_.load(std::memory_order_relaxed);
     s.lastFlushDurationMs = lastFlushDurationMs_.load(std::memory_order_relaxed);
-    s.state = static_cast<OledState>(state_.load(std::memory_order_relaxed));
+    // M7-E：挂起期间 state 报告 kSuspendedForWifiScan；底层生命周期状态保持
+    // 不变（正交标志，不落 state_）。kStopping/kDisabled 优先 —— 挂起中 stop()
+    // 仍能正确观察停止/退出。
+    OledState lifecycle =
+        static_cast<OledState>(state_.load(std::memory_order_relaxed));
+    if (suspendedForWifiScan_.load(std::memory_order_acquire) &&
+        lifecycle != OledState::kStopping &&
+        lifecycle != OledState::kDisabled) {
+        lifecycle = OledState::kSuspendedForWifiScan;
+    }
+    s.state = lifecycle;
     return s;
+}
+
+// ---- M7-E：Wi-Fi 扫描暂停/恢复（跨任务安全；原子标志）----
+// 调用方为 Wi-Fi 扫描任务（main/espview 侧）；与 OLED 任务内的 taskLoop 以
+// 原子标志通信。挂起不触碰 i2c_（绝不关闭/重建 bus、绝不 double-release）；
+// 恢复后 taskLoop 按既有刷新节奏继续，previewSlot 保持最新帧语义。
+
+bool OledDisplay::pauseForWifiScan() {
+    // 幂等：任务运行期间置挂起标志（taskLoop 自此跳过一切 I2C/provider/预览槽
+    // 工作，I2C 流量=0）；任务未运行时 no-op 返回 true（显示本就无 I2C 活动，
+    // 扫描临界区天然安全，且不会设置会在下次 start() 生效的残留标志）。
+    if (!running_.load(std::memory_order_acquire)) {
+        return true;
+    }
+    suspendedForWifiScan_.store(true, std::memory_order_release);
+    return true;
+}
+
+bool OledDisplay::resumeAfterWifiScan() {
+    // 幂等：清除挂起标志；返回本次调用前是否处于挂起（"是否曾被挂起"）。
+    return suspendedForWifiScan_.exchange(false, std::memory_order_acq_rel);
+}
+
+bool OledDisplay::isSuspendedForWifiScan() const {
+    return suspendedForWifiScan_.load(std::memory_order_acquire);
 }
 
 // ---- M7-C2：场景/应用帧控制（跨任务安全；原子/互斥）----
@@ -215,6 +256,11 @@ void OledDisplay::handleUploadResult(uint64_t nowMs, bool uploaded, bool& busRea
         return;
     }
     recordError(nowMs, 0);
+    // M7-E：挂起期间不触发 recover 动作（bus reset/reinit/重建均为 I2C 动作）。
+    // 错误已记账；恢复动作延后到挂起解除后的失败路径（有界重试语义不变）。
+    if (suspendedForWifiScan_.load(std::memory_order_acquire)) {
+        return;
+    }
     const uint32_t cons =
         consecutiveErrors_.fetch_add(1, std::memory_order_relaxed) + 1;
     if (cons >= cfg_.maxReinit) {
@@ -258,6 +304,14 @@ void OledDisplay::taskLoop() {
         const uint64_t nowMs = esp_timer_get_time() / 1000;
         if (nowMs >= nextRefreshMs) {
             nextRefreshMs = nowMs + cfg_.refreshMs;
+
+            // M7-E：Wi-Fi 扫描挂起 —— 跳过一切 I2C/provider/预览槽工作（I2C
+            // 流量=0，仅休眠）。挂起期间不触发任何 recover 动作（无 I2C 即无新
+            // 错误；恢复后继续既有生命周期：kReady 刷新 / !busReady 按策略重试
+            // init）。refreshCount 只计实际刷新尝试（挂起周期不计）。
+            if (suspendedForWifiScan_.load(std::memory_order_acquire)) {
+                continue;
+            }
             refreshCount_.fetch_add(1, std::memory_order_relaxed);
 
             if (!busReady) {
@@ -269,7 +323,9 @@ void OledDisplay::taskLoop() {
                         ok_.store(true, std::memory_order_relaxed);
                         state_.store(static_cast<uint8_t>(OledState::kReady),
                                      std::memory_order_relaxed);
-                    } else {
+                    } else if (!suspendedForWifiScan_.load(std::memory_order_acquire)) {
+                        // M7-E：挂起中止的 init 不记为失败（非 I2C 错误，不消耗
+                        // 恢复预算；恢复后按既有策略继续重试）。
                         policy.onFailure(nowMs);
                         recordError(nowMs, 0);
                     }
@@ -281,22 +337,46 @@ void OledDisplay::taskLoop() {
                 //（系统诊断页独立于 router 持续刷新）。I2C 上传只在本任务内进行。
                 const bool appScene = scene() == Scene::kApplication &&
                                       appFramesEnabled();
-                if (appScene && appFrameDirty_.exchange(false)) {
-                    // 快照 1KB 应用帧：锁内拷贝到上传 staging（fb_），锁外分段上传，
-                    // 避免上传期间阻塞 UI/LVGL 侧的同步渲染。
-                    {
-                        std::lock_guard<std::mutex> lock(appFbMutex_);
-                        std::memcpy(fb_.data(), appFb_.data(), OledFb::kSizeBytes);
+                if (appScene) {
+                    // M7-E：挂起与任务周期并发的兜底检查 —— 挂起中不消费 dirty
+                    //（保留 dirty：恢复后仍上传最新帧），不写预览槽。
+                    if (suspendedForWifiScan_.load(std::memory_order_acquire)) {
+                        continue;
                     }
-                    // M7-D2：内容确定点 1 —— 应用帧快照写入预览槽（AE.3）。
-                    previewSlot_.store(fb_.data());
-                    handleUploadResult(nowMs, uploadFrame(fb_), busReady);
+                    if (appFrameDirty_.exchange(false)) {
+                        // 快照 1KB 应用帧：锁内拷贝到上传 staging（fb_），锁外分段上传，
+                        // 避免上传期间阻塞 UI/LVGL 侧的同步渲染。
+                        {
+                            std::lock_guard<std::mutex> lock(appFbMutex_);
+                            std::memcpy(fb_.data(), appFb_.data(), OledFb::kSizeBytes);
+                        }
+                        // M7-D2：内容确定点 1 —— 应用帧快照写入预览槽（AE.3）。
+                        previewSlot_.store(fb_.data());
+                        const bool uploaded = uploadFrame(fb_);
+                        if (!uploaded &&
+                            suspendedForWifiScan_.load(std::memory_order_acquire)) {
+                            // M7-E：挂起中止的上传不是 I2C 错误：不记账不触发
+                            // recover；恢复 dirty，恢复后仍上传最新帧。
+                            appFrameDirty_.store(true, std::memory_order_release);
+                            continue;
+                        }
+                        handleUploadResult(nowMs, uploaded, busReady);
+                    }
                 } else if (!appScene) {
+                    // M7-E：挂起兜底 —— 跳过 provider/渲染/预览槽/上传。
+                    if (suspendedForWifiScan_.load(std::memory_order_acquire)) {
+                        continue;
+                    }
                     const StatusSnapshot snap = provider_();
                     renderStatus(fb_, snap);
                     // M7-D2：内容确定点 2 —— 诊断页快照写入预览槽（AE.3）。
                     previewSlot_.store(fb_.data());
-                    handleUploadResult(nowMs, uploadFrame(fb_), busReady);
+                    const bool uploaded = uploadFrame(fb_);
+                    if (!uploaded &&
+                        suspendedForWifiScan_.load(std::memory_order_acquire)) {
+                        continue;  // M7-E：挂起中止，非 I2C 错误，不记账不恢复
+                    }
+                    handleUploadResult(nowMs, uploaded, busReady);
                 }
                 // appScene 且无新帧：跳过本周期上传（保持最后画面；dirty 由 UI 侧置位）。
             }
@@ -358,12 +438,15 @@ bool OledDisplay::runInitSequence(esp_err_t* firstError) {
     }
     const ControllerType ctrl = static_cast<ControllerType>(
         controller_.load(std::memory_order_relaxed));
-    // M7-B：停止谓词 —— 每段 transmit 前检查 running_，为 false 立即放弃（不再
-    // 发送下一段）；stop() 通知后任务快速退出，I2C 资源留在退出路径释放。
-    const std::function<bool()> stopPred = [this]() {
-        return !running_.load(std::memory_order_acquire);
+    // M7-B/M7-E：中止谓词 —— 每段 transmit 前检查 running_ 与挂起标志；停止
+    // 请求或挂起置位后立即放弃（不再发送下一段）。停止时任务快速退出、I2C
+    // 资源留在退出路径释放；挂起时保证挂起窗口内 I2C 流量≈0（仅段内已提交
+    // 的部分可能完成）。
+    const std::function<bool()> abortPred = [this]() {
+        return !running_.load(std::memory_order_acquire) ||
+               suspendedForWifiScan_.load(std::memory_order_acquire);
     };
-    return executeInitSequence(*i2c_, ctrl, kMaxTransmitBytes, stopPred, firstError);
+    return executeInitSequence(*i2c_, ctrl, kMaxTransmitBytes, abortPred, firstError);
 }
 
 bool OledDisplay::uploadFrame(const OledFb& fb) {
@@ -376,9 +459,11 @@ bool OledDisplay::uploadFrame(const OledFb& fb) {
     // M7-B：上传耗时统计（首段前起表，末段后结表；成功才写入）。
     const int64_t flushStartUs = esp_timer_get_time();
     for (const auto& seg : segs) {
-        // M7-B：每段 transmit 前检查停止请求 —— stop() 后不再发送下一段，
-        // 任务快速退出，I2C 资源由退出路径释放。
-        if (!running_.load(std::memory_order_acquire)) {
+        // M7-B/M7-E：每段 transmit 前检查停止请求/挂起 —— stop() 后不再发送
+        // 下一段（任务快速退出，I2C 资源由退出路径释放）；挂起后不再发送下一
+        // 段（挂起窗口 I2C 流量≈0；挂起中止由调用侧区分，不记账）。
+        if (!running_.load(std::memory_order_acquire) ||
+            suspendedForWifiScan_.load(std::memory_order_acquire)) {
             return false;
         }
         const esp_err_t err = i2c_->transmit(seg.data(), seg.size());

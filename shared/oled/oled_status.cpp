@@ -81,5 +81,21 @@ void renderStatus(OledFb& fb, const StatusSnapshot& s) {
     fb.drawText(0, 56, line);
 }
 
+// M7-E：OLED 生命周期状态 -> 诊断显示串。数值与 esp32 侧 OledState 枚举
+// 对齐（0..4 既有值不变，5 = kSuspendedForWifiScan）；shared 侧零平台依赖，
+// 不引入 esp32 头，故以 uint8_t 承载。供 statsLoop/诊断页渲染消费；声明
+// 位置为集成点：主代理可把声明加入 oled_status.h，或调用侧自行 extern 声明。
+const char* oledStateName(uint8_t state) {
+    switch (state) {
+        case 0: return "DISABLED";
+        case 1: return "INIT";
+        case 2: return "READY";
+        case 3: return "DEGRADED";
+        case 4: return "STOPPING";
+        case 5: return "SUSPEND";  // kSuspendedForWifiScan
+        default: return "?";
+    }
+}
+
 }  // namespace oled
 }  // namespace espview
