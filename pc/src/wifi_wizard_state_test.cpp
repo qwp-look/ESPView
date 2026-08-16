@@ -557,6 +557,74 @@ void testKeysAndDerivedFlags() {
     }
 }
 
+
+// M7-G2 — cancelApplying()（异步 Apply 链真取消）与 WIFI_STATUS 细分错误码。
+void testCancelApplyingAndNewErrors() {
+    // 1) kApplying..kFullResync 各异步步均可取消 -> 回 kInit、密码清零、错误清空。
+    for (int stepIdx = static_cast<int>(WizardStep::kApplying);
+         stepIdx <= static_cast<int>(WizardStep::kFullResync); ++stepIdx) {
+        WifiWizardState s = makeReadyToApply();
+        CHECK(s.beginApply());
+        const auto target = static_cast<WizardStep>(stepIdx);
+        if (stepIdx == static_cast<int>(WizardStep::kConnecting)) {
+            CHECK(s.markConnecting());
+        } else if (stepIdx == static_cast<int>(WizardStep::kGotIp)) {
+            CHECK(s.markConnecting());
+            CHECK(s.markGotIp());
+        } else if (stepIdx == static_cast<int>(WizardStep::kTcpConnected)) {
+            CHECK(s.markConnecting());
+            CHECK(s.markGotIp());
+            CHECK(s.markTcpConnected());
+        } else if (stepIdx == static_cast<int>(WizardStep::kFullResync)) {
+            CHECK(s.markConnecting());
+            CHECK(s.markGotIp());
+            CHECK(s.markTcpConnected());
+            CHECK(s.markFullResync());
+        }
+        CHECK_EQ(static_cast<int>(s.step()), static_cast<int>(target));
+        CHECK(s.isApplying());
+        CHECK(s.cancelApplying());
+        CHECK_EQ(static_cast<int>(s.step()), static_cast<int>(WizardStep::kInit));
+        CHECK(s.error().code == WizardErrorCode::kNone);
+        CHECK(s.password().empty());
+        CHECK(!s.isApplying());
+    }
+
+    // 2) 编辑态 / 终态不可 cancelApplying。
+    {
+        WifiWizardState s = makeReadyToApply();  // kTcpConfig（编辑态）
+        CHECK(!s.cancelApplying());
+        WifiWizardState d = makeReadyToApply();
+        CHECK(d.beginApply());
+        CHECK(d.markConnecting());
+        CHECK(d.markGotIp());
+        CHECK(d.markTcpConnected());
+        CHECK(d.markFullResync());
+        CHECK(d.markDone());
+        CHECK(!d.cancelApplying());
+        WifiWizardState e = makeReadyToApply();
+        e.markError(WizardErrorCode::kScanFailed);
+        CHECK(!e.cancelApplying());  // kError 用 cancel() / retry()
+    }
+
+    // 3) 细分错误码：wizardErrorKey 非空、可进错误态、retry 回 kTcpConfig。
+    const WizardErrorCode codes[] = {
+        WizardErrorCode::kAuthFailed, WizardErrorCode::kApNotFound,
+        WizardErrorCode::kDhcpTimeout, WizardErrorCode::kServerUnreachable,
+    };
+    for (const auto code : codes) {
+        WifiWizardState s = makeReadyToApply();
+        CHECK(s.beginApply());
+        CHECK(s.markConnecting());
+        s.markError(code);
+        CHECK_EQ(static_cast<int>(s.step()), static_cast<int>(WizardStep::kError));
+        CHECK(s.error().code == code);
+        CHECK(std::strlen(wizardErrorKey(code)) != 0u);
+        CHECK(s.retry());
+        CHECK_EQ(static_cast<int>(s.step()), static_cast<int>(WizardStep::kTcpConfig));
+        CHECK(s.error().code == WizardErrorCode::kNone);
+    }
+}
 }  // namespace
 
 // 由 shared/protocol/tests/test_main.cpp 登记调用（协议套件二进制）。
@@ -571,5 +639,6 @@ void runWifiWizardStateTests() {
     testErrorRecovery();
     testSettingsMapNoPassword();
     testKeysAndDerivedFlags();
+    testCancelApplyingAndNewErrors();
     std::printf("[wifi_wizard_state] done\n");
 }

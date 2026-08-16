@@ -75,5 +75,9 @@ void ConnectionManager::sendWifiClear() {
     worker_.sendWifiClear();
 }
 
+void ConnectionManager::clearWifiQueue() {
+    worker_.clearWifiQueue();
+}
+
 }  // namespace pc
 }  // namespace espview

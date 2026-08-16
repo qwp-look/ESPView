@@ -63,6 +63,11 @@ enum class WizardErrorCode : int {
     kFullResyncFailed = 17,    // Step 11 FULL resync 失败
     kUartBootstrapUnavailable = 18,  // M7-F：UART bootstrap 链路不可用（传输 Error，非密码错误）
     kTcpHandoffFailed = 19,    // M7-F：Wi-Fi 已连接但 TCP handoff 失败/超时
+    // ---- M7-G（B5）：WIFI_STATUS errorCode 细分（不再塌缩成 kWifiConnectFailed）----
+    kAuthFailed = 20,          // WPA/WPA2 认证失败（密码错误）
+    kApNotFound = 21,          // 目标 AP 未找到
+    kDhcpTimeout = 22,         // 连接后限时未获 GOT_IP
+    kServerUnreachable = 23,   // TCP server 不可达（handoff 期）
 };
 
 // 错误：稳定 code + i18n key（英文原文，经 trText 渲染；code==kNone 时 key 为空）。
@@ -108,6 +113,12 @@ public:
     bool back();
     // cancel：取消向导 → 重置 kInit 并清空全部输入（编辑阶段 / kError 可用）。
     bool cancel();
+    // M7-G（B2）：异步 Apply 链（kApplying..kFullResync）的真取消——重置 kInit
+    // 并安全擦除全部输入（含密码）。仅在 isApplying() 时可用；编辑态/kError 用
+    // cancel()，终态返回 false。与 cancel() 分开：异步步的取消语义由对话框
+    // 显式触发（清 Worker 队列 + WIFI_CLEAR 后调用），不改变 M7-D 冻结的
+    // "Apply 后不可 cancel" 契约（wifi_wizard_state_test 已断言）。
+    bool cancelApplying();
     // retry：kError → 回到出错步骤（retry 目标），清除错误；非错误态返回 false。
     bool retry();
 

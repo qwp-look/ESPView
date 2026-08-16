@@ -41,6 +41,8 @@ class QTimer;
 namespace espview {
 namespace pc {
 
+// M7-G（B7）：PC 侧 TCP handoff 观察器（定义于 wifi_wizard_dialog.cpp）。
+class TcpHandoffObserver;
 class WifiWizardDialog : public QDialog {
     Q_OBJECT
 public:
@@ -73,6 +75,15 @@ private:
     void populateScanList();
     void startScan();
     void applyConfig();
+    // M7-G（B7）：TCP handoff 观察器生命周期（Apply 链启动；Done/Error/取消停止）。
+    void startHandoffListener();
+    void stopHandoffListener();
+    // M7-G（B2/B6）：异步步真取消（清 Worker 队列 + WIFI_CLEAR + 状态回可编辑）。
+    void cancelAsyncFlow();
+    // M7-G：bootstrap 步骤自动前进（会话已连接 / 能力已收到时不卡 Step 1/2）。
+    void enterBootstrapStep();
+    void maybeAdvanceBootstrap();
+    void maybeCompleteResync();  // 首帧 FULL 已到且已连 TCP → kFullResync → kDone
 
     // M7-D3 信号（queued 连接在 ctor 建立；GUI 线程消费）。
     void onCapabilitiesReceived(const espview::proto::CapabilitiesInfo& caps);
@@ -83,6 +94,12 @@ private:
     void onWifiStatus(const espview::proto::WifiStatusInfo& status);
     void onFrameReady(const DisplayFrame& frame);
 
+    // M7-G（B7）：TCP handoff 观察器事件（queued，worker 线程 → GUI）。
+    void onTcpHandshakeConnected();
+    void onTcpFirstFrame();
+    void onTcpHandoffFailed(const QString& reason);
+    void onTcpLinkLost();
+
     // M7-F：异步步看门狗（扫描 / Apply 链 / FULL resync 超时收敛，禁止挂死）。
     void startWatchdog(int ms);
     void stopWatchdog();
@@ -91,12 +108,17 @@ private:
     ConnectionManager& manager_;
     WifiWizardState state_;
     UiLang lang_ = UiLang::kEnglish;
-    bool scanInFlight_ = false;
+    bool scanInFlight_ = false;           // startScan → ACK/结果/失败
+    bool scanResultPending_ = false;      // M7-G（B1/B6）：ACK 已接受，等待 SCAN_RESULT
     bool lastScanFirmwareUnsupported_ = false;
     bool tcpConnectedArmed_ = false;  // kTcpConnected 起等待第一帧完成 FULL resync
     QTimer* watchdogTimer_ = nullptr;  // M7-F：异步步超时（单发）
     bool scanSeqValid_ = false;        // M7-F：是否已收到至少一次扫描结果（seq 过滤基）
     uint8_t lastScanSeq_ = 0;          // M7-F：最近消费的扫描结果 seq（迟到/重复忽略）
+
+    // M7-G（B7）：TCP handoff 状态（观察器事件与 WIFI_STATUS 相位双路径，幂等）。
+    TcpHandoffObserver* handoffObserver_ = nullptr;
+    bool tcpFramePending_ = false;     // 首帧 FULL 已到（TCP 或 UART），等待 kTcpConnected
 
     // M7-E：扫描页显示状态（扫描期间 OLED 显示临时暂停；完成/失败后恢复）。
     enum class ScanDisplayState {

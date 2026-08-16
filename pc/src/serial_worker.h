@@ -31,6 +31,7 @@
 #include <cstdint>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <thread>
 #include <vector>
@@ -179,6 +180,14 @@ public:
     // M7-F：WIFI_CLEAR（取消/关闭向导时撤销已下发配置；无凭据，AF.4）。
     // 与 sendWifiConfig 同队列；仅经 UART bootstrap 下发。
     void sendWifiClear();
+    // M7-G：清空 Wi-Fi 命令队列（取消/关闭向导时调用；未发送的密码副本在此
+    // 安全擦除，AF.4）。线程安全，可随时调用（Worker drain 用同一把锁）。
+    void clearWifiQueue();
+    // M7-G：最近一次 Worker 状态快照（GUI 线程安全读；bootstrap 步骤自动前进
+    // 用——向导可能在与设备已连接后才打开，statusChanged 事件已错过）。
+    WorkerStatus status() const { return static_cast<WorkerStatus>(lastStatus_.load()); }
+    // M7-G：最近一次 CAPABILITIES 快照（若已收到；同上，能力事件可能已错过）。
+    bool lastCapabilities(espview::proto::CapabilitiesInfo& out) const;
 
     // M7-C4 P1-2：当前传输会话 epoch（跨线程安全）。每次 runLoop 入口递增；
     // GUI 以此丢弃旧会话 stale 帧（switchTransport 后的残帧）。
@@ -222,7 +231,6 @@ private:
     void resetSessionCounters();  // M6-D：切换后清会话级统计（仅 stop() join 后调用）
     void clearInputQueue();       // M6-D：清空 GUI→Worker 输入队列（切换前调用）
     void clearDisplayModeQueue(); // M7-C3：清空 Display Mode 队列（切换前调用）
-    void clearWifiQueue();        // M7-D3：清空 Wi-Fi 命令队列（切换前调用）
     void emitStatus(WorkerStatus status, const QString& text);
     void emitStats();
     void pushDiag(proto::Severity severity, std::string source, std::string message);
@@ -266,6 +274,7 @@ private:
     std::atomic<uint64_t> sessionCounter_{0};  // 每次 runLoop 入口递增
     std::atomic<bool> stop_{false};
     std::atomic<bool> threadAlive_{false};  // M6-D：runLoop 存活标志
+    std::atomic<int> lastStatus_{0};        // M7-G：最近 emitStatus 快照（GUI 读）
     std::thread thread_;
     TransportKind kind_ = TransportKind::kUart;
     QString port_;
@@ -308,6 +317,11 @@ private:
     // M7-D2：Physical Preview 快照（仅 Worker 线程访问；去重/过期/会话语义
     // 在模型内，GUI 只消费副本）。
     espview::pc::PhysicalPreviewState previewState_;
+
+    // M7-G：最近一次 CAPABILITIES 快照（onCapabilities 回调写入，GUI 读；
+    // 互斥保护——Worker 线程写、GUI 线程读）。
+    mutable std::mutex capsMutex_;
+    std::optional<espview::proto::CapabilitiesInfo> lastCaps_;
 };
 
 }  // namespace pc

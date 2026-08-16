@@ -127,6 +127,14 @@ const char* wizardErrorKey(WizardErrorCode code) {
             return "UART bootstrap unavailable";
         case WizardErrorCode::kTcpHandoffFailed:
             return "TCP handoff failed (Wi-Fi connected)";
+        case WizardErrorCode::kAuthFailed:
+            return "Wi-Fi authentication failed";
+        case WizardErrorCode::kApNotFound:
+            return "Wi-Fi network not found";
+        case WizardErrorCode::kDhcpTimeout:
+            return "DHCP timeout - no IP address";
+        case WizardErrorCode::kServerUnreachable:
+            return "TCP server unreachable";
         case WizardErrorCode::kNone:
             break;
     }
@@ -220,6 +228,20 @@ bool WifiWizardState::cancel() {
     retryStep_ = WizardStep::kInit;
     ssid_.clear();
     password_.clear();
+    tcpServerIp_.clear();
+    tcpServerPort_ = 0;
+    return true;
+}
+
+bool WifiWizardState::cancelApplying() {
+    if (!isApplying()) {
+        return false;  // 仅异步 Apply 链可取消（编辑态/kError 用 cancel()）
+    }
+    clearPassword();  // 安全擦除密码驻留副本（std::fill 清零）
+    step_ = WizardStep::kInit;
+    error_ = WizardErrorCode::kNone;
+    retryStep_ = WizardStep::kInit;
+    ssid_.clear();
     tcpServerIp_.clear();
     tcpServerPort_ = 0;
     return true;

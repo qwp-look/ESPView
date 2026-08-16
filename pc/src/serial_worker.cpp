@@ -158,6 +158,7 @@ bool SerialWorker::waitMs(uint64_t ms) {
 }
 
 void SerialWorker::emitStatus(WorkerStatus status, const QString& text) {
+    lastStatus_.store(static_cast<int>(status));  // M7-G：状态快照（GUI 可读）
     emit statusChanged(status, text);
 }
 
@@ -354,6 +355,11 @@ void SerialWorker::runLoop() {
     };
     // M7-D1：CAPABILITIES 解析成功 → 原样转发 GUI（queued；消费接线在 main.cpp）。
     cb.onCapabilities = [this](const proto::CapabilitiesInfo& caps) {
+        // M7-G：缓存最近一次能力快照（向导可能在能力事件后打开，需自动前进）。
+        {
+            std::lock_guard<std::mutex> lk(capsMutex_);
+            lastCaps_ = caps;
+        }
         emit capabilitiesReceived(caps);
     };
     // M7-D2：PHYSICAL_PREVIEW 解析成功 → 写入预览模型（去重/过期在模型内）
@@ -689,6 +695,15 @@ void SerialWorker::sendWifiClear() {
     wifiQueue_.push_back(std::move(cmd));
 }
 
+bool SerialWorker::lastCapabilities(espview::proto::CapabilitiesInfo& out) const {
+    std::lock_guard<std::mutex> lk(capsMutex_);
+    if (!lastCaps_.has_value()) {
+        return false;
+    }
+    out = *lastCaps_;
+    return true;
+}
+
 void SerialWorker::clearWifiQueue() {
     std::lock_guard<std::mutex> lk(wifiMutex_);
     for (WifiCommand& cmd : wifiQueue_) {
@@ -720,6 +735,18 @@ void SerialWorker::drainWifiQueue() {
             if (cmd.kind == 0) {
                 msg = proto::makeWifiScanReq(0, cmd.maxEntries);
             } else if (cmd.kind == 1) {
+                // M7-G（B3，AF.4 凭据红线）：WIFI_CONFIG 只经 UART bootstrap
+                // 下发；TCP / 其他传输一律丢弃（密码副本随后清零），绝不发送
+                // 真实凭据。扫描/清除不携带凭据，任何传输均允许。
+                if (kind_ != TransportKind::kUart) {
+                    ++wifiDropped_;
+                    pushDiag(proto::Severity::kError, "wifi",
+                             "WIFI_CONFIG rejected: credentials are UART-bootstrap only");
+                    if (!cmd.password.empty()) {
+                        std::fill(cmd.password.begin(), cmd.password.end(), '\0');
+                    }
+                    continue;
+                }
                 msg = proto::makeWifiConfig(cmd.ssid, cmd.password, cmd.serverIp,
                                             cmd.serverPort);
             } else {
