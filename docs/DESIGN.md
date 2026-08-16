@@ -2675,3 +2675,157 @@ D6 不改 wire format；对 AF.2/AF.3/AF.4 冻结的协议内容零改动。
 - 本仓库 `docs/DESIGN.md`：AI 章节。
 - 回归：host 384,438 checks / 0 failures；i18n_test 1,889 checks /
   0 failures；Qt build PASS；ESP32 build PASS；ctest 通过（见 D6 commit）。
+## AJ. M7-E Power-Aware Wi-Fi Provisioning（2026-08-16 冻结）
+
+### AJ.1 问题观察（observed behavior，2026-08-16 真机 COM4/CH340 @ 115200）
+
+- 真实观测序列：`WIFI_SCAN_REQ` → ACK(OK)（~0.1s）→ Wi-Fi RF 上电
+  （`esp_wifi_init` PHY 校准 / `esp_wifi_start`）→ 部分复现 **CH340 USB 掉线**
+  （PC 侧 `ReadFile err=5`），少数复现 **ESP32 挂死**（无复位横幅、无 HELLO，
+  需手动复位）。
+- 另一个观测：扫描执行期间（RF 活动窗口）OLED I2C 刷新仍以 1Hz 节奏持续
+  进行（previewSlot 2Hz 上传同步活跃），与 RF 上电事件时间上重叠。M7-E 只
+  描述该重叠为 **观察到的事实**，不从中推出因果。
+- 本机制（扫描临界区挂起 OLED）的目标：把「RF 上电 + 持续 I2C 上传」的
+  并发电流/EMI 事件从时间轴上分离，作为可重复 A/B 实验变量。
+
+### AJ.2 根因假设（high-confidence hypothesis，尚未证实）
+
+- **假设 H（高可信，未证实）**：该板卡 + USB 供电链路在 Wi-Fi RF 上电
+  事件期间的瞬时电流需求（PHY 校准尖峰 + 持续 I2C 刷新）超过 USB 供电路径
+  余量，触发 CH340 掉线/ESP32 欠压挂死。
+- **明确声明：本假设并不等价于已证明 USB 供电不足。** 它只是对 AI.3 观测
+  的一种解释；AI.3 的「结论」措辞在本章起按「高可信假设，仍需 A/B 实验
+  确认」理解，不再视为已证实结论。可能同样成立的其他解释（未穷举）：
+  线材/接口接触、EMI 耦合、CH340 驱动行为、ESP32 复位源配置等。
+- M7-E 提供 A/B/C 实验机制（AJ.7）来检验 H 的可重复性；任何单次失败都不
+  得定义为「电源不足」。只有重复实验 + 供电充足环境的对照数据才能收敛结论。
+
+### AJ.3 OLED suspend/resume 语义（M7-E 冻结）
+
+- 新增 `OledState::kSuspendedForWifiScan = 5`（0..4 既有值不变）为**观察态**：
+  挂起是正交原子标志（`suspendedForWifiScan_`），不落生命周期 `state_`；
+  `status().state` 在挂起期间报告 `kSuspendedForWifiScan`（`kStopping`/
+  `kDisabled` 优先），恢复后自动回到 `kReady`/`kDegraded` 原生命周期。
+- `pauseForWifiScan()`（幂等）：任务运行中置挂起标志返回 true；任务未运行
+  no-op 返回 true（不设残留标志）。`resumeAfterWifiScan()`（幂等）：
+  `exchange(false)` 清除标志，返回本次调用前是否处于挂起。
+  `isSuspendedForWifiScan()` 供发送侧短路查询。
+- 挂起期间 `taskLoop` 跳过一切 I2C/provider/预览槽工作（I2C 流量 = 0，
+  仅休眠；`refreshCount` 不递增）；段级中止谓词（`!running_ || suspended`）
+  保证在途最多再发 1 段（≤32B）。挂起中止的上传/init 不记账、不触发
+  recover、不消耗恢复预算；应用帧中断恢复 dirty，恢复后只发最新帧。
+- 挂起**绝不**关闭/重建 I2C bus、绝不 double-release；挂起中 `stop()` 仍
+  安全退出（I2C 资源仍由任务退出路径释放）；`resumeAfterWifiScan` 在
+  OLED 已 stop 后调用为安全 no-op。
+- `PhysicalDisplaySink::isAvailable()` 在挂起态返回 false → DisplayRouter
+  扫描窗口短暂收敛 `kDegraded`，恢复后自动回 `kConnected`（自愈，不视为
+  错误状态）。
+
+### AJ.4 Wi-Fi scan transaction（ScanTransaction，shared/wifi）
+
+- 新增纯 C++17、零平台依赖状态机 `espview::wifi::ScanTransaction`
+  （`shared/wifi/scan_transaction.{h,cpp}`），ESP32 与 PC host 测试共用。
+- 相位：`kIdle → kPreparing → kDisplaySuspended → kScanning* → kCollecting
+  → kRestoring → kIdle`；终态 `kError` / `kDisconnected`（显示已恢复，可
+  重新 `begin()`；断线后不自动回 kIdle，需外部重新 begin）。`kScanning`/
+  `kCollecting` 为保留/瞬时相位。
+- 回调注入：`suspendDisplay`（返回 false = 暂停失败，不进入挂起）/ 
+  `resumeDisplay`；**核心不变量：一旦 suspend 成功，任何终态路径（成功/
+  失败/超时/断线）恰好调用一次 resumeDisplay**（double begin/double resume
+  幂等）。
+- 驱动接入（`esp32/components/espview/src/wifi_provisioning.cpp`，全部在
+  会话任务 `tick()` 上下文执行）：命令槽消费时 `begin()` → `startScan`
+  成功后 `onScanStarted(suspendDisplay())`（RF 上电前挂起）；SCAN_DONE 收集
+  完成 `onScanDone(ok)`；启动失败 `onScanStarted(false)`；10s 看门狗
+  `tick(nowMs, 10000)` 兜底（扫描卡死/被 `esp_wifi_stop` 中止/无 SCAN_DONE）。
+- 断线通知跨任务安全：`notifySessionDisconnected()` 可被 RX/传输任务调用，
+  只置原子挂起标志；事务终态转换由会话任务 `tick()` 消费执行（同一任务内
+  对事务的全部访问，无数据竞争）。
+
+### AJ.5 Physical Preview 协调
+
+- `sendPhysicalPreviewMessage()` 在 `isSuspendedForWifiScan()` 时整函数
+  跳过：挂起窗口 preview 字节流量 = 0，且 `frameId` 冻结（无空转递增）。
+- `previewSlot` 为单槽最新帧（seqlock）：挂起期间不 `store()`（槽冻结在
+  暂停前最后一帧，`valid_` 保持 true），恢复后第一次 `store()` 直接覆盖
+  （latest-wins），**无 backlog/队列**；PC 侧 frameId 单调判定
+  `(int16_t)(id-last)>0` 接受跨暂停续帧。
+- 恢复**不**调用 `previewSlot().reset()`（reset 只允许在会话
+  CONNECTED/DISCONNECTED，AE.3 语义不变）；恢复后发送由 2Hz 门 + 
+  kConnected 检查自时钟驱动。
+
+### AJ.6 Error recovery（帧级/事务级收口）
+
+- 扫描启动失败（`ensureWifiReady`/`esp_wifi_start`/`esp_wifi_scan_start`）：
+  `onScanStarted(false)` → kError（尚未挂起时恢复 no-op）。
+- 结果收集失败（`scan_get_ap_num`/malloc/`get_records`）：`onScanDone(false)`
+  → Restoring 恢复 → kError。
+- 扫描卡死/外部中止（applyConfig/applyClear/`esp_wifi_stop`/TCP close→
+  `wifi_.deinit()`）：10s 看门狗 `onTimeout()` 恢复。
+- 会话断线（任何相位）：`notifySessionDisconnected()` → tick 消费 →
+  `onDisconnect()` → kDisconnected + 恢复。
+- 双暂停/双恢复、stale `onScanDone`、时钟回拨（`nowMs < scanStartMs_`）均
+  为幂等/防御性 no-op；`kPreparing` 直接超时也走恢复（begin 内 suspend 已
+  成功，按不变量必须恢复）。
+- **OLED 永不永久停摆**：所有错误路径都收敛到恢复；恢复后再允许下一次
+  `begin()`。
+
+### AJ.7 A/B/C 硬件实验（scripts/espview_e_ab_harness.py）
+
+- mode A：`ESPVIEW_SCAN_SUSPEND_OLED=n` + `OLED_ENABLE=y`（老行为：扫描中
+  OLED 保持刷新）。
+- mode B：`ESPVIEW_SCAN_SUSPEND_OLED=y`（默认）+ `OLED_ENABLE=y`（M7-E
+  行为：扫描临界区挂起 OLED）。
+- mode C：`OLED_ENABLE=n`（OLED 禁用；RF 上电与显示并发为 0）。
+- 脚本流程：构建（白名单 %TEMP% sdkconfig override，文件名含内容 sha1）
+  → 烧录（`espview_flash.bat -b <profile> -p COM4 --no-reset`）→ DTR/RTS
+  复位 → HELLO 握手（PC HELLO 含 nameLen）→ `WIFI_SCAN_REQ`（ACK_REQ，
+  maxEntries=32）→ 记录 ACK/WIFI_STATUS/SCAN_RESULT + 收尾 3s 观察。
+- 记录字段：hello/ack/scan 时延、RSSI/channel 统计、OLED 状态与错误计数、
+  preview before/during/after（B 模式挂起期 preview 停发为 A/B 判别证据）、
+  UART 掉线/ReadFile 错误/重启横幅/CRC/协议错误。
+- 判定纪律：单次失败不定义为电源不足；`--strict` 把 ReadFile 错误/意外
+  重启/CRC 错误升级为 FAIL；退出码 0/1/2。结果默认仅 stdout，密码零参与。
+
+### AJ.8 Long-run 行为
+
+- 事务是每会话一次性结构：扫描完成/失败/超时/断线后回到 Idle/Error/
+  Disconnected，可重复扫描；不积累状态。
+- OLED 恢复后刷新节奏与错误恢复预算（ReinitPolicy）不受挂起周期影响
+  （挂起不记账、不消耗预算）；长时间运行无 drift。
+- 会话级重连（AE.3）与挂起正交：断线期间若扫描在途，事务经 onDisconnect
+  收敛；新会话握手重置 previewSlot/frameId，首帧无条件接受（既有语义）。
+
+### AJ.9 Security
+
+- 无 wire format 改动：Packet Header / CRC / Message layout / Frame 语义
+  全部不变；不新增任何协议字段。
+- 不引入凭据：挂起/恢复机制零 SSID/密码参与；WIFI_STATUS/SCAN_RESULT
+  字段不变；无密码日志、无明文持久化新增。
+- 向导只显示「显示临时暂停/已恢复」文案，杜绝「电源不足已证实」暗示
+  （i18n 测试断言新文案不含 power/insufficient/电源/电量/不足）。
+
+### AJ.10 Boundary
+
+- 本机制不等价于证明 USB 供电不足；不提供 OTA/LCD/Touch/TinyUSB/UDP/
+  mDNS/TLS/WebSocket/Cloud/multi-device/AP-outage 任何新增能力。
+- 不改 partition（2MiB app 不动）；不实现 TCP client 缺失相位
+  （kTcpConnecting/kTcpConnected/kServerUnreachable 仍为 D6 遗留）。
+- 不改 ACK/重试语义；ACK 仍只服务控制消息；TX 背压与整帧丢弃策略不变。
+- 生产默认 = mode B（`ESPVIEW_SCAN_SUSPEND_OLED=y`）；mode A/C 仅供 A/B
+  实验，不作为生产默认。
+
+### AJ.11 已实现（M7-E，2026-08-16）
+
+- `esp32/components/oled`：`kSuspendedForWifiScan` + 挂起/恢复 API + 段级
+  中止谓词 + 挂起中止不记账。
+- `shared/wifi/scan_transaction.{h,cpp}` + `tests/scan_transaction_test.cpp`：
+  事务状态机 + host 测试（192 checks）。
+- `esp32/components/espview`：事务接入 + 10s 看门狗 + `notifySessionDisconnected`
+  + Kconfig `ESPVIEW_SCAN_SUSPEND_OLED`（default y）。
+- `esp32/main/main.cpp`：回调注入 + preview 挂起跳过 + 断线通知。
+- `pc/src/wifi_wizard_dialog.*` + `pc/src/i18n.*`：扫描暂停/恢复文案。
+- `scripts/espview_e_ab_harness.py` + `scripts/README.md`：A/B/C 实验。
+- 回归：host 384,438 + 192 checks / 0 failures；ctest 2/2；Qt build PASS；
+  ESP32 uart_hw/oled_hw/oled_off/oled_diag 全 profile build PASS。
