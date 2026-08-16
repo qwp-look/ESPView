@@ -40,6 +40,10 @@
 > 0 CRC；TCP reconnect stress 10/10 OK（~2.0s/轮）；host 218,625 checks / 0 failures；
 > 生产固件 1,092,448 B（app 余量 48%）。wire format 不变。详见 Z 节。
 > **修订记录（M7-F, 2026-08-16）**：硬件路径判别 + Wi-Fi Provisioning 生产化。F1 win32_com_probe + boot 插桩判别实验（uart_hw 45s 无掉线 vs TCP/RF 固件 boot 期 CH340 掉线）→ boot 期掉线触发事件 = Wi-Fi RF 上电（高可信假设）；F2 事务硬化 / F3 wizard 硬化 / F4 per-profile sdkconfig 隔离；结论强度分级（Confirmed/High confidence/Hypothesis/Unknown），AI.3 / AG.2 措辞修订（含 AJ.8 实测结果修正声明）。wire format 不变。详见 AK 章。
+> **修订记录（M7-H CI/CD, 2026-08-16）**：GitHub Actions 分层 CI/CD 基础设施——
+> Layer 1 fast host CI / Layer 2 Windows+Qt CI / Layer 3 ESP32 build CI（容器 `espressif/idf:v6.0.2`）/
+> Layer 4 docs+security / tag 触发 release / 手动 hardware-smoke；security_scan + check_bat_crlf 静态检查；
+> 文档 docs/ci.md、badges；wire format 零改动。详见 AM 章。
 > **修订记录（M7-G, 2026-08-16）**：发布前最终化套件——G1 固件 provisioning/TCP handoff 硬化、G2 Wi-Fi 向导最终化（B1–B6 + TCP handoff 观察器 + 错误码 20–23）、G3 Display UI 最终化、G4 README 重写、G5 中文用户文档集、G6 工具链/profile 系统/check_docs + G1 硬件 harness、G8 开发者文档、G9 测试文档；G7 i18n / G10 检查器 / G11 验收 已收尾（证据与验收清单见 AL 章）。wire format 零改动。详见 AL 章。
 
 ---
@@ -3169,3 +3173,78 @@ G11 验收清单（本日全部执行，工作树含 M7-G 全部 13 个提交）
   错误码，不下发、不编码进任何协议字段。
 - TCP handoff 观察器 / Worker 快照（status、lastCapabilities）均为 PC
   进程内状态，零协议新增。
+
+### AM. CI/CD 基础设施（2026-08-16，M7-G 之后）
+
+> 本节记录 CI / verification implementation semantics（架构级事实），不复制
+> GitHub Actions YAML（实际 workflow 以 `.github/workflows/` 为准，用户文档见
+> `docs/ci.md`）。wire format 零改动（AL.14 延续）。
+
+#### AM.1 CI 分层模型
+
+| 层 | Workflow | 内容 | 硬件依赖 |
+|---|---|---|---|
+| Layer 1 | `fast-ci.yml` | shared/protocol host 测试（ubuntu + windows MSYS2）+ 静态检查（check_docs / security_scan / check_bat_crlf / YAML lint） | 无 |
+| Layer 2 | `windows-ci.yml` | Qt 6 构建 + offscreen autoclose 冒烟（windows-latest + MSYS2 MinGW64 + qt6-base/serialport） | 无 |
+| Layer 3 | `esp32-ci.yml` | ESP-IDF v6.0.2 容器（`espressif/idf:v6.0.2`）profile build（默认 uart/tcp/diagnostic；dispatch 可全量 9 profile） | 无（只 build，不 flash） |
+| Layer 4 | `docs-security.yml` | check_docs.py + security_scan.py + check_bat_crlf.py + workflow YAML lint（每次 PR 必跑） | 无 |
+| Release | `release.yml` | tag `v*`（或手动）触发全量非硬件验证 + firmware artifacts + GitHub Release | 无 |
+| Hardware | `hardware-smoke.yml` | 手动 `workflow_dispatch`，self-hosted Windows runner + ESP32 + COM；不参与 main gate | 真实硬件（opt-in） |
+
+#### AM.2 Hardware gate 边界
+
+- CI 只做 build/静态验证，**绝不 flash、绝不要求 COM/CH340/真 Wi-Fi/OLED**；
+  `CI passed ≠ hardware passed`。
+- 真实硬件验证是手工 gate（或未来 self-hosted runner）；当前 RF-ON 扫描期外置
+  CH340 掉线阻塞 Wi-Fi/TCP handoff 真机验证（AL.3，Observed/High confidence/
+  Hypothesis 分级），CI 文档与 README 一律按证据等级引用，禁止把 hypothesis
+  写成 confirmed。
+
+#### AM.3 host verification 语义
+
+- `scripts/verify_host.bat` = Layer 1 的 windows 本地等价物（MSYS2：ctest + 协议/
+  ByteQueue/TCP loopback/TransportConfig）；`scripts/verify_qt.bat` = Layer 2 本地
+  等价物（Qt 构建 + offscreen 冒烟命令）；`scripts/check_docs.py` 为文档检查器
+  （exit 0=clean）。CI 优先复用这些既有入口，不重新实现。
+
+#### AM.4 artifact policy
+
+- 命名：`espview-<profile>-<short-sha>.bin` / `bootloader-<profile>-<short-sha>.bin` /
+  `partition-table-<profile>-<short-sha>.bin`，随附 `SHA256SUMS.txt`。
+- 禁止上传：`sdkconfig`（含 per-profile sdkconfig）、日志、真实凭据、本机路径；
+  artifact 名不含 SSID/IP/password。release 只上传 firmware binaries + checksums +
+  文档归档 + release notes。
+
+#### AM.5 profile semantics（CI 视角）
+
+- CI 只使用 whitelisted profiles（`scripts/espview_profiles.py` 唯一真源：
+  uart/tcp/oled/oled-off/diagnostic/g1_a..g1_d；别名 uart_hw），且只以
+  `esp32/sdkconfig.defaults`（tracked、无凭据）为 seed——从不读取 untracked
+  `esp32/sdkconfig`（本机凭据所在）。
+- `scripts/espview_profile_sdkconfig.py --apply PROFILE --sdkconfig <abs> \
+  --seed-defaults esp32/sdkconfig.defaults` 之后 `idf.py -B build/<profile> \
+  -D SDKCONFIG=<abs> build`；Kconfig 凭据键默认空串（SSID/PASSWORD），保证 build
+  无凭据。profile 键白名单 + `FORBIDDEN_KEY_PARTS` 断言确保 CI 永不触碰凭据键。
+
+#### AM.6 credentials policy（CI）
+
+- CI 中禁止真实 SSID/password/API key/token/私钥/开发网段 IP；占位符只允许
+  `127.0.0.1`、文档网段（192.0.2.0/24、198.51.100.0/24、203.0.113.0/24）、
+  `<pc-lan-ip>` 式模板。Kconfig 默认占位地址与协议/UI 测试向量属于 generic
+  placeholder，由 `security_scan.py` 显式 allowlist 并注明理由（清单见该脚本
+  头注释）；真实开发网段永远禁止 allowlist。
+- 每个 workflow 完成即跑 credential scan；发现真实 secret 则 fail。
+- `esp32/sdkconfig` 与 `build/` 保持 gitignored；CI 只扫描 tracked 文件。
+
+#### AM.7 本地模拟 vs GitHub-only
+
+- 本地可模拟：host suite、Qt 构建 + offscreen 冒烟、check_docs、security_scan、
+  check_bat_crlf、workflow YAML 语法（PyYAML safe_load）。
+- GitHub-only：容器内 `espressif/idf:v6.0.2` 构建、workflow 触发/路径过滤、
+  badge 状态、artifact 保留、release 上传、workflow run 状态（`gh run` 查询）。
+
+#### AM.8 章节 checkpoint
+
+- CI 任务按逻辑章节独立 commit + push + clean（CI-1 架构+fast host → CI-2 Qt →
+  CI-3 ESP32 → CI-4 docs → CI-5 security → CI-6 release/artifacts → CI-7 README →
+  CI-8 全量验收）；每章完成后 `git status` clean 且 `origin/main == HEAD`。

@@ -113,6 +113,7 @@ git switch -c codex/m7-g8-docs upstream/main
   硬件验收记录（如有）。
 - 检查清单：host 全绿（`verify_host.bat`）✓、涉及 GUI/固件时对应构建过 ✓、无凭据/构建产物
   入库 ✓、wire format 变更已先更新 DESIGN.md ✓、Markdown LF ✓。
+- CI gate：见 §9（fast-ci / windows-ci / docs-security，esp32 相关 PR 加 esp32-ci）。
 - 不要在你的 PR 里夹带并行代理独占的文件（如其他代理正在维护的 `scripts/README.md`、
   `README.md`、docs 其他页面）——如需协作改动，先在 issue/任务里声明。
 
@@ -125,3 +126,28 @@ git switch -c codex/m7-g8-docs upstream/main
 - 章节完成后立即独立 commit + push + clean，方便主代理合并与下一章衔接。
 - 争议点（协议语义、profile 命名、文档结构）以主代理裁决与 DESIGN.md / scripts/README.md
   最新状态为准。
+
+## 9. CI / PR gate（GitHub Actions）
+
+仓库已接入 GitHub Actions CI，分层与触发矩阵详见 [docs/ci.md](ci.md)。CI 是**自动兜底**，
+**不是手工验证的替代品**；硬件验收仍是 manual gate（§4）。
+
+**提交 PR 前，至少在本机执行**（与改动相关的等价命令）：
+
+- `scripts\verify_host.bat` —— host 协议套件（shared/pc 改动必须全绿）
+- `scripts\verify_qt.bat` —— 涉及 Qt GUI 目标时
+- `py scripts\check_docs.py` —— 文档静态检查（引用 / 禁词 / 凭据模式）
+- `py scripts\security_scan.py` —— 凭据与私网地址扫描（随 CI 一并加入仓库，本地即可跑）
+
+**CI 自动运行**：
+
+- `fast-ci`：ubuntu + Windows MSYS2 host 测试 + 静态检查；
+- `windows-ci`：Qt 6 构建 + offscreen 自关闭冒烟（不连硬件）；
+- `docs-security`：check_docs / security_scan / check_bat_crlf / YAML lint，始终运行；
+- 命中 esp32 相关路径的 PR 追加 `esp32-ci`（`espressif/idf:v6.0.2` 容器内 9 个 profile 构建，
+  绝不 flash）。
+
+**host-only PR 不需要 ESP32 / CH340 / 真 Wi-Fi**：不要求 COM 口、不要求硬件；CI passed ≠
+hardware passed（RF-ON / CH340 硬件阻塞见 [docs/DESIGN.md](DESIGN.md) AL.3，真机 handoff 未闭环，
+不得宣称已验证）。CI 失败先按 [docs/ci.md](ci.md) §10 区分代码失败与环境失败，再决定修复
+代码还是重跑。

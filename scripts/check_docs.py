@@ -15,6 +15,15 @@ Checks (all local, no build / no hardware):
          CONFIG_ESPVIEW_WIFI_PASSWORD/SSID=, real private IPs (in scripts)
        - "已验证 / verified" claims with no findable evidence
   4. esp32/sdkconfig* must never be tracked by git.
+  5. docs cross-link validation: every markdown link in README.md and
+     docs/**/*.md with a relative file target must resolve to an existing
+     file or directory (http(s)://, mailto:, and #anchor-only skipped).
+  6. example-command scripts referenced inside docs code fences
+     (scripts\\xxx.bat / scripts\\xxx.py) must exist.
+  7. README CI badge URLs for .github/workflows/<file>.yml must reference
+     existing workflow files.
+  8. README Documentation index must link docs/ci.md and docs/README.md
+     (files must exist).
 
 Scope note: credential / IP patterns are checked on the *scripts* surface
 (scripts/**, README.md, docs/**). docs/DESIGN.md legitimately records test
@@ -42,6 +51,13 @@ from espview_profiles import PROFILES, ALIASES  # noqa: E402
 # ---------------------------------------------------------------------------
 TEXT_EXT = (".md", ".py", ".bat", ".ps1", ".c", ".cpp", ".h", ".hpp",
             ".cmake", ".txt", ".yml", ".yaml", ".json", ".ini")
+# Tool scripts are the checker's own machinery and CI/security helpers,
+# not documentation; they are excluded from the docs surface.
+TOOL_BASENAMES = frozenset((
+    "check_docs.py", "check_docs.bat",
+    "security_scan.py", "check_bat_crlf.py",
+    "ci_esp32_build.py", "ci_collect_artifacts.py",
+))
 
 
 def walk(root):
@@ -60,8 +76,8 @@ def docs_surface_files():
         root = os.path.join(REPO_ROOT, base)
         if os.path.isdir(root):
             for path in walk(root):
-                # the checker itself is the tool, not documentation
-                if os.path.basename(path) in ("check_docs.py", "check_docs.bat"):
+                # tool scripts are machinery, not documentation
+                if os.path.basename(path) in TOOL_BASENAMES:
                     continue
                 if path.lower().endswith(TEXT_EXT):
                     files.append(path)
@@ -79,6 +95,16 @@ def code_tree_files():
     return files
 
 
+def md_files():
+    files = [os.path.join(REPO_ROOT, "README.md")]
+    root = os.path.join(REPO_ROOT, "docs")
+    if os.path.isdir(root):
+        for path in walk(root):
+            if path.lower().endswith(".md"):
+                files.append(path)
+    return files
+
+
 def read_text(path):
     with open(path, "r", encoding="utf-8", errors="replace") as fh:
         return fh.read()
@@ -92,6 +118,7 @@ class Checker:
         self.issues = []
         self.doc_surface = docs_surface_files()
         self.code_tree = code_tree_files()
+        self.md_files = md_files()
         self.design_text = ""
         design = os.path.join(REPO_ROOT, "docs", "DESIGN.md")
         if os.path.isfile(design):
@@ -274,6 +301,101 @@ class Checker:
                             % line.strip()[:80])
 
 
+    # -- check 5: docs cross-links resolve to existing files/dirs --
+    def check_doc_links(self):
+        for path in self.md_files:
+            base_dir = os.path.dirname(path)
+            for lineno, line in enumerate(read_text(path).splitlines(), 1):
+                for m in re.finditer(r"\]\(\s*([^)\s]+)", line):
+                    raw = m.group(1)
+                    if raw.startswith(("http://", "https://", "mailto:",
+                                       "data:", "#")):
+                        continue
+                    target = raw.split("#", 1)[0].split("?", 1)[0]
+                    if not target:
+                        continue
+                    full = os.path.normpath(os.path.join(
+                        base_dir, target.replace("/", os.sep)))
+                    if not os.path.exists(full):
+                        resolved = os.path.relpath(full, REPO_ROOT)
+                        self.report(path, lineno,
+                                    "docs link target missing: %s -> %s"
+                                    % (target, resolved))
+
+    # -- check 6: example-command scripts in docs code fences --
+    def check_docs_script_refs(self):
+        for path in self.md_files:
+            if os.path.normcase(os.path.normpath(path)) == \
+                    os.path.normcase(os.path.normpath(os.path.join(
+                        REPO_ROOT, "README.md"))):
+                continue  # README.md handled by check 1
+            in_fence = False
+            for lineno, line in enumerate(read_text(path).splitlines(), 1):
+                if re.match(r"^\s*(?:```|~~~)", line):
+                    in_fence = not in_fence
+                    continue
+                if not in_fence:
+                    continue
+                for m in re.finditer(r"scripts[\\/]([\w.\-]+)", line):
+                    name = m.group(1)
+                    if not os.path.isfile(os.path.join(SCRIPTS_DIR, name)):
+                        self.report(path, lineno,
+                                    "docs code fence references missing "
+                                    "script: %s" % name)
+
+    # -- check 7: README CI badges must reference real workflows --
+    def check_ci_badges(self):
+        readme = os.path.join(REPO_ROOT, "README.md")
+        if not os.path.isfile(readme):
+            return
+        for lineno, line in enumerate(read_text(readme).splitlines(), 1):
+            for m in re.finditer(
+                    r"https://github\.com/qwp-look/ESPView/actions/"
+                    r"workflows/([A-Za-z0-9._\-]+\.ya?ml)/badge\.svg",
+                    line):
+                name = m.group(1)
+                full = os.path.join(REPO_ROOT, ".github", "workflows", name)
+                if not os.path.isfile(full):
+                    self.report(readme, lineno,
+                                "CI badge references missing workflow: %s"
+                                % name)
+
+    # -- check 8: README Documentation index links ci.md + README.md --
+    def check_doc_index(self):
+        readme = os.path.join(REPO_ROOT, "README.md")
+        if not os.path.isfile(readme):
+            return
+        required = ("docs/ci.md", "docs/README.md")
+        heading_lineno = 0
+        in_index = False
+        links = set()
+        for lineno, line in enumerate(read_text(readme).splitlines(), 1):
+            if re.match(r"^#+\s+Documentation index\s*$", line):
+                in_index = True
+                heading_lineno = lineno
+                continue
+            if in_index:
+                if re.match(r"^#+\s+", line):
+                    break
+                for m in re.finditer(r"\]\(\s*([^)\s]+)", line):
+                    target = m.group(1).split("#", 1)[0].split("?", 1)[0]
+                    if not target or target.startswith(("http", "mailto")):
+                        continue
+                    links.add(target.lstrip("./").replace("/", os.sep))
+        if heading_lineno == 0:
+            self.report(readme, 0,
+                        "README Documentation index section not found")
+            return
+        for req in required:
+            norm = req.replace("/", os.sep)
+            if norm not in links:
+                self.report(readme, heading_lineno,
+                            "README Documentation index must link %s" % req)
+            elif not os.path.isfile(os.path.join(REPO_ROOT, *req.split("/"))):
+                self.report(readme, heading_lineno,
+                            "README Documentation index links missing file: "
+                            "%s" % req)
+
 def main():
     c = Checker()
     c.check_readme_references()
@@ -281,6 +403,10 @@ def main():
     c.check_forbidden()
     c.check_git_sdkconfig()
     c.check_verified_claims()
+    c.check_doc_links()
+    c.check_docs_script_refs()
+    c.check_ci_badges()
+    c.check_doc_index()
     issues = c.issues
     if issues:
         for issue in issues:

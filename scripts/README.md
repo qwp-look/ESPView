@@ -17,6 +17,12 @@
 | `check_docs.bat` / `check_docs.py` | M7-G G10 静态文档检查（无构建、无硬件） | `--help` |
 | `espview_profile_sdkconfig.py` | Profile sdkconfig 管理器（白名单 + 隔离 + 防 drift） | `--list / --show / --check / --apply` |
 | `espview_profiles.py` | 白名单 / label 表 / Kconfig 键映射（唯一事实源） | 内部模块 |
+| `security_scan.py` | 凭据/secret 模式扫描（git tracked 文件；显式 allowlist 语义） | `--help`、`--list-allowlist` |
+| `check_bat_crlf.py` | 全部 tracked `.bat` 必须 CRLF（只报告，不重写） | `--help` |
+| `ci_esp32_build.py` | ESP32 profile 构建编排（CI 辅助，可选） | `--help` |
+| `ci_collect_artifacts.py` | release 产物收集/重命名 + SHA256SUMS（禁传 sdkconfig/日志） | `--help` |
+
+CI 分层与触发矩阵见 [docs/ci.md](../docs/ci.md)；workflow 位于 `.github/workflows/`。
 
 ## 快速上手
 

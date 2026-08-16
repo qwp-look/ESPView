@@ -23,6 +23,7 @@ travel back over the reverse link and drive LVGL on the device.
 - [The four display modes](#the-four-display-modes)
 - [The OLED (optional physical preview)](#the-oled-optional-physical-preview)
 - [Verification and testing](#verification-and-testing)
+- [Continuous integration](#continuous-integration)
 - [Screenshots](#screenshots)
 - [FAQ](#faq)
 - [Security and credential policy](#security-and-credential-policy)
@@ -282,9 +283,9 @@ See [docs/oled.md](docs/oled.md).
 
 ## Verification and testing
 
-| Entry | What it runs | Last measured (2026-08-16, HEAD `c48efcd`) |
+| Entry | What it runs | Last measured (2026-08-16, HEAD `faa4c194`) |
 | --- | --- | --- |
-| `scripts\verify_host.bat` | Protocol host suite + ctest + `transport_config_test` + `com3_frame_test --selftest-queue` + TCP loopback (127.0.0.1, no hardware) | **384,848 checks / 0 failures** (protocol 384,433; scan transaction 192; transport config 97; TCP loopback 126); ctest 2/2 passed |
+| `scripts\verify_host.bat` | Protocol host suite + ctest + `transport_config_test` + `com3_frame_test --selftest-queue` + TCP loopback (127.0.0.1, no hardware) | **384,965 checks / 0 failures** (protocol 384,531; scan transaction 211; transport config 97; TCP loopback 126); ctest 2/2 passed |
 | `scripts\verify_qt.bat` | Qt GUI target build (`espview_virtual_display.exe`) | ALL PASS |
 | `scripts\verify_lvgl.bat` | Host tests + ctest + ESP32 build via `idf.py` (+ optional COM sanity when `ESPVIEW_COM3` is set) | ALL PASS |
 | Hardware manual | 30-min TCP long-run, TCP reconnect stress 10/10, UART<->TCP runtime switch 20x20, PARTIAL/input chains | Recorded in [docs/DESIGN.md](docs/DESIGN.md) (V.7/V.9/W.6/X.10) |
@@ -293,6 +294,34 @@ The 30-minute long-run is a manual verification and is intentionally not part of
 the fast/offline CI. Hardware experiments (OLED A/B/C during Wi-Fi scans) run via
 `scripts\espview_e_ab_harness.py`; see [scripts/README.md](scripts/README.md).
 See [docs/testing.md](docs/testing.md) for the full matrix.
+
+## Continuous integration
+
+GitHub Actions runs the four core workflows on every push and pull request; the
+badges below link to the workflow pages.
+
+| Workflow | Badge |
+| --- | --- |
+| Fast host CI | [![fast CI](https://github.com/qwp-look/ESPView/actions/workflows/fast-ci.yml/badge.svg)](https://github.com/qwp-look/ESPView/actions/workflows/fast-ci.yml) |
+| Windows + Qt CI | [![Windows CI](https://github.com/qwp-look/ESPView/actions/workflows/windows-ci.yml/badge.svg)](https://github.com/qwp-look/ESPView/actions/workflows/windows-ci.yml) |
+| ESP32 build CI | [![ESP32 CI](https://github.com/qwp-look/ESPView/actions/workflows/esp32-ci.yml/badge.svg)](https://github.com/qwp-look/ESPView/actions/workflows/esp32-ci.yml) |
+| Docs + security | [![Docs + security](https://github.com/qwp-look/ESPView/actions/workflows/docs-security.yml/badge.svg)](https://github.com/qwp-look/ESPView/actions/workflows/docs-security.yml) |
+
+| Layer | What it runs | Never does |
+| --- | --- | --- |
+| Layer 1 -- fast host CI | Protocol host suite + ctest + transport tests + TCP loopback, offline and fast | Flash hardware; use real Wi-Fi |
+| Layer 2 -- Windows + Qt CI | Qt Virtual Display app build + GUI-side verification on Windows | Flash hardware; use real Wi-Fi |
+| Layer 3 -- ESP32 build CI | Firmware build via `idf.py` (production profile) | Flash hardware; use real Wi-Fi |
+| Docs + security | `scripts\check_docs.py` + credential/secret scans over docs and scripts | Flash hardware; use real Wi-Fi |
+| Release (tag-triggered) | Release artifact build and packaging on version tags | Flash hardware; use real Wi-Fi |
+| Manual hardware smoke | Human-run acceptance: 30-min long-run, reconnect stress, RF power-on checks | n/a -- deliberate exception: flashes hardware, uses real Wi-Fi |
+
+CI never substitutes for hardware validation -- see [docs/ci.md](docs/ci.md)
+and [docs/DESIGN.md](docs/DESIGN.md) (AL.3) for the hardware gate boundary. The
+RF power-on / CH340 blocker on the test rig (strongly correlated, physical
+mechanism a high-confidence hypothesis, hardware verification pending) does not
+gate automated CI, and CI does not claim Wi-Fi provisioning is
+hardware-validated.
 
 ## Screenshots
 
@@ -361,7 +390,7 @@ explicitly out of scope.
 ### Where is the protocol / architecture documentation?
 [docs/DESIGN.md](docs/DESIGN.md) (frozen protocol spec + milestone evidence,
 Chinese) and [docs/architecture-overview.md](docs/architecture-overview.md)
-(planned overview).
+(system architecture at a glance).
 
 ### How do I contribute?
 See [docs/contributing.md](docs/contributing.md) and
@@ -425,17 +454,19 @@ See [docs/security.md](docs/security.md).
 | [docs/input.md](docs/input.md) | Input reverse link (mouse/keyboard) |
 | [docs/troubleshooting.md](docs/troubleshooting.md) | Common problems and fixes |
 | [docs/testing.md](docs/testing.md) | Verification matrix and CI behavior |
+| [docs/ci.md](docs/ci.md) | CI workflows, layers, and the hardware gate boundary |
 | [docs/development.md](docs/development.md) | Build/development workflow |
 | [docs/contributing.md](docs/contributing.md) | Contribution guidelines |
 | [docs/security.md](docs/security.md) | Credential policy and threat model |
 | [docs/changelog.md](docs/changelog.md) | Release notes per milestone |
 | [docs/faq.md](docs/faq.md) | Frequently asked questions |
+| [docs/README.md](docs/README.md) | Docs landing page and index |
 | [scripts/README.md](scripts/README.md) | Build/flash scripts reference |
 
 ## Project status and roadmap
 
 **Status (honest):** Phase-1 v0.1 prototype. Milestones M0-M7-F are committed
-(HEAD `c48efcd`); the M7-G documentation milestone (this README + the per-topic
+(HEAD `faa4c194`); the M7-G documentation milestone (this README + the per-topic
 docs above) is in progress. The wire protocol has been frozen since M1-3C --
 subsequent milestones only add capabilities without changing existing messages.
 
@@ -470,3 +501,6 @@ See [docs/contributing.md](docs/contributing.md) and
 [docs/development.md](docs/development.md). In short: keep credentials out of
 any commit, run `scripts\verify_host.bat` before opening a change, and prefer
 small focused milestones.
+
+Before pushing, run `scripts\verify_host.bat`, `scripts\verify_qt.bat`, and
+`py scripts\check_docs.py` -- CI enforces the rest.

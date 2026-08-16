@@ -14,6 +14,11 @@ REM       (password=, WIFI_PASSWORD, CONFIG_ESPVIEW_WIFI_*),
 REM       real private IPs in scripts
 REM     - "verified" claims without findable evidence
 REM     - tracked esp32/sdkconfig* files
+REM     - docs/**/*.md + README.md markdown cross-links resolving to
+REM       existing files/dirs
+REM     - example-command scripts referenced in docs code fences
+REM     - README CI badge workflow references
+REM     - README Documentation index links (docs/ci.md, docs/README.md)
 REM
 REM   Exit codes: 0 clean / 1 issues found / 2 usage or IO error.
 REM   No build, no hardware, no network: safe to run any time.
@@ -46,6 +51,8 @@ exit /b 2
 echo.
 echo Usage: scripts\check_docs.bat
 echo   Runs scripts\check_docs.py (README/doc/script reference check,
-echo   capability evidence check, forbidden-pattern check).
+echo   docs cross-link check, example-command script check, CI badge
+echo   check, documentation index check, capability evidence check,
+echo   forbidden-pattern check).
 echo   Exit codes: 0 clean / 1 issues found / 2 usage or IO error.
 exit /b %ERR%

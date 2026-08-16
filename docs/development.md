@@ -1,11 +1,12 @@
 # ESPView — 开发者文档（Development）
 
 > 面向在 ESPView 仓库内**做开发与验证**的开发者（含并行子代理）。本文档只描述仓库
-> 当前真实状态（HEAD = `c48efcd`，M7-F）；协议与架构的**唯一权威**是
+> 当前真实状态（以 `git HEAD` 为准；当前里程碑 M7-G——发布前最终化 + GitHub Actions CI 落地中）；协议与架构的**唯一权威**是
 > [docs/DESIGN.md](DESIGN.md)，脚本用法以 [scripts/README.md](../scripts/README.md) 最新为准。
 >
 > 阅读路径：功能总览见 [../README.md](../README.md)（仓库根）；文档索引见
-> [docs/README.md](README.md)；协作规范见 [docs/contributing.md](contributing.md)。
+> [docs/README.md](README.md)；CI 分层与 PR gate 见 [docs/ci.md](ci.md)；协作规范见
+> [docs/contributing.md](contributing.md)。
 
 ## 1. Repository 结构
 
@@ -245,6 +246,23 @@ SCL=GPIO22，probe 地址 0x3C。
 
 **验收纪律**：硬件测试均为 manual（不进入普通 ctest）；结果必须在 DESIGN.md 对应章节记录
 （含证据文件目录，如 `build/m6a_png/`、`build/m6d_png/`、`build/m6e_png/`）。
+
+### 4.5 GitHub Actions CI（自动 gate）
+
+仓库已接入 GitHub Actions CI，分四层：`fast-ci`（ubuntu + Windows MSYS2 host 测试）、
+`windows-ci`（Qt 6 构建 + offscreen 自关闭冒烟）、`esp32-ci`（`espressif/idf:v6.0.2` 容器内
+profile 构建，绝不 flash）、`docs-security`（check_docs / security_scan / check_bat_crlf /
+YAML lint，始终运行）；另有 tag `v*` 触发的 `release.yml` 与手动 self-hosted 的
+`hardware-smoke.yml`。**分层模型、触发矩阵、PR gate、产物与凭据策略、本地模拟与故障排查
+全部见 [docs/ci.md](ci.md)**。本节只强调三点：
+
+- **构建/验证入口不变**：CI 只是自动兜底，本地仍跑 §3 / §4 的命令（`verify_host.bat` /
+  `verify_qt.bat` / `verify_lvgl.bat`）；CI 不做本地没有的事（除容器构建外）。
+- **CI passed ≠ hardware passed**：`esp32-ci` 只 build 不 flash、不要 COM、不要真 Wi-Fi；
+  真机验收仍是 §4.4 的 manual gate（RF-ON / CH340 阻塞见 DESIGN.md AL.3，禁止宣称已真机验证）。
+- **host-only PR 不需要 ESP32 / CH340 / 真 Wi-Fi**：无硬件也能提 PR；CI 红轮先按
+  docs/ci.md §10 区分代码失败与环境失败。
+
 ## 5. Profile 系统（固件构建目录）
 
 固件行为由 ESP32 Kconfig 决定；**profile = `esp32\build\<name>` 构建目录**，用 `-b <name>`
@@ -253,10 +271,9 @@ SCL=GPIO22，probe 地址 0x3C。
 
 命名约定（任务书 §19）：`uart`（UART 验收）、`tcp`（TCP / 生产）、`oled` / `oled-off`
 （OLED 开 / 关对照，M7-E A/B/C 实验所用配置差异）、`diagnostic`（诊断钩子）。
-**以 `scripts/README.md` 最新为准**——并行代理可能正在把脚本默认值与 profile 表更新到 §19
-命名；截至 HEAD `c48efcd`，仓库脚本默认 profile 为 `uart_hw`（UART 验收固件：
-`ESPVIEW_DEFAULT_MODE=2`、OLED、LVGL、TEST hooks），规划中的 profile 有 `tcp_production` /
-`dev_uart`。新 profile = menuconfig 配置后另建构建目录即可，脚本无需改动。
+**以 `scripts/README.md` 与 `git HEAD` 为准**——脚本默认值、别名与 profile 表可能随里程碑
+演进（当前默认 `uart_hw` 别名 → `uart`，UART 验收固件）；M7-G 硬件实验另设 `g1_a`–`g1_d`（G1
+A/B/C/D 矩阵，见 DESIGN.md AL.3）。新 profile = menuconfig 配置后另建构建目录即可，脚本无需改动。
 
 ## 6. 开发工作流与提交纪律
 

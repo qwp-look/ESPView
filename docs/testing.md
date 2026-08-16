@@ -246,6 +246,14 @@ Host 侧 OLED 测试（无硬件）：OledFb、命令/分段生成、恢复策�
 - `espview_e_ab_harness.py` / `wifi_provision_probe` 只发 `WIFI_SCAN_REQ`，密码零参与；SSID 视为非秘密 metadata。
 - 示例配置（占位符）见 `examples/sdkconfig.wifi-tcp.defaults.example`，禁止在其中写入真实凭据。
 
+## 8.5 CI（GitHub Actions）
+
+- 仓库 CI 分层：Layer 1 fast host CI（ubuntu + windows MSYS2 host 测试）、Layer 2 Windows+Qt CI（Qt 构建 + offscreen 冒烟）、
+  Layer 3 ESP32 build CI（容器 `espressif/idf:v6.0.2`，默认 uart/tcp/diagnostic，dispatch 可全量）、
+  Layer 4 docs+security（check_docs / security_scan / check_bat_crlf / YAML lint，每次 PR 必跑）。
+- CI 只做 build 与静态验证，绝不 flash、不要求 COM/CH340/真 Wi-Fi；`CI passed ≠ hardware passed`（硬件 gate 边界见 [docs/ci.md](ci.md) 与 DESIGN.md AL.3）。
+- 触发矩阵、PR gate、branch protection 建议、artifact 命名与凭据策略详见 [docs/ci.md](ci.md)。
+
 ## 9. 变更纪律
 
 - 本文件是仓库测试入口的权威索引；修改代码 / 脚本后请同步更新 §6 矩阵与 baseline 数字，并保持与 `docs/DESIGN.md` 各实测章节一致。
