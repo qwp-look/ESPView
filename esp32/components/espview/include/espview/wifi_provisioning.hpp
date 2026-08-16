@@ -172,6 +172,9 @@ private:
     // 扫描结果缓冲（tick 内填充/派发）。
     uint8_t scanMaxEntries_ = 32;  // 本次扫描 top-N（0=默认 32）
     bool scanDonePending_ = false;
+    uint8_t scanGen_ = 0;          // M7-F：扫描代际（每次 startScan 递增；SCAN_DONE 归属匹配）
+    uint8_t scanDoneGen_ = 0;      // M7-F：SCAN_DONE 记录时的代际（消费端须与 scanGen_ 一致）
+    bool scanDoneFailed_ = false;  // M7-F：SCAN_DONE status!=0（扫描被终止/失败，结果无意义）
     bool scanReady_ = false;
     uint8_t scanSeq_ = 0;
     bool scanTruncated_ = false;

@@ -492,6 +492,10 @@ void onWifiConfigRequest(uint8_t type, const std::vector<uint8_t>& payload, uint
         return;
     }
     if ((info.flags & kWifiConfigFlagClear) != 0) {
+        // M7-F：CLEAR 分支同样清零本地密码副本（正常报文密码段全零，防御）。
+        if (!info.password.empty()) {
+            std::memset(info.password.data(), 0, info.password.size());
+        }
         g_wifiProv.requestClear();
         g_endpoint.acknowledge(ackSeq, 0, ErrorCode::kNone);
         return;
