@@ -2,7 +2,7 @@
 //
 // 规范来源：任务书 §十四（词汇表）+ §二十二 11-14。
 // 目录结构：两个 locale 的 std::map<std::string,std::string>（key → 文案）：
-//   - enDict()：English（key 即英文原文，恒等映射）；
+//   - enDict()：English（key 即英文原文，恒等映射；M7-E 的 camelCase key 例外：英文文案单独给出）；
 //   - zhDict()：中文简体（任务书 §十四 词汇 + 四模式名 + M2/M4 状态面板用词）。
 // 未命中 key 回退英文原文（返回 key 本身）。模块无全局可变状态。
 
@@ -101,6 +101,17 @@ const std::map<std::string, std::string>& enDict() {
         {"IP address acquired", "IP address acquired"},
         {"ESP32 connected to the TCP server", "ESP32 connected to the TCP server"},
         {"Waiting for the first FULL frame", "Waiting for the first FULL frame"},
+        // ---- M7-E Power-Aware Wi-Fi Provisioning（扫描期间显示暂停 / 状态短语）----
+        //   camelCase key：英文文案单独给出（非恒等映射），zh 侧见 zhDict()。
+        {"preparingDisplay", "Preparing display"},
+        {"displayPausedForWifiScan", "Display paused for Wi-Fi scan"},
+        {"scanComplete", "Scan complete"},
+        {"scanFailed", "Scan failed"},
+        {"restoringDisplay", "Restoring display"},
+        {"wifiConnected", "Wi-Fi connected"},
+        {"tcpConnecting", "Connecting to TCP server"},
+        {"tcpConnected", "TCP connected"},
+        {"displayTemporarilyPausedDuringWifiScan", "Display temporarily paused during Wi-Fi scan"},
         // ---- M7-C 四显示模式名 ----
         {"Virtual Only", "Virtual Only"},
         {"Physical Only", "Physical Only"},
@@ -410,6 +421,16 @@ const std::map<std::string, std::string>& zhDict() {
         {"IP address acquired", "已获取 IP 地址"},
         {"ESP32 connected to the TCP server", "ESP32 已连接 TCP 服务器"},
         {"Waiting for the first FULL frame", "等待第一帧全帧"},
+        // ---- M7-E Power-Aware Wi-Fi Provisioning（扫描期间显示暂停 / 状态短语）----
+        {"preparingDisplay", "正在准备显示"},
+        {"displayPausedForWifiScan", "显示已暂停（Wi-Fi 扫描中）"},
+        {"scanComplete", "扫描完成"},
+        {"scanFailed", "扫描失败"},
+        {"restoringDisplay", "正在恢复显示"},
+        {"wifiConnected", "Wi-Fi 已连接"},
+        {"tcpConnecting", "正在连接 TCP 服务器"},
+        {"tcpConnected", "TCP 已连接"},
+        {"displayTemporarilyPausedDuringWifiScan", "Wi-Fi 扫描期间显示已临时暂停"},
         // ---- M7-C 四显示模式名 ----
         {"Virtual Only", "仅虚拟显示"},
         {"Physical Only", "仅物理显示"},

@@ -103,6 +103,10 @@ void WifiWizardDialog::buildUi() {
     auto* scanLay = new QVBoxLayout(scanPage);
     scanBtn_ = new QPushButton(tr_("Scan"), scanPage);
     scanLay->addWidget(scanBtn_);
+    scanStatusLabel_ = new QLabel(scanPage);
+    scanStatusLabel_->setWordWrap(true);
+    scanStatusLabel_->setAlignment(Qt::AlignCenter);
+    scanLay->addWidget(scanStatusLabel_);
     scanList_ = new QListWidget(scanPage);
     scanLay->addWidget(scanList_, 1);
     pages_->addWidget(scanPage);
@@ -240,11 +244,35 @@ void WifiWizardDialog::refreshUi() {
             break;
         case WizardStep::kScan:
             page = kPageScan;
-            setHint("Click Scan to search for nearby Wi-Fi networks");
+            setHint(scanInFlight_ ? "Scanning..."
+                                  : "Click Scan to search for nearby Wi-Fi networks");
             showBack = true;
             showNext = true;
             nextEnabled = state_.hasSsid();
             scanBtn_->setEnabled(!scanInFlight_);
+            // M7-E：扫描期间明确标注“显示临时暂停”，完成/失败后标注“显示已恢复”。
+            // 只显示契约允许的暂停/恢复文案，不显示任何未经证明的电源结论。
+            switch (scanDisplayState_) {
+                case ScanDisplayState::kIdle:
+                    scanStatusLabel_->setVisible(false);
+                    break;
+                case ScanDisplayState::kScanning:
+                    scanStatusLabel_->setVisible(true);
+                    scanStatusLabel_->setText(
+                        tr_("displayPausedForWifiScan") + QStringLiteral("\n") +
+                        tr_("displayTemporarilyPausedDuringWifiScan"));
+                    break;
+                case ScanDisplayState::kSucceeded:
+                    scanStatusLabel_->setVisible(true);
+                    scanStatusLabel_->setText(tr_("scanComplete") + QStringLiteral("\n") +
+                                              tr_("restoringDisplay"));
+                    break;
+                case ScanDisplayState::kFailed:
+                    scanStatusLabel_->setVisible(true);
+                    scanStatusLabel_->setText(tr_("scanFailed") + QStringLiteral("\n") +
+                                              tr_("restoringDisplay"));
+                    break;
+            }
             break;
         case WizardStep::kSelectSsid:
             page = kPageSelectSsid;
@@ -297,7 +325,14 @@ void WifiWizardDialog::refreshUi() {
         case WizardStep::kError:
             page = kPageError;
             {
-                QString msg = tr_(state_.error().i18nKey);
+                QString msg;
+                if (state_.error().code == WizardErrorCode::kScanFailed) {
+                    // M7-E：扫描失败 → 显示已恢复，可重试；不显示电源结论。
+                    msg = tr_("scanFailed") + QStringLiteral("\n") +
+                          tr_("restoringDisplay");
+                } else {
+                    msg = tr_(state_.error().i18nKey);
+                }
                 if (lastScanFirmwareUnsupported_) {
                     msg += QStringLiteral("\n") +
                            tr_("Firmware does not support Wi-Fi provisioning");
@@ -347,6 +382,7 @@ void WifiWizardDialog::populateScanList() {
 void WifiWizardDialog::startScan() {
     scanInFlight_ = true;
     lastScanFirmwareUnsupported_ = false;
+    scanDisplayState_ = ScanDisplayState::kScanning;
     scanEntries_.clear();
     populateScanList();
     setHint("Scanning...");
@@ -418,6 +454,7 @@ void WifiWizardDialog::onCancel() {
 }
 
 void WifiWizardDialog::onRetry() {
+    scanDisplayState_ = ScanDisplayState::kIdle;  // M7-E：重试回扫描页，恢复默认状态
     if (state_.retry()) {
         refreshUi();
     }
@@ -499,6 +536,7 @@ void WifiWizardDialog::onWifiScanResult(const espview::proto::WifiScanResultInfo
         scanEntries_.push_back(std::move(e));
     }
     scanInFlight_ = false;
+    scanDisplayState_ = ScanDisplayState::kSucceeded;
     populateScanList();
     refreshUi();
 }
@@ -506,6 +544,7 @@ void WifiWizardDialog::onWifiScanResult(const espview::proto::WifiScanResultInfo
 void WifiWizardDialog::onWifiScanReqAck(bool ok, quint16 errorCode) {
     scanInFlight_ = false;
     if (!ok) {
+        scanDisplayState_ = ScanDisplayState::kFailed;
         // AF.3 探针语义：ACK ERR kInvalidParam = 老固件不支持 Wi-Fi provisioning。
         lastScanFirmwareUnsupported_ =
             (errorCode == static_cast<quint16>(espview::proto::ErrorCode::kInvalidParam));

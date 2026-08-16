@@ -185,16 +185,49 @@ const RequiredEntry kRequired[] = {
     {"ESP %1 / host %2", "ESP %1 / 主机 %2"},
 };
 
+// M7-E Power-Aware Wi-Fi Provisioning：camelCase 标识 key。
+// 与既有词条不同，英文文案不是 key 本身，中英文案均单独钉死（见 [15]）。
+struct M7eEntry {
+    const char* key;
+    const char* en;
+    const char* zh;
+};
+
+const M7eEntry kM7e[] = {
+    {"preparingDisplay", "Preparing display", "正在准备显示"},
+    {"displayPausedForWifiScan", "Display paused for Wi-Fi scan", "显示已暂停（Wi-Fi 扫描中）"},
+    {"scanComplete", "Scan complete", "扫描完成"},
+    {"scanFailed", "Scan failed", "扫描失败"},
+    {"restoringDisplay", "Restoring display", "正在恢复显示"},
+    {"wifiConnected", "Wi-Fi connected", "Wi-Fi 已连接"},
+    {"tcpConnecting", "Connecting to TCP server", "正在连接 TCP 服务器"},
+    {"tcpConnected", "TCP connected", "TCP 已连接"},
+    {"displayTemporarilyPausedDuringWifiScan",
+     "Display temporarily paused during Wi-Fi scan",
+     "Wi-Fi 扫描期间显示已临时暂停"},
+};
+
 // 11. English 返回英文（key 即英文原文；未命中回退英文原文）。
 void test11English() {
     std::printf("[11] English returns English\n");
     for (const RequiredEntry& e : kRequired) {
         CHECK(std::strcmp(trText(UiLang::kEnglish, e.en), e.en) == 0);
     }
-    // 遍历全部 key：English 恒等于 key 本身
+    // 遍历全部 key：除 M7-E camelCase key 外，English 恒等于 key 本身
     for (const std::string& k : uiKeys()) {
+        bool isM7e = false;
+        for (const M7eEntry& e : kM7e) {
+            if (k == e.key) {
+                isM7e = true;
+                break;
+            }
+        }
+        if (isM7e) {
+            continue;
+        }
         CHECK(std::strcmp(trText(UiLang::kEnglish, k.c_str()), k.c_str()) == 0);
     }
+    // M7-E camelCase key 的英文文案：见 [15]（单独钉死）
     // 未命中 key → 英文原文（返回 key 本身）
     CHECK(std::strcmp(trText(UiLang::kEnglish, "no.such.key"), "no.such.key") == 0);
     CHECK(std::strcmp(trText(UiLang::kChinese, "no.such.key"), "no.such.key") == 0);
@@ -296,6 +329,36 @@ void test14AllKeysBothLanguages() {
 
 }  // namespace
 
+
+// 15. M7-E Power-Aware Wi-Fi Provisioning：9 个 camelCase key 的中英文案
+//     单独钉死（英文文案非恒等）；且文案只描述"显示临时暂停"，
+//     绝不暗示"电源不足已证实"。
+void test15M7eProvisioningCopy() {
+    std::printf("[15] M7-E provisioning keys bilingual and power-neutral\n");
+    const std::vector<std::string>& keys = uiKeys();
+    for (const M7eEntry& e : kM7e) {
+        CHECK(std::strcmp(trText(UiLang::kEnglish, e.key), e.en) == 0);
+        CHECK(std::strcmp(trText(UiLang::kChinese, e.key), e.zh) == 0);
+        bool found = false;
+        for (const std::string& k : keys) {
+            if (k == e.key) {
+                found = true;
+                break;
+            }
+        }
+        CHECK(found);  // key 必须在目录清单里（防缺词）
+        // 任务约束：不得暗示电源不足，只能描述显示临时暂停
+        CHECK(std::strstr(e.en, "power") == nullptr);
+        CHECK(std::strstr(e.en, "insufficient") == nullptr);
+        CHECK(std::strstr(e.zh, "电源") == nullptr);
+        CHECK(std::strstr(e.zh, "电量") == nullptr);
+        CHECK(std::strstr(e.zh, "不足") == nullptr);
+    }
+    // 长说明句必须是完整可读句子
+    CHECK(std::strlen(trText(UiLang::kEnglish, "displayTemporarilyPausedDuringWifiScan")) > 20u);
+    CHECK(std::strlen(trText(UiLang::kChinese, "displayTemporarilyPausedDuringWifiScan")) > 10u);
+}
+
 int main() {
     std::setvbuf(stdout, nullptr, _IONBF, 0);
     std::printf("== ESPView pc i18n host tests ==\n");
@@ -303,6 +366,7 @@ int main() {
     test12Chinese();
     test13LanguageSwitchIsPure();
     test14AllKeysBothLanguages();
+    test15M7eProvisioningCopy();
     std::printf("i18n_test: %d checks, %d failures\n", g_checks, g_failures);
     return g_failures == 0 ? 0 : 1;
 }

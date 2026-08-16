@@ -89,6 +89,15 @@ private:
     bool lastScanFirmwareUnsupported_ = false;
     bool tcpConnectedArmed_ = false;  // kTcpConnected 起等待第一帧完成 FULL resync
 
+    // M7-E：扫描页显示状态（扫描期间 OLED 显示临时暂停；完成/失败后恢复）。
+    enum class ScanDisplayState {
+        kIdle,       // 未在扫描（默认态）
+        kScanning,   // 扫描进行中：显示临时暂停
+        kSucceeded,  // 扫描完成：显示已恢复
+        kFailed,     // 扫描失败：显示已恢复（可重试）
+    };
+    ScanDisplayState scanDisplayState_ = ScanDisplayState::kIdle;
+
     // 页面控件
     QLabel* title_ = nullptr;
     QLabel* hint_ = nullptr;
@@ -98,6 +107,7 @@ private:
     QPushButton* cancelBtn_ = nullptr;
 
     QPushButton* scanBtn_ = nullptr;
+    QLabel* scanStatusLabel_ = nullptr;  // M7-E：扫描期间显示暂停/恢复状态
     QListWidget* scanList_ = nullptr;
     QComboBox* ssidCombo_ = nullptr;
     QLineEdit* passwordEdit_ = nullptr;
