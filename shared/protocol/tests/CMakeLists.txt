@@ -13,6 +13,11 @@ add_executable(espview_protocol_tests
     frame_pipeline_test.cpp
     protocol_endpoint_test.cpp
     endpoint_concurrency_test.cpp
+    ack_concurrency_test.cpp
+    endpoint_race_test.cpp
+    endpoint_lifecycle_test.cpp
+    endpoint_stress_test.cpp
+    deferred_control_test.cpp
     capabilities_test.cpp
     physical_preview_test.cpp
     wifi_provisioning_test.cpp
@@ -48,12 +53,13 @@ target_include_directories(espview_protocol_tests PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/../../../pc/src
 )
 
-# M7-B：GCC16 对 remote_display_test.cpp 的 -Warray-bounds 属编译器误报
-# （make_shared + std::function 析构链），仅对该文件单独抑制；不改测试逻辑。
-set_source_files_properties(../../display/tests/remote_display_test.cpp PROPERTIES COMPILE_OPTIONS "-Wno-array-bounds")
-
 if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
     target_compile_options(espview_protocol_tests PRIVATE -Wall -Wextra -Wpedantic)
+    # M7-B：GCC16 对 remote_display_test.cpp 的 -Warray-bounds 属编译器误报
+    # （make_shared + std::function 析构链），仅对该文件单独抑制；不改测试逻辑。
+    # M8-A2：加编译器判定（仅 GNU/Clang）——MSVC 的 cl 拒绝该参数（Curie F）。
+    set_source_files_properties(../../display/tests/remote_display_test.cpp PROPERTIES
+                                COMPILE_OPTIONS "-Wno-array-bounds")
 endif()
 
 add_test(NAME espview_protocol_tests COMMAND espview_protocol_tests)

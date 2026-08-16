@@ -57,7 +57,21 @@
 > RX 忽略 + `invalidAckReq` 计数）；T6 测试新增 byte_order/decoder_timeout/ack_req/
 > counting_allocator 并扩展 streaming/concurrency；T7 协议基准
 > （bench/protocol_bench，6 项 × 5 载荷 × 5 trials，结果 m8a1_baseline.csv）。
-> host 386,307 checks / 0 failures。详见 E/I/J 节。
+> host 386,307 checks / 0 failures（勘误：实测 386,576–386,578）。详见 E/I/J 节。
+> **修订记录（M8-A2, 2026-08-16）**：共享协议并发硬化（仅 shared/protocol；wire format 冻结零改动，
+> `protocol.h`/`crc32.*` 相对 fe0add7 为 0 diff）。ProtocolEndpoint 并发硬化：会话纪元 `sessionEpoch_`
+> （4 个 generation 边界 ++，无 wire 字段）识别跨会话 stale ACK/PONG/延迟控制；Deferred Control
+> 两单槽（helloSlot replace-if-present / capabilitiesSlot latest-wins）+ 主动 HELLO deferral +
+> 失败发送 seq 回退；disconnect/failSession 原子转换（D→S 与 RX 同序）+ failSession 幂等 +
+> `peerHello_`/`decoderResetPending_` 会话清理；8 个逐包计数器原子化（stats 快照合并）；
+> Callbacks 生命周期契约冻结 + `EndpointConfig::testHooks`（5 个锁外纯信号调用点）；
+> 确定性并发测试（ACK 六类竞态 R1-R6、CASE 1-10、生命周期、压测、Deferred Control）；
+> 删除死代码 `transmitImpl`；tests/CMakeLists 的 `-Wno-array-bounds` 加 GNU/Clang 判定（MSVC 可构建）。
+> host ≈387,17x checks / 0 failures（修复轮 2026-08-17：测试编排 flake 根因 = `Gate::open()`
+> lost-wakeup，已修复，见 AN.10）；bench `stream_encode` alloc_count=0、guards 行不变、
+> timing 最差 |Δ|≈1.9%（≤±15% 准则）；MinGW trap-UBSAN 3 轮（2 轮 0 失败，1 轮 4 个
+> CHECK 计数失败——根因为测试编排层 lost-wakeup，非实现缺陷，无 UB trap）；MSVC ASan 0 报告。
+> 详见 AN 章。
 
 ---
 
@@ -630,7 +644,7 @@ ESP32 物理触摸(未来) ─────────────────�
 - **tick 线程**：半包超时（500 ms）、心跳 PING、ACK 重试、对端超时判定等**决策**都在 `ProtocolEndpoint::tick()` 完成；不直接编码/发送大消息。
 - **发送调用线程**：`sendMessage/sendStreaming/acknowledge` → 编码（MessageEncoder）→ sink（Transport IO），由 `sendMutex_` 串行化。
 - **sink 重入禁止**：sink/trySink/source 回调内不得重入本端点的阻塞式 `sendMessage/sendMessageStreaming`（`sendMutex_` 不可重入 → 自死锁）；RX/回调路径的回复一律走 `tryTransmit`（锁忙返回 `kBackpressure`）。
-- **锁**：`sessionMutex_`（会话字段：state/pendingAck/stats/时间戳/pendingHello_/pendingCapabilities_ 等，短临界区，读取按值快照）、`decoderMutex_`（decoder_/frames_ 对象访问）。锁序不变量（真实边，非全序）：RX 路径 `decoderMutex_ → sessionMutex_`（feed 内回调可取 sessionMutex_）；TX 路径 `sendMutex_ → sessionMutex_`（发送实现内短状态快照；安全——从不持 sessionMutex_ 取 decoderMutex_，也不持 sessionMutex_ 阻塞等 sendMutex_，所有 session→send 路径均走 tryTransmit/try_lock）。`sessionMutex_` 持锁期间绝不调用用户回调（先取快照、释放锁再分发）；`failSession` 先完成 session 临界区、释放后再清理 decoder/frames。
+- **锁**：`sessionMutex_`（会话字段：state/pendingAck/stats/时间戳/pendingHello_/pendingCapabilities_ 等，短临界区，读取按值快照）、`decoderMutex_`（decoder_/frames_ 对象访问）。锁序不变量（真实边，非全序）：RX 路径 `decoderMutex_ → sessionMutex_`（feed 内回调可取 sessionMutex_）；TX 路径 `sendMutex_ → sessionMutex_`（发送实现内短状态快照；安全——从不持 sessionMutex_ 取 decoderMutex_，也不持 sessionMutex_ 阻塞等 sendMutex_，所有 session→send 路径均走 tryTransmit/try_lock）。`sessionMutex_` 持锁期间绝不调用用户回调（先取快照、释放锁再分发）；`failSession` 先完成 session 临界区、释放后再清理 decoder/frames（M8-A2 已改为 D→S 原子段/延后 reset，见 AN.3）。
 - **RX 路径非阻塞**：RX 线程的被动回复（HELLO、CAPABILITIES）改用 `tryTransmit`（单次尝试，背压立即返回），失败登记单槽 `pendingHello_/pendingCapabilities_`，由 `tick()` 排空（成功即清除，单槽无重复）。
 - 原子字段：`seq_`（SequenceCounter，relaxed）、`lastPeerRxMs_/lastDecoderRxMs_`、`inDecoderCallback_/decoderResetPending_`。
 
@@ -3299,3 +3313,263 @@ G11 验收清单（本日全部执行，工作树含 M7-G 全部 13 个提交）
 - CI 任务按逻辑章节独立 commit + push + clean（CI-1 架构+fast host → CI-2 Qt →
   CI-3 ESP32 → CI-4 docs → CI-5 security → CI-6 release/artifacts → CI-7 README →
   CI-8 全量验收）；每章完成后 `git status` clean 且 `origin/main == HEAD`。
+
+## AN. M8-A2 实现语义（ProtocolEndpoint 并发硬化，2026-08-16）
+
+> 范围：仅 `shared/protocol/`（`protocol_endpoint.{h,cpp}`、`encoder.h`）、
+> `shared/protocol/tests/`、`shared/protocol/bench/` 与本节文档。wire format 冻结：
+> `protocol.h` 相对 M8-A1（fe0add7）为 0 diff，`crc32.*` 不动，无新增 wire
+> 字段/flag/type。本节所有并发结论按「谁拥有 / 谁读写 / 什么锁」给出，
+> 不写空泛的 thread-safe 措辞。冻结范围遵循 I 节 M8-A1 线程归属的延续。
+
+#### AN.1 线程归属表（M8-A1 扩充，含 epoch）
+
+| 字段 | 读写线程 | 同步原语 | 说明 |
+|---|---|---|---|
+| `state_` | RX / tick / 发送调用线程 | `sessionMutex_` | 状态机单点转换见 AN.3；读按值快照 |
+| `sessionEpoch_` | 4 个 generation 边界（connect/disconnect/failSession/被动恢复）| `sessionMutex_` | 仅 ++，从不直接赋值；无 wire 字段 |
+| `sessionFailed_` | failSession 调用线程 | `sessionMutex_` | 幂等标记；connect/被动恢复时重新武装 |
+| `pendingAck_` | RX（handleAck 清）/ tick（重试）/ 发送线程（登记）| `sessionMutex_` | 单槽；字段含 `epoch`（登记时会话纪元）|
+| `pendingHello_` / `pendingCapabilities_` | RX / tick / 发送线程 | `sessionMutex_` | 单槽；epoch 边界全量清空；仅 tick 排空 |
+| `peerHello_` | RX（handleHello）/ tick（读取）| `sessionMutex_` | disconnect/failSession/被动恢复时清空 |
+| `stats_` 会话字段 | RX / tick / 发送线程 | `sessionMutex_` | 非逐包字段（tx*/rx 消息级、RTT、errors 等）|
+| `perPacket_`（8 计数器）| RX 回调线程 | 独立 `std::atomic<uint64_t>` | 无锁 relaxed 自增；stats() 快照合并（AN.8）|
+| `decoder_` / `frames_` | RX feed / tick（timeout/reset）/ failSession 非回调路径 | `decoderMutex_` | 所有访问路径均在 D 下；handleHello 隐式依赖见 AN.3 |
+| `seq_`（SequenceCounter）| 发送线程 / tick / RX 被动回复 | `std::atomic<uint16_t>`（relaxed）| M8-A2 新增非破坏读 `value()` 供失败回退 |
+| `lastPeerRxMs_` / `lastDecoderRxMs_` | RX / disconnect | 原子 | 心跳/半包超时基准 |
+| `lastPingMs_` / `connectMs_` / `lastPingSentAtMs_` / `lastPingEpoch_` | tick / RX（handlePong）| `sessionMutex_` | RTT 测量的纪元配对 |
+| `decoderResetPending_` | failSession 回调路径置位 / feed、tick、断开清理复位 | `sessionMutex_`（置位）+ `decoderMutex_`（复位）| 见 AN.3 |
+
+#### AN.2 会话纪元（sessionEpoch_）设计
+
+- 无 wire 字段；`uint64_t`，`sessionMutex_` 保护，仅 4 个 generation 边界 ++：
+  ① `onTransportConnected` ② `onTransportDisconnected` ③ `failSession`
+  ④ `handleHello` 被动恢复分支。**不在 `completeHandshake` 处 ++**。
+- 作用：区分跨会话的 stale 控制。seq 为 uint16 且握手/重连归零 → 跨会话
+  seq 复用是 wire 固有歧义（对端无法区分），epoch 只在本端识别：
+  - `PendingAck.epoch`：登记时的纪元；`handleAck` 仅当 `ackSeq==seq && epoch==sessionEpoch_`
+    才清槽并触发 onAck；stale/错配只 `++ackReceived`。
+  - `lastPingEpoch_`：PING 发出时捕获；`handlePong` 仅当与当前 epoch 一致才记录 RTT。
+  - drain/重试前捕获 epoch，transmit 前复查（`checkEpoch`）——旧会话控制绝不发进新会话。
+- 线程：epoch 永远在 `sessionMutex_` 临界区内读写；`++` 与状态转换同一临界区（AN.3）。
+
+#### AN.3 会话重置原子性（disconnect / failSession / 被动恢复）
+
+- **onTransportDisconnected**：一次 `decoderMutex_ → sessionMutex_` 原子段完成
+  「decoder/frames reset + `++sessionEpoch_` + 清 slots/pendingAck_/peerHello_ +
+  `decoderResetPending_=false` + RTT reset + seq 归零 + 状态转 Disconnected」，
+  与 RX feed 的锁序一致（D→S）；回调与 test hook 在锁外触发；
+  `lastPeerRxMs_/lastDecoderRxMs_` 同步 reset（Faraday：与 peerHello_ 同生命周期）。
+- **failSession 幂等**：`sessionFailed_` 在 `sessionMutex_` 下检查并置位，每会话至多
+  一次（`++errors` 一次、清理一次、回调一次）；connect/被动恢复重新武装。
+  - 非回调路径：持 D→S 原子段直接 reset decoder/frames。
+  - 回调路径（feed 内已持 D，不可重入 reset）：只做 S 段，置
+    `decoderResetPending_=true`，由下一次 feed/tick 的 D 临界区执行 reset。
+- **被动 HELLO 恢复分支**（handleHello 收到对端 HELLO）：`++epoch`、清
+  `decoderResetPending_`、自 reset decoder/frames（在 feed 持有的 D 临界区内）、
+  清 slots/pendingAck_/peerHello_ + RTT reset——与主动重连同等的会话换代语义。
+- **D→T blocking 边禁止**：绝不在持 D 时阻塞获取 `sendMutex_`；HELLO 回复一律走
+  deferred 路径（tryTransmit 内 `try_lock`）。
+- `decoder_/frames_` 全部访问路径均在 `decoderMutex_` 下：feed/reset/onTimeout/
+  onMessage/onStreamError/查询；`handleHello` 对 decoder/frames 的隐式依赖
+  （调用方持 D）在代码中以注释标明。
+- 4 个 epoch 边界全量清空两个槽 + `pendingAck_` + `decoderResetPending_`
+  （Faraday：防延迟 reset / 延迟控制打进新会话）。
+
+#### AN.4 Deferred Control（两单槽，无通用 FIFO）
+
+- 保持 `pendingHello_`、`pendingCapabilities_` 单槽（有界：每类 ≤1；payload
+  ≤ ~100B），不做通用 FIFO（Banach 结论：控制面串行 v0.1 下两槽足够）。
+- **主动 HELLO deferral**：`sendHello` 先 try-first（非阻塞），非 `kOk` 进入
+  helloSlot；tick 在 Connecting/Handshake 排空后 `completeHandshake()`。
+- 合并策略：helloSlot **replace-if-present**（同会话至多 1 份）；
+  capabilitiesSlot **latest-wins**；ACK/PONG 永不入队（现状保持）。
+- 排空只在 tick：Connecting/Handshake 排 hello 后 return；Connected 排
+  capabilities。每 tick 每槽**至多一次** tryTransmit，绝不循环。
+- **compare-and-clear**：排空成功后仅当槽仍持有同一消息（type+payload，且 epoch
+  未变）才清槽并 `++txHello/txCapabilities`（防 Ampere 单槽 lost update——
+  排空窗口内被新消息替换则保留新槽，等待下个 tick）。
+- **seq 回退**（M8-A2 HIGH-1 修订）：失败发送不消耗未上送 seq——回退在
+  `sendMutex_` 临界区内执行（`transmitImplWithSink` / `transmitStreamingImpl` 的
+  失败分支），短 `sessionMutex_` 临界区按 epoch 复查，只回退到已上送包数之后
+  （`seqBefore + sentCount`，sink 返回 kOk 才算已上送）；epoch 已换代则跳过
+  （换代路径已重置 seq）。延迟重发从同一 seq 编码，落在对端当前基线；否则对端
+  reset 后基线 0，seq>0 的 HELLO 被判 seq gap 丢弃，握手永不完成。外部调用点
+  （`sendHello` / `sendCapabilities` / 被动恢复回复 / 两个 drain）不再自行
+  `seq_.reset`。
+- 排空前 epoch+state 复查：`drainPendingHello` 要求 epoch 未变且 state ∈
+  {Connecting, Handshake}；`drainPendingCapabilities` 要求 Connected；不满足则
+  放弃本次排空（槽由 generation 边界清空，绝不把旧会话控制发进新会话）。
+
+#### AN.5 ACK 并发（pendingAck_ 生命周期 + R1-R6 + epoch 防护）
+
+- `pendingAck_` 单槽生命周期：sendMessage 成功登记（`afterSend`，若
+  `state_==kDisconnected` 跳过登记——Faraday 场景 2）→ tick 到期重试 → ACK 匹配
+  清空 → 会话边界清空。
+- **tick 重试**：到期捕获 seq+epoch；发送前在 `sessionMutex_` 下复查槽仍存在且
+  epoch+seq 未变（MED-2，收窄 handleAck 已清槽后仍重复重发的窗口——S 不能跨 T
+  持锁，复查与 tryTransmit 之间残余极小窗口：重复控制至多一次）；`attempts /
+  ackRetries` 递增并入 `afterSend` 重试登记守卫分支（MED-1）——仅在
+  `pendingAck_->epoch==retryEpoch && pendingAck_->seq==retrySeq` 时更新
+  seq/deadline 并 `++attempts / ++ackRetries`（防 Faraday「重试覆盖新 slot」：
+  handleAck 已清槽 / 对端新 sendMessage 换槽 / disconnect+reconnect 换代 均不
+  更新；同会话同消息换槽同样不被旧重试误增——epoch+seq 是槽身份的充分判据）。
+- **handleAck 语义收紧**（相对 M8-A1 的"无条件 onAck"）：仅当
+  `ackSeq==pendingAck_->seq && epoch==sessionEpoch_` 才清槽并触发 onAck；
+  stale/错配只 `++ackReceived`。既有测试（ack_req_test / protocol_endpoint_test）
+  的 ACK 场景均为匹配场景，无需改断言。
+- R1-R6 竞态覆盖（`ack_concurrency_test.cpp`，断言精确 ackSent/ackReceived/
+  ackRetries/ackFailures/onAck 次数）：
+  | 编号 | 竞态 | 断言要点 |
+  |---|---|---|
+  | R1 | tick 与 ACK deadline 边界（499/500/501ms）| 到期恰好一次重试；未到期不重试 |
+  | R2 | ACK 处理与 disconnect 在途（两种顺序）| ACK 先到 → 清槽后 disconnect 不复活 pending；disconnect 先到 → 迟到 ACK 只计数 |
+  | R3 | ACK + reconnect 旧 ACK / 重试与新 slot 竞争 | 「重试不覆盖新 slot」仅对 epoch 换代/不同消息成立；同会话同消息换槽由 afterSend 的 epoch+seq 守卫防误增 attempts；旧 ACK 不触发 onAck |
+  | R4 | duplicate ACK（pending 已清）| 只 `++ackReceived`，onAck 不二次触发 |
+  | R5 | wrong ackSeq | pending 保留、不回调、tick 继续重试 |
+  | R6 | stale ACK 跨会话 seq 复用 | epoch 不匹配只计数；新会话 live pending 仍正常配对 |
+  | R7（MED-1）| 同会话同消息换槽 + 旧重试在途（sinkHold）| 新槽 attempts/ackRetries 不被旧重试误增、保留完整重试预算（`ack_retry_does_not_corrupt_replaced_slot_attempts`）|
+
+#### AN.6 回调生命周期契约 + 锁外回调
+
+- **Callbacks 契约**（`protocol_endpoint.h` 头注释，违反 = UB）：
+  1. 引用/指针仅在回调调用期间有效，禁止缓存：onFrameRect/onPhysicalPreview 的
+     像素指针、onError/onProtocolError 的 string_view、onAckRequest 的 payload、
+     onOtherMessage 的 Message、所有按引用传入的结构体——回调返回后即失效。
+  2. Callbacks 构造时一次性注入，无运行时替换 API；空 std::function = 未订阅。
+  3. 销毁序：先 quiesce（停止 onTransportData/onTransportConnected/
+     onTransportDisconnected/tick/send* 并发调用）并关闭 transport，再销毁
+     endpoint；不得在回调可能并发执行时销毁。
+  4. 回调内禁止重入任何取 decoderMutex_/sendMutex_ 的公开 API：
+     onTransportData/onTransportConnected/onTransportDisconnected/tick/
+     frameStats（decoderMutex_ 不可重入 → 自死锁）；阻塞式 sendMessage/
+     sendMessageStreaming/sendError（sendMutex_ 不可重入 → 自死锁）。
+  5. RX 路径回调内发回复只能走 tryTransmit 系（PONG/ACK/HELLO），不得阻塞。
+  6. 回调不得长时间阻塞（RX/tick 线程停滞会饿死对端 5s 超时判线）。
+- **`EndpointConfig::testHooks`**（默认全空 std::function；test-only，生产不得
+  设置）：5 个调用点，全部位于内部锁外、纯信号（不携带数据、不返回值）、禁止
+  重入 endpoint——onTickStateSnapshot（tick 状态快照后）、onTickBeforeFail
+  （tick failSession 前）、onDisconnectCleared（断开清理完成后——含 decoder reset 后）、
+  onFeedEnter（onTransportData 取 decoderMutex_ 前）、onConnectEnter
+  （onTransportConnected 取锁前）。用途：确定性并发测试的线程编排。
+
+#### AN.7 锁序
+
+- 真实边（非全序）：RX feed / disconnect / failSession 非回调路径
+  **D→S**；`transmitImplWithSink` 内 **T→S 短读**（状态快照，绝不持 T 再取 D）；
+  `tryTransmit` 内 **T 用 try_lock**（锁忙返回 kBackpressure，绝不阻塞）。
+- 禁止边：**S→D**（不持 sessionMutex_ 取 decoderMutex_）、**S→T 阻塞**（不持
+  sessionMutex_ 阻塞等 sendMutex_——所有 session→send 路径均走
+  tryTransmit/try_lock）、**D→T 阻塞**（见 AN.3）。
+- `sessionMutex_` 持锁期间绝不调用用户回调（先取快照、释放锁再分发）；
+  failSession 回调路径只做 S 段、decoder reset 延后（AN.3）。
+
+#### AN.8 Stats 快照语义 + 原子逐包计数器
+
+- 8 个逐包计数器（packetsRx / crcErrors / seqGaps / chunkErrors / badMagic /
+  badVersion / badHeader / decoderErrors）移入独立 `perPacket_` 原子块：RX 回调
+  线程 relaxed 无锁自增（热路径不再取 sessionMutex_）；`stats()` 在
+  `sessionMutex_` 下把原子块合并进 SessionStats 副本按值返回。
+- **公共字段与 API 不变**：SessionStats 仍是值语义快照，无新字段、无引用返回。
+- `handlePong` 的两段 sessionMutex_ 合并为一段（rtt.record 是内部聚合，非用户
+  回调，可持锁执行）。
+- 热路径禁止：动态分配、长锁、IO、日志、每包字符串（错误路径每会话一次的
+  std::string 保留）。
+- **快照一致性**：`stats()` 快照对每个计数器单独读取，单计数器单调不减；
+  跨计数器不做强一致保证（读取顺序内的瞬时偏斜是允许的）。ESP32 32 位下
+  `std::atomic<uint64_t>` 可能退化为内部锁（慢但正确），PC x64 上无锁。
+
+#### AN.9 确定性并发测试策略（CASE 1-10 + ACK R1-R6 + 生命周期 + 压测）
+
+- 基础设施：`test_sync.h`（Gate 原子旗标+等待、TestBarrier mutex+condvar、
+  LockedQueue 互斥+condvar 队列；C++17 无 barrier/latch；TestBarrier/CountGate
+  当前未被引用——保留作后续确定性测试原语，见文件注释）；
+  `endpoint_harness.h`（CoordinatedHarness：A=PC / B=ESP32 两个真实
+  ProtocolEndpoint + LockedQueue 收发 + 受控时钟（单写者=tick 线程）+
+  blockSink 原子开关 + 角色线程（RX feeder / ticker / app sender / stats
+  reader / lifecycle），主线程为 conductor；`stopAll()` 先放闸门再 join）。
+- CASE 1-10（`endpoint_race_test.cpp`，精确 interleaving，全部无死锁/无看门狗
+  超时）：
+  | 编号 | 场景 | 覆盖 |
+  |---|---|---|
+  | 1 | tick+RX ACK 两种顺序 | 重试与 ACK 竞争，attempts 不误增 |
+  | 2 | disconnect+ACK 在途 | stale ACK 只计数 |
+  | 3 | HELLO+tick handshake timeout 两种顺序 | 超时 failSession 与被动恢复竞争 |
+  | 4 | PING+PONG+disconnect 两种顺序 | stale PONG 不污染 RTT |
+  | 5 | CAPABILITIES pending+disconnect | 槽清空、不重发 |
+  | 6 | decoder reset+onTransportData 两种顺序 | deferred reset 与 feed 竞争 |
+  | 7 | decoder callback+failSession+同 feed 被动恢复 | 回调内 fail 延后 reset、恢复换代 |
+  | 8 | stats snapshot+counter 单调性 | 快照合并无回绕 |
+  | 9 | reconnect+stale deferred control | 旧槽不进入新会话 |
+  | 10 | 两路控制事件并发 | SET_MODE ACK 与 PING 互不干扰 |
+- HIGH-1 专项（`endpoint_race_test.cpp` `high1_drain_fail_concurrent_send_no_seq_gap`）：
+  capabilities drain 失败一次 + 并发 app sender 成功发送的交错——断言对端 `decoderErrors==0`、
+  `seqGaps==0`、payload 校验和完整（直接覆盖「失败发送不消耗未上送 seq」）。
+- 生命周期（`endpoint_lifecycle_test.cpp`，5 例）：quiesce 后销毁、disconnect+
+  pending 控制不再 pump、reconnect 后 peerHello_ 重置、shared_ptr/weak_ptr
+  mock transport 生命周期、在途 RX 回调先 join 后销毁。
+- 压测（`endpoint_stress_test.cpp`，真线程多角色，结果可判定）：
+  bulk 控制面 10,000 条（payload 校验和）、PING/PONG 50 轮、ACK 往返 2,000 次、
+  重连 20 轮；C8/L1/S1/S3 每阶段 30s 硬看门狗，S2/S4 为 conductor 顺序驱动（无
+  看门狗）；终态断言（精确包计数、seqGaps==0 间接覆盖 seq 单调、decoderErrors==0、
+  Connected、rtt.samples==rxPong、无悬挂 pending、结尾一轮 SET_MODE 往返；
+  无显式 epoch 断言——epoch 是内部实现，经槽清理/不重发断言间接覆盖）。
+- Deferred Control（`deferred_control_test.cpp`，5 例）：hello replace/drain
+  恰好一次、hello disconnect 清空、capabilities latest-wins、capabilities
+  disconnect 清空、合并后结尾一轮成功 SET_MODE 往返（无永久 pending）。
+
+#### AN.10 sanitizer 实测结论（2026-08-16 本机）
+
+- **MinGW trap-UBSAN**（可行）：`cmake -S shared/protocol -B build/a2_ubsan_trap
+  -DCMAKE_BUILD_TYPE=Release -DCMAKE_CXX_FLAGS="-fsanitize=undefined
+  -fsanitize-trap=undefined -Wall -Wextra -Wpedantic"` 后构建跑 tests。
+  实测 3 轮：2 轮 0 failures（≈387,17x checks，运行间 ±2–9 计数波动，源于 oled_preview_test）；1 轮 4 个 CHECK 计数失败——根因是
+  测试编排层并发原语的 lost-wakeup（见下），全程 **无任何 UB trap**。结论：无未定义行为。
+- **测试编排 flake 根因（M8-A2 修复轮，2026-08-17）**：C8/L1 的精确计数失败
+  （`rxMessages 1 vs 501` 签名）根因是 `test_sync.h` `Gate::open()` 的 lost-wakeup：
+  open() 在无锁下置位 `open_` 并 notify，与 wait() 的持锁检查谓词→进入等待存在
+  竞态窗口——open 置位+notify 可能在等待者进入等待队列之前发出，唤醒丢失 → 等待者
+  直到 30s 超时才返回；此时 sender 才发送，而 feeder 已随 stopAll 停止，接收端
+  精确计数失败（复现率 ~3–10%，Gate 压力测试 5000 轮 6 次 ≥50ms 延迟）。修复：
+  open()/close() 持锁更新 `open_`（锁外 notify，condition_variable 标准用法）。
+  修复后：Gate 压力测试 5000 轮 0 延迟；C8 场景诊断 300 轮 0 失败；host tests
+  5 轮全绿且总时长由 ~150s/轮降至 ~4s/轮（此前每轮含多个 30s Gate 超时等待）。
+  feeder 空闲退出（pop 超时）为次要问题，也已一并修复（feeder 只在 stop 信号下
+  退出），保留。
+- **MinGW 全量 ASan**：不可行——MinGW64 发行版缺 libasan 运行时，g++ 全量 ASan
+  链接/运行均不可用（实测 build/a2_asan 仅有配置产物、无可执行文件）。不作为
+  本机路径。
+- **MSVC ASan**（可行，Agent F 命令）：vcvars64 环境 →
+  `cmake -S shared/protocol -B build/a2_msvc_asan2 -G "NMake Makefiles"
+  -DCMAKE_BUILD_TYPE=Release -DCMAKE_CXX_FLAGS="/fsanitize=address /O1 /Zi /utf-8"`
+  → build → tests + bench 均以 `ASAN_OPTIONS=detect_leaks=0` 运行。实测：tests
+  `checks: 387138, failures: 0`，
+  0 条 AddressSanitizer 报告；bench guards 行与 release 完全一致（dispatches=1360
+  commits=1360 discards=0 errors=0）、stream_encode alloc_count=0。第 8 条 CMake
+  小修（`-Wno-array-bounds` 加 GNU/Clang 判定）后 remote_display_test.cpp 在 MSVC
+  下正常编译。
+- **TSAN**：Windows 不支持（无 runtime + 平台线程模型差异），本机不可行；文档化
+  保留，Linux CI 未来补充。
+- **CI 主路径建议**：Linux `gcc/clang -fsanitize=address,undefined
+  -fno-omit-frame-pointer -O1 -g`（Layer 1 fast CI 扩展），Windows 用 MSVC ASan
+  按上述命令作为补充；TSAN 待 Linux runner 后补。
+
+#### AN.11 benchmark guard（M8-A2 对比 M8-A1 新鲜基线）
+
+- `stream_encode` 各 payload alloc_count 全部为 0（base/new 一致；
+  message_encode/decoder_feed/frame_assembly 的分配为既有设计行为，不在 guard）。
+- guards 行不变：`dispatches=1360 commits=1360 discards=0 errors=0`。
+- timing：base/new 各 3 轮新鲜重跑取 median，最差 |Δ| ≈ 1.9%
+  （153600B，1,048,576B 为 1.6%，其余 ≤0.4%）——≤±15% 对比准则成立。
+  64KB+ 载荷有运行噪声，对比以新鲜重跑基线为准。
+
+#### AN.12 边界与语义收紧声明
+
+- wire format 0 修改：`git diff fe0add7 -- shared/protocol/protocol.h
+  shared/protocol/crc32.h shared/protocol/crc32.cpp` 为空；ACK_REQ 白名单、
+  ACK 超时/重试参数、trySink 语义、错误码与消息族均未改动。
+- 语义收紧（本阶段明确）：onAck 仅匹配（seq+epoch）才回调；失败发送不消耗未上送
+  seq——回退在 sendMutex_ 临界区内、按 epoch 复查、只回退到已上送包数之后
+  （seqBefore+sentCount）；drain 失败不清槽。既有测试断言无冲突（全部匹配场景）。
+- 与 M8-A1 文档的差异：I 节 M8-A1 线程归属表由本节 AN.1/AN.3/AN.7 扩充；
+  E 节协议语义与 J 节基准不变。

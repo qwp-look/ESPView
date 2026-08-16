@@ -49,6 +49,9 @@ public:
         return seq_.fetch_add(1, std::memory_order_relaxed);
     }
 
+    // 非破坏性读取当前值（M8-A2：延迟发送失败回退用——失败尝试不得推进对端基线）。
+    uint16_t value() const { return seq_.load(std::memory_order_relaxed); }
+
     // 复位（DESIGN.md 连接状态机：HANDSHAKE 阶段双方 packet.seq 清零）。
     // 由会话层（ProtocolEndpoint）在握手完成/重连时调用。
     void reset(uint16_t initial = 0) { seq_.store(initial, std::memory_order_relaxed); }
