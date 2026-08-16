@@ -2788,6 +2788,36 @@ D6 不改 wire format；对 AF.2/AF.3/AF.4 冻结的协议内容零改动。
 - 判定纪律：单次失败不定义为电源不足；`--strict` 把 ReadFile 错误/意外
   重启/CRC 错误升级为 FAIL；退出码 0/1/2。结果默认仅 stdout，密码零参与。
 
+### AJ.7b A/B/C 实测结果（2026-08-16，外置 USB-SERIAL CH340 COM4 @ 115200）
+
+- 实验条件：用户已更换为**外置** USB-SERIAL CH340 模块（COM4，非板载
+  CH340）；ESP32 UART0 @ 115200 直连该模块，DTR→GPIO0、RTS→EN 已接线
+  （复位脉冲可正常触发 ESP32 复位并收到 ROM banner）。
+- 工具链验证（本轮完成）：`espview_e_ab_harness.py --build --flash
+  --modes C` 端到端跑通 —— mode_c 全量构建 PASS（1,427 targets；app
+  1,121,872 B，2 MiB factory 分区余 47%）；烧录经修复后的 esptool 直调
+  命令（`--after no-reset` 置于 write-flash 之前，绕过 idf.py
+  --extra-args 在 esptool 5.3.1 下的参数顺序限制）PASS，写后 hash 校验
+  通过。
+- 观测结果（observed behavior；mode_b 与 mode_c 共 ≥7 次独立 boot）：
+  - **所有 boot 均触发 CH340 USB 掉线**：复位释放 EN 后 ESP32 正常启动
+    （可收到 `boot:0x13` ROM banner），随后 app 初始化期（~0.5–1.5s）
+    CH340 USB 链路断开（PC 侧 `ReadFile err=5` /
+    `ClearCommError PermissionError 5`）。
+  - 掉线后 COM4 重新枚举、close+reopen 可恢复句柄；但 ESP32 对被动
+    PC HELLO 无响应（Win32 无复位探针 12s 窗口零响应），且未观察到
+    brownout 复位循环横幅 —— 与 D6 AI.3「欠压挂死」记录一致。
+  - mode_c（OLED=n）与 mode_b（OLED=y）掉线行为相同 → boot 期掉线与
+    OLED 刷新无关；mode_a 与 mode_b 的 boot 配置相同（OLED=y），预期
+    行为一致。
+  - **扫描期 A/B/C 对比在当下硬件上不可达**：全部模式止步于 boot+握手
+    阶段，未进入 WIFI_SCAN_REQ；无法取得扫描期判别数据。
+- 判定纪律：以上为 observed behavior，不构成「电源不足已证实」；与
+  AI.3/AJ.2 高可信假设一致（USB 供电路径瞬态余量不足）。推荐硬件路径：
+  带供电 USB HUB / 外接 5V 供电 / 换回板载 CH340 / 优质线材。供电改善后
+  可直接复用本 harness 完成扫描期 A/B/C 对比（`--modes A,B,C`，
+  B/C 无需重新构建，mode_a 需先 `--build`）。
+
 ### AJ.8 Long-run 行为
 
 - 事务是每会话一次性结构：扫描完成/失败/超时/断线后回到 Idle/Error/
