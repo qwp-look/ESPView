@@ -28,3 +28,12 @@ __pycache__/
 *.bak
 *.orig
 *.rej
+
+# Private key / secret material (defense-in-depth)
+*.pem
+*.key
+*.p12
+*.pfx
+*.crt
+*.der
+*.env

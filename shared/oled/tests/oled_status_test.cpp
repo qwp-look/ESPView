@@ -266,7 +266,7 @@ void statusRenderLines() {
     s.transportType = 1;              // TCP
     s.transportConnected = true;
     s.sessionState = 1;               // CONN
-    std::snprintf(s.ip, sizeof(s.ip), "192.168.3.15");
+    std::snprintf(s.ip, sizeof(s.ip), "192.0.2.15");
     s.apInfoValid = true;
     s.rssi = -55;
     s.channel = 6;
@@ -281,7 +281,7 @@ void statusRenderLines() {
     // 8 行布局（每行 8px，行内逐字符逐列位模式精确匹配）。
     CHECK(rowMatches(fb, 0, "ESPView"));
     CHECK(rowMatches(fb, 8, "TCP CONN"));
-    CHECK(rowMatches(fb, 16, "IP 192.168.3.15"));
+    CHECK(rowMatches(fb, 16, "IP 192.0.2.15"));
     CHECK(rowMatches(fb, 24, "RSSI -55 CH 6"));
     CHECK(rowMatches(fb, 32, "FRM 123456"));
     CHECK(rowMatches(fb, 40, "ERR 7"));
