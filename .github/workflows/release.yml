@@ -169,6 +169,7 @@ jobs:
 
       - name: Build firmware (idf.py)
         working-directory: esp32
+        shell: bash
         run: |
           set -euo pipefail
           . "$IDF_PATH/export.sh" >/dev/null
@@ -176,6 +177,7 @@ jobs:
 
       - name: Verify build artifacts
         working-directory: esp32
+        shell: bash
         run: |
           set -euo pipefail
           . "$IDF_PATH/export.sh" >/dev/null
