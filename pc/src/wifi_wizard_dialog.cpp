@@ -16,6 +16,7 @@
 #include <QPushButton>
 #include <QSpinBox>
 #include <QStackedWidget>
+#include <QTimer>
 #include <QVBoxLayout>
 
 namespace espview {
@@ -33,6 +34,11 @@ constexpr int kPageTcpConfig = 6;
 constexpr int kPageAsync = 7;
 constexpr int kPageDone = 8;
 constexpr int kPageError = 9;
+
+// M7-F：异步步看门狗（超时收敛，禁止向导挂死；数值为保守上界）。
+constexpr int kScanWatchdogMs = 20000;   // 扫描：固件看门狗 10s + 余量
+constexpr int kApplyWatchdogMs = 60000;  // Apply→Wi-Fi→TCP：DHCP 上限 + 握手余量
+constexpr int kResyncWatchdogMs = 20000; // TCP 已连 → 首帧 FULL resync
 
 // IPv4 点分十进制 → 网络序 u32（AF.2 期望网络序）。输入已经过
 // WifiWizardState 严格校验（恰好 4 段、每段 1..3 位数字、0..255），
@@ -73,6 +79,11 @@ WifiWizardDialog::WifiWizardDialog(ConnectionManager& manager, QWidget* parent)
             [this](const espview::proto::WifiStatusInfo& s) { onWifiStatus(s); });
     connect(&manager_, &ConnectionManager::frameReady, this,
             [this](const DisplayFrame& f) { onFrameReady(f); });
+
+    // M7-F：异步步看门狗（单发；startWatchdog 重启、stopWatchdog 停）。
+    watchdogTimer_ = new QTimer(this);
+    watchdogTimer_->setSingleShot(true);
+    connect(watchdogTimer_, &QTimer::timeout, this, &WifiWizardDialog::onWatchdogTimeout);
 }
 
 void WifiWizardDialog::buildUi() {
@@ -387,6 +398,7 @@ void WifiWizardDialog::startScan() {
     populateScanList();
     setHint("Scanning...");
     manager_.sendWifiScanRequest(0);  // maxEntries 0 = 默认 32
+    startWatchdog(kScanWatchdogMs);   // M7-F：扫描超时收敛（固件挂死/掉线不挂 UI）
     refreshUi();
 }
 
@@ -406,7 +418,47 @@ void WifiWizardDialog::applyConfig() {
     }
     manager_.sendWifiConfig(state_.ssid(), state_.password(), serverIpNet,
                             static_cast<uint16_t>(state_.tcpServerPort()));
-    clearSecrets();  // 密码副本立即清零（AG.3；state 的 password_ 已由 beginApply 清除）
+    // M7-F：sendWifiConfig 消费后立即清除密码（AG.3/AF.4；原实现把清除放在
+    // beginApply 内，导致发送时密码已为空——WPA2 实际下发空密码）。
+    state_.clearPassword();
+    clearSecrets();  // UI 副本（QLineEdit）同样立即清零
+    startWatchdog(kApplyWatchdogMs);  // M7-F：Apply 链超时收敛
+    refreshUi();
+}
+
+void WifiWizardDialog::startWatchdog(int ms) {
+    if (watchdogTimer_ != nullptr) {
+        watchdogTimer_->start(ms);
+    }
+}
+
+void WifiWizardDialog::stopWatchdog() {
+    if (watchdogTimer_ != nullptr) {
+        watchdogTimer_->stop();
+    }
+}
+
+void WifiWizardDialog::onWatchdogTimeout() {
+    if (state_.step() == WizardStep::kScan && scanInFlight_) {
+        // 扫描无结果/无 ACK 超时 → 扫描失败（显示已恢复，可重试）。
+        scanInFlight_ = false;
+        scanDisplayState_ = ScanDisplayState::kFailed;
+        state_.markError(WizardErrorCode::kScanFailed);
+    } else if (state_.isApplying()) {
+        // M7-F：按当前异步步给出诚实错误——kGotIp 之后是 TCP handoff 问题
+        // （Wi-Fi 已连接），之前是 Wi-Fi 连接问题。
+        const WizardStep step = state_.step();
+        WizardErrorCode code = WizardErrorCode::kWifiConnectFailed;
+        if (step == WizardStep::kGotIp) {
+            code = WizardErrorCode::kTcpHandoffFailed;
+        } else if (step == WizardStep::kTcpConnected || step == WizardStep::kFullResync) {
+            code = WizardErrorCode::kFullResyncFailed;
+        }
+        state_.markError(code);
+    } else {
+        return;  // 已离开异步步（防御）
+    }
+    clearSecrets();
     refreshUi();
 }
 
@@ -449,6 +501,12 @@ void WifiWizardDialog::onBack() {
 }
 
 void WifiWizardDialog::onCancel() {
+    stopWatchdog();
+    // M7-F：异步步取消 = 撤销已下发的配置（WIFI_CLEAR fire-and-forget，
+    // 固件侧 applyClear 清凭据/断开）；编辑阶段无设备状态可清。
+    if (state_.isApplying()) {
+        manager_.sendWifiClear();
+    }
     clearSecrets();
     reject();
 }
@@ -521,10 +579,43 @@ void WifiWizardDialog::onStatusChanged(WorkerStatus status, const QString& text)
     if (status == WorkerStatus::Connected && state_.step() == WizardStep::kConnectUart) {
         state_.next();
         refreshUi();
+        return;
+    }
+    // M7-F：传输层 Error / 异步期间断线必须收敛（禁止向导永久卡死）。
+    if (status == WorkerStatus::Error) {
+        stopWatchdog();
+        if (state_.step() == WizardStep::kConnectUart) {
+            // UART 打不开/设备丢失 → 明确“bootstrap 不可用”，不伪装成密码错误。
+            state_.markError(WizardErrorCode::kUartBootstrapUnavailable);
+        } else if (state_.isApplying()) {
+            state_.markError(WizardErrorCode::kUartConnectFailed);
+        } else {
+            return;
+        }
+        clearSecrets();
+        refreshUi();
+    } else if (status == WorkerStatus::Disconnected && state_.isApplying()) {
+        // 异步步期间会话断线：不再等待（看门狗同义，立即失败）。
+        stopWatchdog();
+        state_.markError(WizardErrorCode::kUartConnectFailed);
+        clearSecrets();
+        refreshUi();
     }
 }
 
 void WifiWizardDialog::onWifiScanResult(const espview::proto::WifiScanResultInfo& result) {
+    // M7-F：迟到的旧扫描结果（同 scanSeq 重复/覆盖）直接忽略；且仅在扫描/
+    // 选择页消费，避免覆盖用户已浏览的后续步骤 UI。
+    if (scanSeqValid_ && result.scanSeq == lastScanSeq_) {
+        return;
+    }
+    if (!scanInFlight_ && state_.step() != WizardStep::kScan &&
+        state_.step() != WizardStep::kSelectSsid) {
+        return;
+    }
+    scanSeqValid_ = true;
+    lastScanSeq_ = result.scanSeq;
+    stopWatchdog();  // M7-F：扫描完成
     scanEntries_.clear();
     for (const espview::proto::WifiScanRecordInfo& rec : result.records) {
         ScanEntry e;
@@ -542,6 +633,7 @@ void WifiWizardDialog::onWifiScanResult(const espview::proto::WifiScanResultInfo
 }
 
 void WifiWizardDialog::onWifiScanReqAck(bool ok, quint16 errorCode) {
+    stopWatchdog();  // M7-F：ACK 已回（成功/失败都收敛）
     scanInFlight_ = false;
     if (!ok) {
         scanDisplayState_ = ScanDisplayState::kFailed;
@@ -559,6 +651,7 @@ void WifiWizardDialog::onWifiConfigAck(bool ok, quint16 errorCode) {
         state_.markConnecting();
     } else {
         state_.markError(WizardErrorCode::kApplyFailed);
+        clearSecrets();
     }
     refreshUi();
 }
@@ -575,6 +668,7 @@ void WifiWizardDialog::onWifiStatus(const espview::proto::WifiStatusInfo& status
             if (state_.step() == WizardStep::kGotIp) {
                 state_.markTcpConnected();
                 tcpConnectedArmed_ = true;
+                startWatchdog(kResyncWatchdogMs);  // M7-F：等待首帧 FULL resync
                 refreshUi();
             }
             break;
@@ -582,7 +676,18 @@ void WifiWizardDialog::onWifiStatus(const espview::proto::WifiStatusInfo& status
             if (state_.step() == WizardStep::kConnecting ||
                 state_.step() == WizardStep::kGotIp ||
                 state_.step() == WizardStep::kTcpConnected) {
-                state_.markError(WizardErrorCode::kWifiConnectFailed);
+                stopWatchdog();
+                // M7-F：按 errorCode 细分——认证/AP/DHCP 属 Wi-Fi 失败，
+                // kServerUnreachable 属 TCP handoff 失败（诚实区分）。
+                const auto err = static_cast<espview::proto::ErrorCode>(status.errorCode);
+                WizardErrorCode code = WizardErrorCode::kWifiConnectFailed;
+                if (err == espview::proto::ErrorCode::kDhcpTimeout) {
+                    code = WizardErrorCode::kNoIpReceived;
+                } else if (err == espview::proto::ErrorCode::kServerUnreachable) {
+                    code = WizardErrorCode::kTcpHandoffFailed;
+                }
+                state_.markError(code);
+                clearSecrets();
                 refreshUi();
             }
             break;
@@ -600,12 +705,17 @@ void WifiWizardDialog::onFrameReady(const DisplayFrame& frame) {
         tcpConnectedArmed_ = false;
         state_.markFullResync();
         state_.markDone();
+        stopWatchdog();  // M7-F：全链路完成
         clearSecrets();
         refreshUi();
     }
 }
 
 void WifiWizardDialog::closeEvent(QCloseEvent* event) {
+    stopWatchdog();
+    if (state_.isApplying()) {
+        manager_.sendWifiClear();  // M7-F：关闭即取消未完成配置
+    }
     clearSecrets();
     QDialog::closeEvent(event);
 }

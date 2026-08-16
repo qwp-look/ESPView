@@ -176,6 +176,9 @@ public:
     void sendWifiScanRequest(uint8_t maxEntries);
     void sendWifiConfig(const std::string& ssid, const std::string& password,
                         uint32_t serverIp, uint16_t serverPort);
+    // M7-F：WIFI_CLEAR（取消/关闭向导时撤销已下发配置；无凭据，AF.4）。
+    // 与 sendWifiConfig 同队列；仅经 UART bootstrap 下发。
+    void sendWifiClear();
 
     // M7-C4 P1-2：当前传输会话 epoch（跨线程安全）。每次 runLoop 入口递增；
     // GUI 以此丢弃旧会话 stale 帧（switchTransport 后的残帧）。
@@ -286,7 +289,7 @@ private:
     // ---- M7-D3：Wi-Fi 命令队列（GUI → Worker；互斥保护）----
     // 密码只驻留命令副本内存，发送后立即清零（AF.4）。
     struct WifiCommand {
-        uint8_t kind = 0;  // 0=scan 1=config
+        uint8_t kind = 0;  // 0=scan 1=config 2=clear
         uint8_t maxEntries = 0;   // scan：0=默认 32
         std::string ssid;         // config：1..32 字节
         std::string password;     // config：secret（发送后清零）

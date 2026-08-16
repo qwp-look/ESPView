@@ -61,6 +61,8 @@ public:
     void sendWifiScanRequest(uint8_t maxEntries);
     void sendWifiConfig(const std::string& ssid, const std::string& password,
                         uint32_t serverIp, uint16_t serverPort);
+    // M7-F：WIFI_CLEAR 透传（取消/关闭向导时撤销已下发配置；仅 UART 下发）。
+    void sendWifiClear();
     // M7-C4 P1-2：当前传输会话 epoch（透传 worker 计数器）。
     uint64_t sessionId() const { return worker_.sessionId(); }
 

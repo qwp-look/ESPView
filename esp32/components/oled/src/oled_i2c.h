@@ -4,6 +4,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 
 #include "driver/i2c_master.h"
 #include "esp_err.h"
@@ -24,6 +25,9 @@ public:
     // 创建 master bus（i2c_port=-1 自动；enable_internal_pullup=1）。幂等。
     esp_err_t init();
     // 扫描 0x08..0x77；优先 0x3C/0x3D，否则首个响应；无响应返回 0。
+    // M7-F：中止谓词（如 OLED 挂起/停止）——每次探测前检查，置位立即返回 0
+    // （调用方按“无设备”处理 → 挂起窗口内 I2C 流量≈0）。
+    void setAbortPredicate(std::function<bool()> pred);
     uint8_t probe();
     // 挂载设备（7-bit raw 地址 + scl_speed_hz）。需先 init()。
     esp_err_t addDevice(uint8_t addr);
@@ -42,6 +46,7 @@ private:
     i2c_master_bus_handle_t bus_ = nullptr;
     i2c_master_dev_handle_t dev_ = nullptr;
     uint8_t address_ = 0;
+    std::function<bool()> abort_;  // M7-F：探测中止谓词（可选）
 };
 
 }  // namespace oled

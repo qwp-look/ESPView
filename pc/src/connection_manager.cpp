@@ -71,5 +71,9 @@ void ConnectionManager::sendWifiConfig(const std::string& ssid, const std::strin
     worker_.sendWifiConfig(ssid, password, serverIp, serverPort);
 }
 
+void ConnectionManager::sendWifiClear() {
+    worker_.sendWifiClear();
+}
+
 }  // namespace pc
 }  // namespace espview

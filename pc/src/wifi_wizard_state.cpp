@@ -4,6 +4,8 @@
 
 #include "wifi_wizard_state.h"
 
+#include <algorithm>
+
 namespace espview {
 namespace pc {
 
@@ -121,6 +123,10 @@ const char* wizardErrorKey(WizardErrorCode code) {
             return "TCP connection failed";
         case WizardErrorCode::kFullResyncFailed:
             return "Full resync failed";
+        case WizardErrorCode::kUartBootstrapUnavailable:
+            return "UART bootstrap unavailable";
+        case WizardErrorCode::kTcpHandoffFailed:
+            return "TCP handoff failed (Wi-Fi connected)";
         case WizardErrorCode::kNone:
             break;
     }
@@ -339,9 +345,16 @@ bool WifiWizardState::beginApply() {
         return false;
     }
     step_ = WizardStep::kApplying;
-    // 密码仅在 Apply 前驻留内存：Apply 成功后立即清除。
-    password_.clear();
+    // M7-F：不再在此清除密码（发送方消费后经 clearPassword() 清除）。
     return true;
+}
+
+void WifiWizardState::clearPassword() {
+    if (password_.empty()) {
+        return;
+    }
+    std::fill(password_.begin(), password_.end(), '\0');
+    password_.clear();
 }
 
 bool WifiWizardState::markConnecting() {

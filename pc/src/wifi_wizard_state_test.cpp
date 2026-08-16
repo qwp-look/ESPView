@@ -359,8 +359,12 @@ void testApplyLocksEditing() {
     CHECK(!s.cancel());
     CHECK(!s.retry());
 
-    // 密码在 Apply 成功后已清除（仅在 Apply 前驻留内存）
+    // M7-F：beginApply 不再清除密码（发送方消费后调 clearPassword）；
+    // 此处显式验证 clearPassword 的安全擦除语义。
+    CHECK(s.password() == kValidPassword);
+    s.clearPassword();
     CHECK(s.password().empty());
+    s.clearPassword();  // 幂等（空密码 no-op）
 }
 
 void testApplyFlowToDone() {
@@ -429,7 +433,9 @@ void testErrorRecovery() {
         CHECK(s.retry());
         CHECK_EQ(static_cast<int>(s.step()), static_cast<int>(WizardStep::kTcpConfig));
         CHECK(s.isEditable());
-        // 重新输入密码后可再次 Apply（密码已在首次 Apply 清除）
+        // M7-F：密码保留到 clearPassword（重试无需重新输入；clearPassword 幂等）
+        CHECK(s.password() == kValidPassword);
+        s.clearPassword();
         CHECK(s.password().empty());
         CHECK(s.setPassword(kValidPassword));
         CHECK(s.beginApply());

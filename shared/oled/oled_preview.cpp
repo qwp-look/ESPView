@@ -26,13 +26,13 @@ bool OledPreviewSlot::snapshot(uint8_t* out1024, uint16_t& outFrameId) {
     if (!copySlot(out1024)) {
         return false;
     }
-    outFrameId = frameId_++;
+    outFrameId = frameId_.fetch_add(1, std::memory_order_relaxed);
     return true;
 }
 
 void OledPreviewSlot::reset() {
     valid_.store(false, std::memory_order_release);
-    frameId_ = 0;      // frameId 归零（AE.3：握手重置 frameId/清槽）
+    frameId_.store(0, std::memory_order_relaxed);  // frameId 归零（AE.3：握手重置 frameId/清槽）
     publish(nullptr);  // 全零覆盖（与 store 同一发布协议，读者看不到半清状态）
 }
 
@@ -42,7 +42,7 @@ std::vector<uint8_t> OledPreviewSlot::makePhysicalPreviewPayload(
     if (!copySlot(payload.data() + 8)) {
         return {};  // 槽无效：空向量 = 本帧无内容，调用方跳过发送
     }
-    const uint16_t frameId = frameId_++;  // 取最新 frameId（发送侧独占）
+    const uint16_t frameId = frameId_.fetch_add(1, std::memory_order_relaxed);  // 取最新 frameId
     // AE.2：多字节字段一律小端（LE）。
     payload[0] = static_cast<uint8_t>(frameId & 0xFFu);
     payload[1] = static_cast<uint8_t>((frameId >> 8) & 0xFFu);

@@ -9,9 +9,11 @@
 //     字节，不含任何协议 builder/endpoint 依赖）。
 //
 // 线程模型（无锁，写者/读者/复位端分工）：
-//   - 写侧：OLED 任务（唯一 store 调用者）；复位侧：发送任务（唯一 reset 调用者）；
-//   - 读侧：发送任务（唯一 snapshot / makePhysicalPreviewPayload 调用者，因此
-//     frameId_ 无需原子）；
+//   - 写侧：OLED 任务（唯一 store 调用者）；复位侧：发送任务/会话状态回调
+//     （reset 可能运行于 transport RX 任务，见 main.cpp onSessionState——因此
+//     frameId_ 为原子，M7-F 修正跨任务非原子访问）；
+//   - 读侧：发送任务（唯一 snapshot / makePhysicalPreviewPayload 调用者；
+//     frameId_ 用 relaxed fetch_add/store 计数，无顺序依赖）；
 //   - 同步：seqlock —— seq_ 偶数 = 槽稳定可读，奇数 = 写者进行中。写者先 seq++
 //     （奇数，release）再逐字节 release 写槽，完成后 seq++（偶数，release 发布）；
 //     读者 acquire 读 seq，奇数则重试，偶数则逐字节 acquire 复制，再读 seq 比对，
@@ -86,8 +88,9 @@ private:
 
     std::atomic<uint32_t> seq_{0};   // 偶数 = 稳定，奇数 = 写者进行中
     std::atomic<bool> valid_{false}; // 至少一次 store 已发布
-    // 发送任务独占（snapshot/payload/reset 同任务；OLED 任务不触碰）：
-    uint16_t frameId_ = 0;
+    // M7-F：reset 可能经会话状态回调在 transport RX 任务执行，与发送任务
+    // （snapshot/payload）并发 → 必须原子（relaxed 计数即可）。
+    std::atomic<uint16_t> frameId_{0};
     std::atomic<uint8_t> slot_[kSizeBytes]{}; // 1KB 页式 1bpp 快照（原子字节防撕裂）
 };
 

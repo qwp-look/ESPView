@@ -271,12 +271,16 @@ void SerialWorker::runLoop() {
     proto::ProtocolEndpoint::Callbacks cb;
     cb.onSessionState = [this](proto::SessionState s) {
         if (s == proto::SessionState::kConnected) {
+            // M7-F（AE.3）：会话建立 → 预览可用（原先缺失，导致物理预览
+            // 永远显示 No Preview）。
+            previewState_.setSessionConnected(true);
             emitStatus(WorkerStatus::Connected,
                        QString("CONNECTED (HELLO done) — peer %1x%2")
                            .arg(peerWidth_)
                            .arg(peerHeight_));
             pushDiag(proto::Severity::kInfo, "session", "CONNECTED (HELLO done)");
         } else if (s == proto::SessionState::kDisconnected) {
+            previewState_.setSessionConnected(false);
             emitStatus(WorkerStatus::Connecting, "Session disconnected — waiting for HELLO");
             pushDiag(proto::Severity::kWarning, "session", "session disconnected");
             // M7-D2（AE.3）：断线清空预览位图（发 No Preview 快照给 GUI）。
@@ -678,6 +682,13 @@ void SerialWorker::sendWifiConfig(const std::string& ssid, const std::string& pa
     wifiQueue_.push_back(std::move(cmd));
 }
 
+void SerialWorker::sendWifiClear() {
+    WifiCommand cmd;
+    cmd.kind = 2;  // clear
+    std::lock_guard<std::mutex> lk(wifiMutex_);
+    wifiQueue_.push_back(std::move(cmd));
+}
+
 void SerialWorker::clearWifiQueue() {
     std::lock_guard<std::mutex> lk(wifiMutex_);
     for (WifiCommand& cmd : wifiQueue_) {
@@ -708,9 +719,11 @@ void SerialWorker::drainWifiQueue() {
             std::optional<proto::Message> msg;
             if (cmd.kind == 0) {
                 msg = proto::makeWifiScanReq(0, cmd.maxEntries);
-            } else {
+            } else if (cmd.kind == 1) {
                 msg = proto::makeWifiConfig(cmd.ssid, cmd.password, cmd.serverIp,
                                             cmd.serverPort);
+            } else {
+                msg = proto::makeWifiClear();
             }
             if (msg.has_value() &&
                 ep_->sendMessage(*msg) == proto::SendResult::kOk) {

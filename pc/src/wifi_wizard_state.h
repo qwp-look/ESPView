@@ -61,6 +61,8 @@ enum class WizardErrorCode : int {
     kNoIpReceived = 15,        // Step 9 未收到 GOT_IP
     kTcpConnectFailed = 16,    // Step 10 TCP 连接失败
     kFullResyncFailed = 17,    // Step 11 FULL resync 失败
+    kUartBootstrapUnavailable = 18,  // M7-F：UART bootstrap 链路不可用（传输 Error，非密码错误）
+    kTcpHandoffFailed = 19,    // M7-F：Wi-Fi 已连接但 TCP handoff 失败/超时
 };
 
 // 错误：稳定 code + i18n key（英文原文，经 trText 渲染；code==kNone 时 key 为空）。
@@ -135,9 +137,14 @@ public:
     WizardError validationError() const;
 
     // ---- Apply / 异步流程推进 ----
-    // beginApply：kTcpConfig → kApplying（校验 canApply）；成功后立即清除密码
-    // （密码仅在 Apply 前驻留内存）。返回 false 表示不在 kTcpConfig 或输入非法。
+    // beginApply：kTcpConfig → kApplying（校验 canApply）。密码不清除——发送方
+    // （WifiWizardDialog）在 sendWifiConfig 消费后调用 clearPassword() 清除
+    // （M7-F：原实现在此清除导致发送时密码已为空）。返回 false 表示不在
+    // kTcpConfig 或输入非法。
     bool beginApply();
+    // 安全擦除密码驻留副本（std::fill 清零后 clear，对齐 serial_worker 做法）。
+    // 任意步骤可调用；密码为空时为 no-op。
+    void clearPassword();
     // 以下推进由后续里程碑的协议回调驱动（本模型只做状态转换，零协议依赖）：
     // kApplying → kConnecting → kGotIp → kTcpConnected → kFullResync → kDone。
     // 每个推进只在“当前正是其前置步骤”时成功，否则返回 false（状态不变）。

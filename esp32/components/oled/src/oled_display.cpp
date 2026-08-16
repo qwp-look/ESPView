@@ -403,6 +403,13 @@ bool OledDisplay::initOnce() {
             recordError(esp_timer_get_time() / 1000, 0);
             return false;  // 局部对象析构自动 deinit
         }
+        // M7-F：探测同样受中止谓词约束（挂起/停止时 probe 立即返回 0），
+        // 保证挂起窗口内 I2C 流量≈0（AE.3 绝对语义）。
+        const std::function<bool()> probeAbort = [this]() {
+            return !running_.load(std::memory_order_acquire) ||
+                   suspendedForWifiScan_.load(std::memory_order_acquire);
+        };
+        i2c->setAbortPredicate(probeAbort);
         const uint8_t addr = cfg_.addrAuto ? i2c->probe() : cfg_.address;
         if (cfg_.addrAuto) {
             probeCount_.fetch_add(1, std::memory_order_relaxed);

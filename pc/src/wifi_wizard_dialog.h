@@ -36,6 +36,7 @@ class QListWidget;
 class QPushButton;
 class QSpinBox;
 class QStackedWidget;
+class QTimer;
 
 namespace espview {
 namespace pc {
@@ -82,12 +83,20 @@ private:
     void onWifiStatus(const espview::proto::WifiStatusInfo& status);
     void onFrameReady(const DisplayFrame& frame);
 
+    // M7-F：异步步看门狗（扫描 / Apply 链 / FULL resync 超时收敛，禁止挂死）。
+    void startWatchdog(int ms);
+    void stopWatchdog();
+    void onWatchdogTimeout();
+
     ConnectionManager& manager_;
     WifiWizardState state_;
     UiLang lang_ = UiLang::kEnglish;
     bool scanInFlight_ = false;
     bool lastScanFirmwareUnsupported_ = false;
     bool tcpConnectedArmed_ = false;  // kTcpConnected 起等待第一帧完成 FULL resync
+    QTimer* watchdogTimer_ = nullptr;  // M7-F：异步步超时（单发）
+    bool scanSeqValid_ = false;        // M7-F：是否已收到至少一次扫描结果（seq 过滤基）
+    uint8_t lastScanSeq_ = 0;          // M7-F：最近消费的扫描结果 seq（迟到/重复忽略）
 
     // M7-E：扫描页显示状态（扫描期间 OLED 显示临时暂停；完成/失败后恢复）。
     enum class ScanDisplayState {

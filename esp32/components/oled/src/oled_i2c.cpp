@@ -67,6 +67,10 @@ esp_err_t OledI2c::init() {
     return ESP_OK;
 }
 
+void OledI2c::setAbortPredicate(std::function<bool()> pred) {
+    abort_ = std::move(pred);
+}
+
 uint8_t OledI2c::probe() {
     if (bus_ == nullptr) {
         return 0;
@@ -74,6 +78,10 @@ uint8_t OledI2c::probe() {
     uint8_t preferred = 0;
     uint8_t first = 0;
     for (uint16_t a = kProbeMin; a <= kProbeMax; ++a) {
+        // M7-F：挂起/停止置位时立即中止探测（挂起窗口内 I2C 流量≈0）。
+        if (abort_ && abort_()) {
+            return 0;
+        }
         const esp_err_t r = i2c_master_probe(bus_, a,
                                              static_cast<int>(probeTimeoutMs(cfg_)));
         if (r != ESP_OK) {
