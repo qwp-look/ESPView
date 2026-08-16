@@ -68,7 +68,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 # Reuse the frozen protocol machinery of the M7-E harness.
 from espview_e_ab_harness import (  # noqa: E402
     VER, TYPE_HELLO, TYPE_CAPABILITIES, TYPE_PING, TYPE_PONG, TYPE_ACK,
-    TYPE_WIFI_STATUS, TYPE_WIFI_SCAN_RESULT, TYPE_PHYSICAL_PREVIEW,
+    TYPE_WIFI_STATUS, TYPE_WIFI_SCAN_REQ, TYPE_WIFI_SCAN_RESULT, TYPE_PHYSICAL_PREVIEW,
     TYPE_FRAME_BEGIN, TYPE_ERROR, FLAG_ACK_REQ, SESSION_NAMES,
     DEFAULT_ESPIDF_PROFILE, ps_quote, build_packet, parse_hello,
     parse_ack, parse_wifi_status, parse_scan_result, parse_error_text,
