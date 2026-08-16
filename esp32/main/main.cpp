@@ -26,6 +26,8 @@
 #include "freertos/task.h"
 #include "esp_heap_caps.h"  // heap_caps_get_largest_free_block / MALLOC_CAP_DEFAULT
 #include "esp_system.h"     // esp_get_free_heap_size / esp_get_minimum_free_heap_size
+#include "esp_rom_sys.h"      // M7-F：esp_rom_get_cpu_ticks_per_us（v6.0.2 esp_clk_cpu_freq 已移入 esp_private）
+#include "esp_rom_spiflash.h" // M7-F：g_rom_flashchip.chip_size（v6.0.2 已移除 esp_get_flash_size）
 #if CONFIG_ESPVIEW_OLED_ENABLE
 #include "esp_netif.h"
 #include "oled/oled_display.hpp"
@@ -59,6 +61,38 @@ using namespace espview::proto;
 static const char* kTag = "espview_main";
 
 namespace {
+// M7-F：boot 电学观测（软件可见侧；最小侵入，无协议改动）。console=none 生产
+// profile 无输出为预期（oled_diag 等 console profile 可见）。绝不打印任何
+// Wi-Fi 凭据（SSID/密码/server IP 属敏感信息）。
+const char* resetReasonName(esp_reset_reason_t reason) {
+    switch (reason) {
+        case ESP_RST_UNKNOWN: return "UNKNOWN";
+        case ESP_RST_POWERON: return "POWERON_RESET";
+        case ESP_RST_EXT: return "EXTERNAL";
+        case ESP_RST_SW: return "SW";
+        case ESP_RST_PANIC: return "PANIC";
+        case ESP_RST_INT_WDT: return "INT_WDT";
+        case ESP_RST_TASK_WDT: return "TASK_WDT";
+        case ESP_RST_WDT: return "WDT";
+        case ESP_RST_DEEPSLEEP: return "DEEPSLEEP";
+        case ESP_RST_BROWNOUT: return "BROWNOUT";
+        case ESP_RST_SDIO: return "SDIO";
+        case ESP_RST_USB: return "USB";
+        case ESP_RST_JTAG: return "JTAG";
+        case ESP_RST_EFUSE: return "EFUSE";
+        case ESP_RST_PWR_GLITCH: return "PWR_GLITCH";
+        case ESP_RST_CPU_LOCKUP: return "CPU_LOCKUP";
+        default: return "UNKNOWN";
+    }
+}
+
+// 单阶段 boot 诊断行：uptime（esp_timer）+ free heap。
+void logBootStage(const char* stage) {
+    ESP_LOGI(kTag, "BOOT stage=%s uptime_ms=%llu free_heap=%u",
+             stage,
+             static_cast<unsigned long long>(esp_timer_get_time() / 1000),
+             static_cast<unsigned>(esp_get_free_heap_size()));
+}
 
 // M6-C：运行时 Transport 选择（§三/§五）。initial 仍由 menuconfig 决定
 // （编译期初始选择）；运行时经 TransportManager::switchTo() 在 UART/TCP 间切换。
@@ -1039,6 +1073,18 @@ std::unique_ptr<TestPattern> g_testPattern;
 }  // namespace
 
 extern "C" void app_main() {
+    // M7-F：boot 摘要（reset reason / CPU 频率 / flash 大小 / heap / uptime）。
+    // v6.0.2 API 可用性：esp_get_flash_size() 已移除 → g_rom_flashchip.chip_size；
+    // esp_clk_cpu_freq() 已移入 esp_private → esp_rom_get_cpu_ticks_per_us()（等价 MHz）。
+    const esp_reset_reason_t bootReason = esp_reset_reason();
+    ESP_LOGI(kTag,
+             "BOOT: reset_reason=%d(%s) cpu_mhz=%u flash_kb=%u uptime_ms=%llu free_heap=%u",
+             static_cast<int>(bootReason), resetReasonName(bootReason),
+             static_cast<unsigned>(esp_rom_get_cpu_ticks_per_us()),
+             static_cast<unsigned>(g_rom_flashchip.chip_size / 1024u),
+             static_cast<unsigned long long>(esp_timer_get_time() / 1000),
+             static_cast<unsigned>(esp_get_free_heap_size()));
+
 #if CONFIG_ESPVIEW_TRANSPORT_TCP
     ESP_LOGI(kTag, "ESPView: initial transport=TCP server=%s:%d (runtime switch via TransportManager)",
              CONFIG_ESPVIEW_TCP_SERVER_IP, CONFIG_ESPVIEW_TCP_SERVER_PORT);
@@ -1084,6 +1130,7 @@ extern "C" void app_main() {
     // M6-C：状态/数据回调接 TransportManager（切换时自动转发 + 状态重放）。
     g_mgr.setDataCallback(onTransportData);
     g_mgr.setStateCallback(onTransportState);
+    logBootStage("transport_open_before");
 
     // 打开初始 Transport（编译期选择；运行时可用 g_mgr.switchTo() 切换）。
     if (!g_mgr.open()) {
@@ -1093,6 +1140,7 @@ extern "C" void app_main() {
     ESP_LOGI(kTag, "transport open OK: type=%d mtu=%zu",
              static_cast<int>(g_mgr.current()),
              g_mgr.transport() != nullptr ? g_mgr.transport()->mtu() : 0);
+    logBootStage("transport_open_after");
 #if CONFIG_ESPVIEW_APP_LVGL
     updateFlushWaitFromTransport();
 #endif
@@ -1127,8 +1175,10 @@ extern "C" void app_main() {
                                                               oledStatusSnapshot);
         if (g_oled->start()) {
             ESP_LOGI(kTag, "OLED display started");
+            logBootStage("oled_start_ok");
         } else {
             ESP_LOGE(kTag, "OLED display start failed");
+            logBootStage("oled_start_fail");
             g_oled.reset();
         }
         // M7-C2：PhysicalDisplaySink 组装（init 校验生产者能力并落定自身 128x64
@@ -1180,10 +1230,14 @@ extern "C" void app_main() {
 
     xTaskCreate(sessionLoop, "espview_sess", 4096, nullptr, 5, nullptr);
     xTaskCreate(statsLoop, "espview_stat", 4096, nullptr, 3, nullptr);
+    logBootStage("session_stats_tasks_created");
 
     // 主循环：周期打印会话统计（console 禁用时无输出，仅保留结构）。
     uint32_t loop = 0;
     while (true) {
+        if (loop == 0) {
+            logBootStage("main_loop_first_round");
+        }
         const SessionStats& st = g_endpoint.stats();
         if ((loop % 25) == 0) {
             ESP_LOGI(kTag,

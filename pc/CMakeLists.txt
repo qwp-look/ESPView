@@ -182,6 +182,23 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
 endif()
 
 # ------------------------------------------------------------
+# M7-F：win32_com_probe（最小 Win32-only serial probe，无 Qt / 无协议）。
+# 纯字节搬运：只读原始串口、可选 EN 复位脉冲、掉线自动重枚举。不链接
+# shared/protocol，不涉及任何 Wi-Fi 凭据。
+# ------------------------------------------------------------
+add_executable(win32_com_probe
+    src/win32_com_probe.cpp
+)
+
+if(MINGW OR MSYS)
+    target_link_libraries(win32_com_probe PRIVATE kernel32)
+endif()
+
+if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+    target_compile_options(win32_com_probe PRIVATE -Wall -Wextra -Wpedantic -Werror)
+endif()
+
+# ------------------------------------------------------------
 # M6-A：tcp_transport_test（127.0.0.1 loopback host test，无 Qt / 无真实 Wi-Fi）。
 # 覆盖 §二十八 1-19：connect / disconnect / reconnect / partial recv / sticky recv /
 # send short write / remote close / timeout / invalid address / multiple-connect
