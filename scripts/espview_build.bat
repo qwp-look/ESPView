@@ -1,56 +1,85 @@
 @echo off
 REM ============================================================
-REM ESPView M7-D5: one-shot build entrypoint (host / Qt / ESP32).
+REM ESPView M7-G: one-shot build entrypoint (host / Qt / ESP32).
 REM
-REM   Usage:  scripts\espview_build.bat [-host] [-qt] [-esp32]
-REM                                    [-b <profile>] [--check] [-h|--help]
+REM   Usage:
+REM     scripts\espview_build.bat [build] [-host] [-qt] [-esp32]
+REM                                [-b <profile>|--profile <profile>]
+REM                                [--check] [--dry-run] [-h|--help]
+REM     scripts\espview_build.bat verify [verify args]  -> espview_verify.bat
+REM     scripts\espview_build.bat profile list|show <name>|check <name>
 REM
+REM   Subcommands: build (default) / verify / profile / check / dry-run
 REM   Default (no args): -host -qt -esp32  (all three targets)
 REM   -host     : host suite (reuses scripts\verify_host.bat)
 REM   -qt       : Qt 6 GUI build (reuses scripts\verify_qt.bat)
 REM   -esp32    : ESP32 firmware build (idf.py -B build\<profile> build)
-REM   -b <name> : ESP32 build sub-directory under esp32\build\ (default uart_hw)
-REM               uart_hw = UART verification firmware (ESPVIEW_DEFAULT_MODE=2,
-REM               OLED, LVGL, TEST hooks). Future profiles get their own dir.
-REM               Each profile keeps its own sdkconfig inside its build dir
-REM               (build\<profile>\sdkconfig), seeded once from esp32\sdkconfig;
-REM               the shared esp32\sdkconfig is never overwritten by builds.
-REM   --check   : preflight only (PATH / MSYS2 / ESP-IDF probe); no build.
+REM   -b <name> : ESP32 build profile (whitelist below; default uart)
+REM   --check   : preflight only (PATH / MSYS2 / ESP-IDF probe); no build
+REM   --dry-run : print the exact build plan; run nothing
+REM   profile   : profile whitelist / label table queries
+REM
+REM   Profile system (M7-G):
+REM     Whitelist: uart tcp oled oled-off diagnostic g1_a g1_b g1_c g1_d
+REM                (uart_hw = legacy alias of uart, keeps its old build dir)
+REM     Each profile keeps its OWN isolated sdkconfig at
+REM     esp32\build\<profile>\sdkconfig, seeded once from esp32\sdkconfig
+REM     (whole-file copy, never inspected) then force-applied with the
+REM     profile's whitelisted Kconfig keys on every build, so profiles
+REM     can never drift (no more mode_c with OLED=y / TCP=y). The shared
+REM     esp32\sdkconfig is never overwritten.
 REM
 REM   Exit codes:
 REM     0  all requested steps OK
 REM     1  a build/test step failed
-REM     2  usage error (unknown argument / invalid profile name)
-REM     3  preflight error (MSYS2 MinGW64 or ESP-IDF not found)
+REM     2  usage error (unknown argument / unknown profile name)
+REM     3  preflight error (MSYS2 MinGW64 / ESP-IDF / python missing)
 REM
 REM Requires: MSYS2 MinGW64 (g++, cmake, ctest); ESP-IDF v6.0.2
 REM   PowerShell profile at
 REM   C:\Espressif\tools\Microsoft.v6.0.2.PowerShell_profile.ps1
-REM Overrides (environment): MINGW64_BIN, ESPIDF_PROFILE.
-REM Security: never reads or prints esp32\sdkconfig; never touches
-REM Wi-Fi credentials.
+REM Overrides (environment): MINGW64_BIN, ESPIDF_PROFILE, ESPVIEW_PYTHON.
+REM Security: never prints esp32\sdkconfig content; never reads, prints or
+REM hardcodes Wi-Fi credentials (seed copy only, credentials stay inside
+REM the gitignored per-profile sdkconfig).
 REM ============================================================
 setlocal
 
 if "%MINGW64_BIN%"=="" set "MINGW64_BIN=C:\msys64\mingw64\bin"
 if "%ESPIDF_PROFILE%"=="" set "ESPIDF_PROFILE=C:\Espressif\tools\Microsoft.v6.0.2.PowerShell_profile.ps1"
+if "%ESPVIEW_PYTHON%"=="" set "ESPVIEW_PYTHON=py"
+where "%ESPVIEW_PYTHON%" >nul 2>nul
+if errorlevel 1 (
+    set "ESPVIEW_PYTHON=python"
+    where python >nul 2>nul
+    if errorlevel 1 set "ESPVIEW_PYTHON=py"
+)
 set "ESP32_PROFILE=uart_hw"
-set "ROOT=%~dp0.."
+for %%i in ("%~dp0..") do set "ROOT=%%~fi"
 
 REM ---- argument parsing -------------------------------------
 set "DO_HOST="
 set "DO_QT="
 set "DO_ESP32="
 set "CHECK_ONLY="
+set "DRY_RUN="
 
 :parse
 if "%~1"=="" goto :parsed
-if /i "%~1"=="-host"        ( set "DO_HOST=1"   & shift & goto :parse )
-if /i "%~1"=="-qt"          ( set "DO_QT=1"     & shift & goto :parse )
-if /i "%~1"=="-esp32"       ( set "DO_ESP32=1"  & shift & goto :parse )
+if /i "%~1"=="-host"        ( set "DO_HOST=1"  & shift & goto :parse )
+if /i "%~1"=="-qt"          ( set "DO_QT=1"    & shift & goto :parse )
+if /i "%~1"=="-esp32"       ( set "DO_ESP32=1" & shift & goto :parse )
 if /i "%~1"=="-b"           ( if "%~2"=="" goto :usage
                               set "ESP32_PROFILE=%~2" & shift & shift & goto :parse )
+if /i "%~1"=="--profile"    ( if "%~2"=="" goto :usage
+                              set "ESP32_PROFILE=%~2" & shift & shift & goto :parse )
 if /i "%~1"=="--check"      ( set "CHECK_ONLY=1" & shift & goto :parse )
+if /i "%~1"=="--dry-run"    ( set "DRY_RUN=1"    & shift & goto :parse )
+if /i "%~1"=="verify"       goto :do_verify
+if /i "%~1"=="profile"      ( shift & goto :profile_parse )
+if /i "%~1"=="build"        ( shift & goto :parse )
+if /i "%~1"=="check"        ( set "CHECK_ONLY=1" & shift & goto :parse )
+if /i "%~1"=="dry-run"      ( set "DRY_RUN=1"    & shift & goto :parse )
 if /i "%~1"=="-h"   ( set "ERR=0" & goto :usage )
 if /i "%~1"=="--help" ( set "ERR=0" & goto :usage )
 if /i "%~1"=="/?"   ( set "ERR=0" & goto :usage )
@@ -61,18 +90,51 @@ set "ERR=2" & goto :usage
 if not defined DO_HOST if not defined DO_QT if not defined DO_ESP32 (
     set "DO_HOST=1" & set "DO_QT=1" & set "DO_ESP32=1"
 )
+
+REM ---- profile validation (whitelist) -----------------------
+if not defined DO_ESP32 goto :prof_ok
 echo %ESP32_PROFILE%|findstr /r /c:"[^a-zA-Z0-9_-]" >nul
 if not errorlevel 1 (
     echo [build] ERROR: invalid profile name: %ESP32_PROFILE%
     echo [build] ERROR: profile name may contain only A-Z a-z 0-9 _ -
     set "ERR=2" & goto :usage
 )
+"%ESPVIEW_PYTHON%" "%ROOT%\scripts\espview_profile_sdkconfig.py" --check %ESP32_PROFILE% >nul
+if errorlevel 2 goto :bad_profile
+if errorlevel 1 (
+    echo [build] ERROR: profile tool failed - python missing? set ESPVIEW_PYTHON to a working interpreter
+    set "ERR=3" & goto :fail
+)
+:prof_ok
 
 echo ============================================================
 echo ESPView build: host=%DO_HOST% qt=%DO_QT% esp32=%DO_ESP32%
-echo                 esp32 profile=%ESP32_PROFILE%  check-only=%CHECK_ONLY%
+echo                 esp32 profile=%ESP32_PROFILE%  check-only=%CHECK_ONLY% dry-run=%DRY_RUN%
 echo ============================================================
 
+if defined DO_ESP32 (
+    echo [esp32] profile summary:
+    "%ESPVIEW_PYTHON%" "%ROOT%\scripts\espview_profile_sdkconfig.py" --show %ESP32_PROFILE%
+    if errorlevel 1 goto :prof_tool_fail
+)
+set "PROFILE_SDKCONFIG=%ROOT%\esp32\build\%ESP32_PROFILE%\sdkconfig"
+if defined DO_ESP32 echo [esp32] profile sdkconfig: %PROFILE_SDKCONFIG%  ^(isolated; shared esp32\sdkconfig untouched^)
+
+REM ---- dry-run: print plan only ------------------------------
+if not defined DRY_RUN goto :not_dry
+echo.
+echo [build] DRY-RUN plan:
+if defined DO_HOST echo   host   : scripts\verify_host.bat
+if defined DO_QT   echo   qt     : scripts\verify_qt.bat
+if defined DO_ESP32 (
+    echo   esp32  : "%ESPVIEW_PYTHON%" scripts\espview_profile_sdkconfig.py --apply %ESP32_PROFILE% --sdkconfig "%PROFILE_SDKCONFIG%"
+    echo   esp32  : idf.py -B build\%ESP32_PROFILE% -D SDKCONFIG=%PROFILE_SDKCONFIG% build
+)
+echo.
+echo [build] DRY-RUN: plan printed, nothing executed.
+exit /b 0
+
+:not_dry
 REM ---- preflight: MSYS2 (needed for host / qt) --------------
 if not defined DO_HOST if not defined DO_QT goto :preflight_esp32
 if not exist "%MINGW64_BIN%\g++.exe"  goto :no_msys
@@ -112,19 +174,12 @@ if errorlevel 1 ( set "ERR=1" & goto :fail )
 if not defined DO_ESP32 goto :done
 echo.
 echo [3/3] ESP32 firmware build (profile=%ESP32_PROFILE%, dir=esp32\build\%ESP32_PROFILE%)
-REM M7-F F4: per-profile sdkconfig isolation. IDF's default SDKCONFIG is the
-REM shared esp32\sdkconfig; building several profiles through it makes every
-REM profile drift to the last-built config. Each profile gets its own sdkconfig
-REM inside its build dir (bootstrap-copied from esp32\sdkconfig on first use so
-REM machine-specific settings + Wi-Fi credentials are preserved, and it stays
-REM inside the gitignored build tree).
-set "PROFILE_SDKCONFIG=%ROOT%\esp32\build\%ESP32_PROFILE%\sdkconfig"
-if not exist "%PROFILE_SDKCONFIG%" (
-    if exist "%ROOT%\esp32\sdkconfig" (
-        echo [esp32] bootstrap profile sdkconfig: esp32\sdkconfig -^> build\%ESP32_PROFILE%\sdkconfig
-        copy /y "%ROOT%\esp32\sdkconfig" "%PROFILE_SDKCONFIG%" >nul
-    )
-)
+REM M7-G: prepare the profile's own isolated sdkconfig (seed once from
+REM esp32\sdkconfig without inspecting it, then force-apply the profile's
+REM whitelisted Kconfig keys so no drift is possible). Credentials stay
+REM inside the untracked per-profile sdkconfig; nothing is ever printed.
+"%ESPVIEW_PYTHON%" "%ROOT%\scripts\espview_profile_sdkconfig.py" --apply %ESP32_PROFILE% --sdkconfig "%PROFILE_SDKCONFIG%" --seed "%ROOT%\esp32\sdkconfig" --seed-defaults "%ROOT%\esp32\sdkconfig.defaults"
+if errorlevel 1 goto :prof_tool_fail
 powershell -NoProfile -ExecutionPolicy Bypass -Command "$ErrorActionPreference='Stop'; try { & { . '%ESPIDF_PROFILE%' }; Set-Location '%ROOT%\esp32'; idf.py -B build/%ESP32_PROFILE% -D SDKCONFIG=%PROFILE_SDKCONFIG% build; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE } } catch { Write-Host ('[esp32] ERROR: ' + $_.Exception.Message); exit 1 }"
 if errorlevel 1 ( set "ERR=1" & goto :fail )
 
@@ -133,23 +188,80 @@ echo.
 echo espview_build: ALL PASS
 exit /b 0
 
+:do_verify
+call "%ROOT%\scripts\espview_verify.bat" %*
+set "ERR=%ERRORLEVEL%"
+exit /b %ERR%
+
+:profile_parse
+if "%~1"=="" goto :profile_usage
+if /i "%~1"=="list"   goto :profile_list
+if /i "%~1"=="show"   ( if "%~2"=="" goto :profile_usage
+                         set "PNAME=%~2" & goto :profile_show )
+if /i "%~1"=="check"  ( if "%~2"=="" goto :profile_usage
+                         set "PNAME=%~2" & goto :profile_check )
+if /i "%~1"=="-h"     goto :profile_help
+if /i "%~1"=="--help" goto :profile_help
+echo [profile] ERROR: unknown profile subcommand: %~1
+set "ERR=2" & goto :usage
+
+:profile_list
+"%ESPVIEW_PYTHON%" "%ROOT%\scripts\espview_profile_sdkconfig.py" --list
+set "ERR=%ERRORLEVEL%"
+exit /b %ERR%
+
+:profile_show
+"%ESPVIEW_PYTHON%" "%ROOT%\scripts\espview_profile_sdkconfig.py" --show %PNAME%
+set "ERR=%ERRORLEVEL%"
+exit /b %ERR%
+
+:profile_check
+"%ESPVIEW_PYTHON%" "%ROOT%\scripts\espview_profile_sdkconfig.py" --check %PNAME%
+set "ERR=%ERRORLEVEL%"
+exit /b %ERR%
+
+:profile_help
+echo profile subcommands:
+echo   profile list               list whitelisted profiles + 6 attributes
+echo   profile show ^<name^>       show one profile's attribute table
+echo   profile check ^<name^>      validate a profile name (exit 0/2)
+exit /b 0
+
+:profile_usage
+echo [profile] ERROR: profile requires a subcommand (list / show ^<name^> / check ^<name^>)
+set "ERR=2" & goto :usage
+
+:bad_profile
+echo [build] ERROR: unknown profile name: %ESP32_PROFILE%
+echo [build] ERROR: whitelist: uart tcp oled oled-off diagnostic g1_a g1_b g1_c g1_d ^(uart_hw alias^)
+echo [build] ERROR: list all profiles: scripts\espview_build.bat profile list
+set "ERR=2" & goto :usage
+
+:prof_tool_fail
+echo [build] ERROR: profile sdkconfig tool failed
+echo [build] ERROR: run with ESPVIEW_PYTHON=<path-to-python> to override
+set "ERR=3" & goto :fail
+
 :no_msys
 echo [build] ERROR: MSYS2 MinGW64 not found in %MINGW64_BIN%
-echo [build] ERROR: expected g++.exe, cmake.exe, ctest.exe (MSYS2 MinGW64 not found; install MSYS2 or set MINGW64_BIN)
+echo [build] ERROR: expected g++.exe, cmake.exe, ctest.exe (install MSYS2 or set MINGW64_BIN)
 set "ERR=3" & goto :fail
 
 :no_idf
 echo [build] ERROR: ESP-IDF unavailable (profile not found or idf.py probe failed)
-echo [build] ERROR: expected profile at %ESPIDF_PROFILE% (ESP-IDF not found; run the Espressif installer or set ESPIDF_PROFILE)
+echo [build] ERROR: expected profile at %ESPIDF_PROFILE% (run the Espressif installer or set ESPIDF_PROFILE)
 set "ERR=3" & goto :fail
 
 :usage
 if not defined ERR set "ERR=2"
 echo.
-echo Usage: scripts\espview_build.bat [-host] [-qt] [-esp32] [-b ^<profile^>] [--check]
+echo Usage: scripts\espview_build.bat [build] [-host] [-qt] [-esp32] [-b ^<profile^>] [--check] [--dry-run]
 echo   default (no args): -host -qt -esp32
-echo   -b ^<profile^>  ESP32 build dir under esp32\build\ (default uart_hw)
+echo   -b ^<profile^>   ESP32 build profile (whitelist; default uart)
 echo   --check     preflight only, no build
+echo   --dry-run   print the plan, run nothing
+echo   verify      delegate to scripts\espview_verify.bat
+echo   profile     profile list / show ^<name^> / check ^<name^>
 echo   -h/--help   show this help
 exit /b %ERR%
 

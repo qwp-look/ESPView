@@ -719,7 +719,8 @@ class Harness:
         self.event("flash", mode=mode, profile=spec["profile"],
                    port=self.args.port)
         proc = subprocess.run(["cmd", "/c", bat, "-p", self.args.port,
-                               "-b", spec["profile"], "--no-reset"],
+                               "-b", spec["profile"], "--no-reset",
+                               "--any-profile"],
                               cwd=self.repo_root)
         if proc.returncode != 0:
             print("[fail] flash failed (exit=%s)" % proc.returncode, flush=True)
