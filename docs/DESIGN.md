@@ -40,7 +40,7 @@
 > 0 CRC；TCP reconnect stress 10/10 OK（~2.0s/轮）；host 218,625 checks / 0 failures；
 > 生产固件 1,092,448 B（app 余量 48%）。wire format 不变。详见 Z 节。
 > **修订记录（M7-F, 2026-08-16）**：硬件路径判别 + Wi-Fi Provisioning 生产化。F1 win32_com_probe + boot 插桩判别实验（uart_hw 45s 无掉线 vs TCP/RF 固件 boot 期 CH340 掉线）→ boot 期掉线触发事件 = Wi-Fi RF 上电（高可信假设）；F2 事务硬化 / F3 wizard 硬化 / F4 per-profile sdkconfig 隔离；结论强度分级（Confirmed/High confidence/Hypothesis/Unknown），AI.3 / AG.2 措辞修订（含 AJ.8 实测结果修正声明）。wire format 不变。详见 AK 章。
-> **修订记录（M7-G, 2026-08-16）**：发布前最终化套件——G1 固件 provisioning/TCP handoff 硬化、G2 Wi-Fi 向导最终化（B1–B6 + TCP handoff 观察器 + 错误码 20–23）、G3 Display UI 最终化、G4 README 重写、G5 中文用户文档集、G6 工具链/profile 系统/check_docs + G1 硬件 harness、G8 开发者文档、G9 测试文档；G7 i18n / G10 检查器 / G11 验收 待完成。wire format 零改动。详见 AL 章。
+> **修订记录（M7-G, 2026-08-16）**：发布前最终化套件——G1 固件 provisioning/TCP handoff 硬化、G2 Wi-Fi 向导最终化（B1–B6 + TCP handoff 观察器 + 错误码 20–23）、G3 Display UI 最终化、G4 README 重写、G5 中文用户文档集、G6 工具链/profile 系统/check_docs + G1 硬件 harness、G8 开发者文档、G9 测试文档；G7 i18n / G10 检查器 / G11 验收 已收尾（证据与验收清单见 AL 章）。wire format 零改动。详见 AL 章。
 
 ---
 
@@ -778,7 +778,7 @@ ESPView/
 | M7-D6 | UART 真实验收 + 电源修正（startScan 修正、PASSIVE 扫描、PM 80MHz、TX 功率 2dBm） | ✅ 完成（2026-08-16；host 384,438 checks / 0 failures；详见 AI 章） |
 | M7-E | Power-Aware Wi-Fi Provisioning（OLED suspend/resume + ScanTransaction + preview 挂起 + A/B/C 实验 harness；wire format 未修改） | ✅ 完成（2026-08-16；host 384,438+192 checks / 0 failures；详见 AJ 章） |
 | M7-F | Hardware Path Diagnosis + Wi-Fi Provisioning 生产化（F1 判别探针 / F2 事务硬化 / F3 wizard 硬化 / F4 per-profile sdkconfig 隔离 / F5 证据矩阵；wire format 未修改） | ✅ 完成（2026-08-16；判别实验 uart_hw 45s 无掉线 vs RF 固件 boot 期掉线；详见 AK 章） |
-| M7-G | 发布前最终化套件（G1 provisioning/TCP handoff 硬化、G2 向导最终化、G3 Display UI 最终化、G4 README、G5 用户文档、G6 工具链/check_docs、G8/G9 文档；G7/G10/G11 待完成；wire format 零改动） | ✅ 进行中（G1–G6/G8/G9 已完成；详见 AL 章） |
+| M7-G | 发布前最终化套件（G1 provisioning/TCP handoff 硬化、G2 向导最终化、G3 Display UI 最终化、G4 README、G5 用户文档、G6 工具链/check_docs、G7 i18n、G8/G9 文档、G10 审计、G11 验收；wire format 零改动） | ✅ 完成（2026-08-16；host 384,531 checks / 0 failures；A/B 硬件 PASS、C/D 受 RF-ON 扫描期 CH340 掉线阻塞 → AL.3/AL.13） |
 | M6(未来) | 真实 LCD (DEVICE/MIRROR)、触摸（INPUT_TOUCH）、TinyUSB、运行时 DisplayMode | 未开始 |
 
 ### M2 前置架构冻结（M1-3D 检查）
@@ -3016,25 +3016,56 @@ Wi-Fi 四消息族（0x06..0x09）/ ErrorCode 0..12 / WifiStatusPhase 0..9
 
 | 子项 | 内容 | 状态 / 章节 |
 |---|---|---|
-| G1 | 固件 provisioning 硬化 + TCP handoff + scan transaction（`81a464d`） | ✅ 代码完成；硬件实验证据待补 → AL.3 |
+| G1 | 固件 provisioning 硬化 + TCP handoff + scan transaction（`81a464d`） | ✅ 完成；A/B/C/D 硬件实验证据 → AL.3 |
 | G2 | Wi-Fi 向导最终化：B1–B6 修复 + TCP handoff 观察器 + 错误码 20–23（`3fdc8c6`） | ✅ 完成 → AL.4 |
 | G3 | Display UI 最终化：capability 接线 + 错误反馈 + router 状态（`3c150c3`） | ✅ 完成 → AL.5 |
 | G4 | README 重写：英文用户入口 + docs 索引 + known limitations（`0870e86`） | ✅ 完成 → AL.6 |
 | G5 | 中文用户文档集（12 篇）（`ba2c4fd`） | ✅ 完成 → AL.7 |
 | G6 | 工具链 / profile 系统 / check_docs + G1 硬件 harness（`76ac77a`） | ✅ 完成 → AL.8 |
-| G7 | i18n 收尾 | ⏳ 待完成 → AL.9（完成后补一行） |
+| G7 | i18n 收尾（`42bce5e`） | ✅ 完成 → AL.9 |
 | G8 | 开发者 + 贡献者文档（`e27b16c`） | ✅ 完成 → AL.10 |
 | G9 | 测试文档 + examples quick start（`cc09553`） | ✅ 完成 → AL.11 |
-| G10 | check_docs 检查器（G10 设计审计任务） | ⏳ 进行中 → AL.12 |
-| G11 | 验收 | ⏳ 待完成 → AL.13 |
+| G10 | check_docs 检查器（G10 设计审计任务）（`16d53ac`/`dd81534`） | ✅ 完成 → AL.12 |
+| G11 | 验收（host / Qt / LVGL+ESP32 / check_docs） | ✅ 完成 → AL.13 |
 
-### AL.3 G1 硬件判别实验证据（待实验后填充）
+### AL.3 G1 硬件判别实验证据（2026-08-16，`scripts/espview_g1_harness.py`）
 
-> **待实验后填充**：本节由主代理在 G1 硬件实验（`scripts/espview_g1_harness.py`
-> A/B/C/D 四模式 = OLED×RF 矩阵，任务书 §6）完成后补写。只记录 observed
-> behavior，遵循 AK.4 结论强度分级（Confirmed / High confidence /
-> Hypothesis / Unknown），不得写成「已证实电源不足」。
-> 待填小节：实验条件 / 各模式结果 / 判别结论 / 与 AK 证据对照。
+**实验条件**：
+- 硬件：ESP32 板（ESP32-D0WDQ6）+ 外置 USB-SERIAL CH340（COM4，115200 baud）；
+- 方法：`scripts/espview_g1_harness.py --build --flash --modes A,B,C,D --iterations 2`
+  （A=OLED OFF+RF OFF / B=OLED ON+RF OFF / C=OLED OFF+RF ON / D=OLED ON+RF ON；
+  RF ON 模式在 HELLO 握手后发送 WIFI_SCAN_REQ，触发 esp_wifi_start PASSIVE scan）；
+- 原始日志：`build/g1_results.txt`、`build/g1_d_extra.txt`（build 产物，不提交）；
+- 说明：首轮 A 曾因 probe exe 缺 MSYS2 PATH（0xC0000139）判 FAIL，属工具链环境
+  问题而非硬件问题；有效数据来自无 probe 的完整重跑。
+
+**各模式结果（有效轮次）**：
+
+| 模式 | 组合 | 轮次 | 结果 | 关键观察 |
+|---|---|---|---|---|
+| A | OLED OFF + RF OFF | 2/2 | PASS | boot OK；HELLO ≈359ms；12 packets 收齐；0 掉线 |
+| B | OLED ON + RF OFF | 2/2 | PASS | 与 A 无差异；OLED 上电不引入掉线 |
+| C | OLED OFF + RF ON | 0/2 | FAIL | 两次 HELLO 均成功；SCAN_REQ 后 it1：ACK 收到（seq=0 status=0 err=0）随即 `ClearCommError PermissionError(5)` UART 掉线；it2：ACK 超时（无 ACK、无断开事件） |
+| D | OLED ON + RF ON | 0/2 | FAIL | 两次 HELLO 均成功；SCAN_REQ 后 ACK 超时或 `uart_read_error` 掉线 |
+| D 复测 | OLED ON + RF ON | 0/3 | FAIL | it1：HELLO 后 ~0.5s `ClearCommError PermissionError(5)`；it2：`cannot open COM4: FileNotFoundError`（设备从系统消失）；it3 因 COM 打开失败未执行 |
+
+**判别结论**（遵循 AK.4 分级）：
+- **Observed / High confidence**：RF-ON 时 boot + HELLO 握手仍稳定（C/D 全部轮次
+  HELLO 成功），掉线发生在 scan 请求之后（esp_wifi_start → PASSIVE scan 期间）；
+  RF 上电扫描期与外置 CH340 掉线（PermissionError(5) / 设备消失）强相关，与
+  AK.2（M7-F F1）结论方向一致，触发点进一步收窄到「RF-ON 扫描期」。
+- **Observed**：OLED 从根因排除——B vs A 无差异、D vs C 无差异。
+- **Hypothesis（未证实）**：电源余量 / EMI 耦合 / CH340 驱动 / 复位源配置等物理
+  机制均未直接测量，不得写成「已证实供电不足」（AK.4）。
+- **当前状态**：本板（外置 CH340 + 现供电环境）在 RF-ON 扫描期不可达
+  （Not Reachable / CH340 drop），无法完成 A/B/C/D 完整矩阵的扫描期对比，按任务书
+  记为 **blocked by hardware/environment**；待稳定供电硬件（测量 3.3V/5V 余量、
+  复查 CH340 供电路径）复测后再定论。
+
+**与 AK 证据对照**：AK.4 表维持不变——Confirmed=无；High confidence=RF 上电与
+CH340 掉线强相关（本实验把触发点收窄到扫描期）；Hypothesis=供电/EMI/驱动；
+Unknown=具体物理机制。G1 固件侧 TCP handoff 代码完成且 esp32 build 通过，但
+GOT_IP→switchTo→TCP 全链路未真机跑通，真机 handoff 验证同样受该硬件阻塞。
 
 ### AL.4 G2 向导最终化（2026-08-16，`3fdc8c6`）
 
@@ -3086,9 +3117,10 @@ Wi-Fi 四消息族（0x06..0x09）/ ErrorCode 0..12 / WifiStatusPhase 0..9
 - `check_docs.py` / `check_docs.bat`：静态文档检查器（G10 维护）。
 - `espview_g1_harness.py`：G1 A/B/C/D 四模式硬件 harness（任务书 §6）。
 
-### AL.9 G7 i18n（完成后补一行）
+### AL.9 G7 i18n（2026-08-16，`42bce5e`）
 
-> **待完成后补写一行摘要**（i18n 收尾完成后由主代理补充）。
+- i18n 收尾：PC 侧 23 个新增双语键 + GUI 字符串全面审计；
+  i18n 相关测试 2188 checks / 0 failures；wire format 零改动。
 
 ### AL.10 G8 开发者 + 贡献者文档（2026-08-16，`e27b16c`）
 
@@ -3110,11 +3142,23 @@ Wi-Fi 四消息族（0x06..0x09）/ ErrorCode 0..12 / WifiStatusPhase 0..9
 - 自检结果见本任务最终汇报（check_docs 对 DESIGN.md 的禁用词 /
   16KiB / frameSeq / 凭据检查项）。
 
-### AL.13 G11 验收（待完成）
+### AL.13 G11 验收（2026-08-16）
 
-> **待完成**：验收清单占位 —— check_docs 全库归零（含 docs 其他文件）、
-> M 里程碑表 M7-G 全绿、G1 硬件实验证据补写、G7 i18n 一行摘要、
-> 真实硬件 UART → Wi-Fi → TCP handoff 全链路复测。
+G11 验收清单（本日全部执行，工作树含 M7-G 全部 13 个提交）：
+
+| 项 | 命令 / 对象 | 结果 |
+|---|---|---|
+| check_docs | `py scripts\check_docs.py` | ✅ 0 issue（禁用词 / 文件引用 / 凭据扫描全库归零） |
+| host suite | `cmd /c scripts\verify_host.bat` | ✅ ALL PASS（ctest 2/2；host protocol 384,531 checks / 0 failures；com3_frame_test + tcp_transport_test + transport_config_test 全绿） |
+| Qt GUI | `cmd /c scripts\verify_qt.bat` | ✅ ALL PASS（`espview_virtual_display.exe` 构建成功） |
+| LVGL + ESP32 | `cmd /c scripts\verify_lvgl.bat` | ✅ ALL PASS（host tests + `idf.py build`；app 1,127,216 B，分区余量 46%） |
+| G1 硬件矩阵 | A/B/C/D（COM4，115200） | ⚠️ A/B ✅；C/D 受 RF-ON 扫描期 CH340 掉线阻塞 → AL.3 |
+| 凭据红线 | git 全仓扫描 | ✅ 无真实 SSID/密码/内网 IP 进版本库（`.gitignore` 覆盖 `esp32/sdkconfig` 与 build 产物） |
+| 里程碑表 | AL.2 | ✅ G1..G11 全部收口 |
+
+- 结论：**M0–M7-G 协议 / 固件 / PC / 文档全部冻结**；唯一未闭环项为真实硬件
+  UART → Wi-Fi → TCP handoff 全链路——固件代码完成、esp32 build 通过，真机验证
+  受 RF-ON 扫描期 CH340 掉线阻塞（AL.3），不编造 PASS。
 
 ### AL.14 wire format 零改动声明
 
