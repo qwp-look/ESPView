@@ -95,6 +95,15 @@ config ESPVIEW_WIFI_PS_NONE
         实验性延迟优化（§二十五）：默认保持 ESP-IDF power save baseline；
         实时性测试可临时启用，不作为生产默认。
 
+config ESPVIEW_SCAN_SUSPEND_OLED
+    bool "Suspend OLED refresh during Wi-Fi scan (M7-E)"
+    default y
+    help
+        M7-E：Wi-Fi 扫描（RF 活动窗口）期间暂停 OLED 刷新（I2C 流量=0），
+        扫描成功/失败/超时/会话断线后由 ScanTransaction 终态路径恢复。
+        置 n 恢复 M7 前行为（扫描期间 OLED 保持刷新），用于 A/B 功耗与
+        稳定性对比实验。
+
 config ESPVIEW_LVGL_FLUSH_WAIT_MS
     int "LVGL flush wait budget (ms; UART pacing baseline)"
     default 3000

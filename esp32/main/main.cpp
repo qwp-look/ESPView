@@ -293,6 +293,11 @@ void sendPhysicalPreviewMessage() {
     if (!g_oled || g_endpoint.state() != SessionState::kConnected) {
         return;
     }
+    // M7-E：Wi-Fi 扫描挂起期间跳过（I2C/应用帧均静止；previewSlot 保持最后
+    // 一帧，恢复后只发最新帧——AE.3 frameId 语义，无需 backlog 队列）。
+    if (g_oled->isSuspendedForWifiScan()) {
+        return;
+    }
     const auto payload = g_oled->previewSlot().makePhysicalPreviewPayload();
     if (payload.empty()) {
         return;  // 槽无效（未开始刷新/已 reset）
@@ -316,6 +321,8 @@ void onSessionState(SessionState s) {
         // M3 spec §18：断线/会话重置 → 本地安全恢复（pressed keys/buttons 全部
         // 补发 release，清空状态；绝不回发 PC）。
         g_inputManager.resetState();
+        // M7-E：会话断开 → 中止进行中的扫描事务并恢复 OLED（无则 no-op）。
+        g_wifiProv.notifySessionDisconnected();
     }
     // M7-D1：每会话 CONNECTED 后发送一次 CAPABILITIES（重连重发，AD.3）。
     if (s == SessionState::kConnected) {
@@ -985,7 +992,29 @@ WifiProvisioning g_wifiProv(WifiProvisioning::Callbacks{
         }
         result.count = static_cast<uint8_t>(result.records.size());
         g_endpoint.sendWifiScanResult(result);
-    }});
+    },
+#if CONFIG_ESPVIEW_OLED_ENABLE
+    // M7-E：扫描期间 OLED 暂停/恢复挂钩（事务终态路径保证配对）。
+    // OLED 未启动（g_oled 空）时直接成功 no-op；CONFIG_ESPVIEW_SCAN_SUSPEND_OLED=n
+    // 时由 WifiProvisioning 内部忽略本挂钩（等同 M7 前行为，供 A/B 对比）。
+    []() -> bool {
+        if (!g_oled) {
+            return true;
+        }
+        return g_oled->pauseForWifiScan();
+    },
+    []() {
+        if (g_oled) {
+            g_oled->resumeAfterWifiScan();
+        }
+    },
+#else
+    // OLED 禁用（CONFIG_ESPVIEW_OLED_ENABLE=n）：空回调 —— WifiProvisioning 侧
+    // 对空回调按"直接成功/no-op"处理，等同 M7 前行为（供 A/B 对比）。
+    {},
+    {},
+#endif
+});
 
 #include "esp_heap_caps.h"  // heap_caps_get_largest_free_block / MALLOC_CAP_DEFAULT
 #include "esp_system.h"     // esp_get_free_heap_size / esp_get_minimum_free_heap_size

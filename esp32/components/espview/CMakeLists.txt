@@ -8,9 +8,11 @@ idf_component_register(
         "src/transport_manager.cpp"
         "${CMAKE_CURRENT_LIST_DIR}/../../../shared/transport/transport_manager.cpp"
         "${CMAKE_CURRENT_LIST_DIR}/../../../shared/transport/transport_sink.cpp"
+        "${CMAKE_CURRENT_LIST_DIR}/../../../shared/wifi/scan_transaction.cpp"  # M7-E：ScanTransaction（Agent K 并行交付）
     INCLUDE_DIRS
         "include"
         "${CMAKE_CURRENT_LIST_DIR}/../../../shared/transport"
+        "${CMAKE_CURRENT_LIST_DIR}/../../../shared/wifi"  # M7-E：scan_transaction.h
     REQUIRES
         esp_driver_uart
         esp_wifi

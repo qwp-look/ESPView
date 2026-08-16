@@ -26,6 +26,7 @@
 
 #pragma once
 
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <functional>
@@ -35,6 +36,8 @@
 #include "esp_netif.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
+
+#include "scan_transaction.h"  // M7-E：ScanTransaction（shared/wifi，Agent K 交付）
 
 namespace espview {
 
@@ -70,6 +73,12 @@ public:
         // 调用方转发 WIFI_SCAN_RESULT）。
         std::function<void(uint8_t scanSeq, bool truncated, uint16_t total,
                            const WifiProvScanRecord* records, size_t count)> onScanResult;
+        // M7-E：扫描期间 OLED 暂停/恢复挂钩（main 注入 g_oled 回调；可选）。
+        //   未注入时 suspend 视为直接成功、resume 为 no-op；
+        //   CONFIG_ESPVIEW_SCAN_SUSPEND_OLED=n 时两者都被忽略（等同 M7 前行为，
+        //   供 A/B 对比）。挂起成功返回 true；OLED 未启动直接 true。
+        std::function<bool()> scanSuspendDisplay;
+        std::function<void()> scanResumeDisplay;
     };
 
     explicit WifiProvisioning(Callbacks cb);
@@ -89,6 +98,12 @@ public:
     // 会话任务每 ~200ms 调用：处理命令队列、驱动相位机、派发 onStatus/onScanResult。
     // 必须在 esp_event 默认循环已创建后调用（main 中构造后即可，首次命令前懒 init）。
     void tick(uint64_t nowMs);
+
+    // M7-E：会话断开通知（main 在 onSessionState(kDisconnected) 调用；该回调
+    // 可运行于 RX/传输任务上下文，本方法只置原子挂起标志，不触碰事务状态）。
+    // 挂起标志由会话任务 tick() 消费：有进行中的扫描事务时进入 Disconnected
+    // 终态并恢复 OLED；无则 no-op。
+    void notifySessionDisconnected();
 
     // 只读查询（诊断/握手期；绝无敏感字段）。
     bool isConfigured() const;
@@ -119,8 +134,15 @@ private:
     void setStatus(uint8_t phase, uint16_t errorCode);
     void setError(uint16_t errorCode);
     void zeroPasswordBuffers();
+    bool suspendDisplay();  // M7-E：扫描启动时挂起 OLED（CONFIG=n/未注入 → 直接 true）
+    void resumeDisplay();   // M7-E：事务终态路径恢复 OLED（幂等 no-op 安全）
 
     Callbacks cb_;
+    // M7-E：Wi-Fi 扫描事务（OLED 暂停/恢复配对 + 超时；shared/wifi/scan_transaction.h）。
+    // 所有访问都发生在会话任务（tick()），无需互斥；跨任务断线通知经
+    // sessionDisconnectPending_ 原子标志由 tick() 消费。
+    wifi::ScanTransaction scanTransaction_;
+    std::atomic<bool> sessionDisconnectPending_{false};  // M7-E：跨任务断线通知（RX→会话）
     bool initialized_ = false;   // ensureWifiReady 成功（或外部已初始化）
     bool wifiOwned_ = false;     // 本模块成功调用 esp_wifi_init
     bool handlersRegistered_ = false;

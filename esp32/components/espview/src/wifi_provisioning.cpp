@@ -20,6 +20,7 @@ const char* kTag = "espview_wifi_prov";
 
 constexpr uint8_t kMaxScanRecords = 64;
 constexpr uint32_t kDhcpTimeoutMs = 20000;  // 连接后限时无 GOT_IP → kDhcpTimeout
+constexpr uint64_t kScanTimeoutMs = 10000;  // M7-E：扫描事务超时（被动扫描 ~2s，10s 余量）
 constexpr uint8_t kDefaultMaxEntries = 32;
 
 // ESP-IDF STA_DISCONNECTED reason → 协议错误码（认证类/AP 未找到为终态错误；
@@ -40,7 +41,12 @@ uint16_t errorCodeForReason(uint8_t reason) {
 
 }  // namespace
 
-WifiProvisioning::WifiProvisioning(Callbacks cb) : cb_(std::move(cb)) {
+WifiProvisioning::WifiProvisioning(Callbacks cb)
+    : cb_(std::move(cb)),
+      scanTransaction_(wifi::ScanTransactionCallbacks{
+          [this]() -> bool { return suspendDisplay(); },
+          [this]() { resumeDisplay(); },
+      }) {
     mutex_ = xSemaphoreCreateMutex();
 }
 
@@ -63,6 +69,24 @@ WifiProvisioning::~WifiProvisioning() {
 void WifiProvisioning::zeroPasswordBuffers() {
     // 清空命令槽 password 副本（RAM-only 生命周期；绝不延迟到析构）。
     std::memset(command_.password, 0, sizeof(command_.password));
+}
+
+bool WifiProvisioning::suspendDisplay() {
+#if CONFIG_ESPVIEW_SCAN_SUSPEND_OLED
+    if (cb_.scanSuspendDisplay) {
+        return cb_.scanSuspendDisplay();
+    }
+#endif  // CONFIG_ESPVIEW_SCAN_SUSPEND_OLED
+    // CONFIG=n：等同 M7 前行为（不挂起 OLED）；未注入回调：no-op 成功。
+    return true;
+}
+
+void WifiProvisioning::resumeDisplay() {
+#if CONFIG_ESPVIEW_SCAN_SUSPEND_OLED
+    if (cb_.scanResumeDisplay) {
+        cb_.scanResumeDisplay();
+    }
+#endif  // CONFIG_ESPVIEW_SCAN_SUSPEND_OLED
 }
 
 void WifiProvisioning::requestScan(uint8_t maxEntries) {
@@ -305,6 +329,16 @@ void WifiProvisioning::tick(uint64_t nowMs) {
         return;
     }
 
+    // M7-E：消费跨任务断线通知（RX/传输任务只置标志）→ 进行中的扫描事务进入
+    // Disconnected 终态并恢复 OLED；无活动事务时 no-op（可随后重新 begin）。
+    if (sessionDisconnectPending_.exchange(false, std::memory_order_acq_rel)) {
+        const wifi::ScanPhase p = scanTransaction_.phase();
+        if (p != wifi::ScanPhase::kIdle && p != wifi::ScanPhase::kError &&
+            p != wifi::ScanPhase::kDisconnected) {
+            scanTransaction_.onDisconnect();
+        }
+    }
+
     // 1) SCAN_DONE → 取结果（事件任务只置标志，取数在会话任务）。
     bool scanHandled = false;
     {
@@ -314,6 +348,7 @@ void WifiProvisioning::tick(uint64_t nowMs) {
         xSemaphoreGive(mutex_);
     }
     if (scanHandled) {
+        bool scanOk = false;  // M7-E：结果收集成功标志（onScanDone(ok)）
         uint16_t apNum = 0;
         if (esp_wifi_scan_get_ap_num(&apNum) != ESP_OK) {
             setError(5);  // kScanFailed
@@ -368,10 +403,13 @@ void WifiProvisioning::tick(uint64_t nowMs) {
                         statusDirty_ = true;
                         xSemaphoreGive(mutex_);
                     }
+                    scanOk = true;  // M7-E：结果收集成功
                 }
                 std::free(aps);
             }
         }
+        // M7-E：结果收集完成（成功/失败）→ 事务终态（成功/失败都恢复 OLED）。
+        scanTransaction_.onScanDone(scanOk);
     }
 
     // 2) 派发扫描结果（锁外回调；缓冲只在下次扫描前有效）。
@@ -411,9 +449,18 @@ void WifiProvisioning::tick(uint64_t nowMs) {
         xSemaphoreGive(mutex_);
     }
     switch (cmd.kind) {
-        case CommandKind::kScan:
+        case CommandKind::kScan: {
+            // M7-E：进入扫描事务。仅 Idle/Error/Disconnected 可开启；活动扫描
+            // 期间的重复请求忽略（单槽命令语义，避免对进行中事务重复 begin）。
+            const wifi::ScanPhase p = scanTransaction_.phase();
+            if (p != wifi::ScanPhase::kIdle && p != wifi::ScanPhase::kError &&
+                p != wifi::ScanPhase::kDisconnected) {
+                break;
+            }
+            scanTransaction_.begin();
             startScan(cmd.maxEntries);
             break;
+        }
         case CommandKind::kConfig:
             applyConfig(cmd);
             break;
@@ -441,12 +488,24 @@ void WifiProvisioning::tick(uint64_t nowMs) {
 
     // 5) 状态去重派发。
     publishStatus();
+
+    // 6) M7-E：扫描事务超时驱动（扫描卡死/无 SCAN_DONE 时恢复 OLED）。
+    scanTransaction_.tick(nowMs, kScanTimeoutMs);
+}
+
+void WifiProvisioning::notifySessionDisconnected() {
+    // M7-E：会话断开（onSessionState 回调，可能运行于 RX/传输任务）→ 只置
+    // 原子挂起标志；事务终态转换由会话任务 tick() 消费执行（同一任务内对
+    // scanTransaction_ 的全部访问，避免跨任务数据竞争）。
+    sessionDisconnectPending_.store(true, std::memory_order_release);
 }
 
 void WifiProvisioning::startScan(uint8_t maxEntries) {
     const esp_err_t r = ensureWifiReady();
     if (r != ESP_OK) {
         setError(12);  // kApiError
+        // M7-E：扫描未启动（init 失败）→ 事务终态 Error（尚未挂起，恢复 no-op）。
+        scanTransaction_.onScanStarted(false);
         return;
     }
     {
@@ -481,6 +540,8 @@ void WifiProvisioning::startScan(uint8_t maxEntries) {
         if (startErr != ESP_OK) {
             ESP_LOGE(kTag, "esp_wifi_start failed: %s", esp_err_to_name(startErr));
             setError(12);  // kApiError
+            // M7-E：扫描未启动 → 事务终态 Error（尚未挂起，恢复 no-op）。
+            scanTransaction_.onScanStarted(false);
             return;
         }
         err = esp_wifi_scan_start(&sc, false);
@@ -488,7 +549,12 @@ void WifiProvisioning::startScan(uint8_t maxEntries) {
     if (err != ESP_OK) {
         ESP_LOGW(kTag, "esp_wifi_scan_start failed: %s", esp_err_to_name(err));
         setError(5);  // kScanFailed
+        // M7-E：扫描启动失败 → 事务终态 Error（尚未挂起，恢复 no-op）。
+        scanTransaction_.onScanStarted(false);
+        return;
     }
+    // M7-E：扫描已启动 → 挂起 OLED（失败由事务记录），进入 DisplaySuspended。
+    scanTransaction_.onScanStarted(suspendDisplay());
 }
 
 void WifiProvisioning::applyConfig(Command cmd) {
