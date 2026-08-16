@@ -19,6 +19,21 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
     target_compile_options(espview_protocol PRIVATE -Wall -Wextra -Wpedantic)
 endif()
 
+option(ESPVIEW_BUILD_BENCH "Build host-side protocol benchmark" ON)
+if(ESPVIEW_BUILD_BENCH)
+    # M8-A1 Task 7：独立基准可执行（非测试；benchmark 不 add_test）。
+    # counting_allocator.cpp 只链接进本可执行文件（全局 operator new 覆盖，
+    # 绝不可链接进 libespview_protocol）。
+    add_executable(espview_protocol_bench
+        bench/protocol_bench.cpp
+        bench/counting_allocator.cpp
+    )
+    target_link_libraries(espview_protocol_bench PRIVATE espview_protocol)
+    if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+        target_compile_options(espview_protocol_bench PRIVATE -Wall -Wextra -Wpedantic)
+    endif()
+endif()
+
 option(ESPVIEW_BUILD_TESTS "Build host-side protocol tests" ON)
 if(ESPVIEW_BUILD_TESTS)
     enable_testing()

@@ -33,6 +33,7 @@ enum class PacketError : uint8_t {
     kCrcMismatch,         // CRC32 校验失败
     kMessageTooLarge,     // Message payload 超过 kMaxMessagePayload（Encoder 使用）
     kSinkAborted,         // encodeStream 的 sink 返回 false（发送中止，非编码错误）
+    kInvalidAckReq,       // M8-A1：ACK_REQ 出现在白名单外类型上（实现层错误，非 wire 格式变化）
 };
 
 // Header 的逻辑表示（与 20 字节线格式分离）。

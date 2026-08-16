@@ -208,7 +208,7 @@ int main() {
     std::setvbuf(stdout, nullptr, _IONBF, 0);
     std::printf("== ESPView TransportConfig host tests (M6-D) ==\n");
     runConfigTests();
-    std::printf("----\nchecks: %d, failures: %d\n", espview::proto::test::gChecks,
-                espview::proto::test::gFailures);
-    return espview::proto::test::gFailures == 0 ? 0 : 1;
+    std::printf("----\nchecks: %d, failures: %d\n", espview::proto::test::gChecks.load(),
+                espview::proto::test::gFailures.load());
+    return espview::proto::test::gFailures.load() == 0 ? 0 : 1;
 }

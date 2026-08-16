@@ -264,6 +264,16 @@ std::optional<Message> makeCapabilities(
 // 杜绝 UI 数值注入。成功 → out 填充并返回 true。
 bool parseCapabilities(BytesView payload, CapabilitiesInfo& out);
 
+// ---- ACK_REQ 白名单（M8-A1；DESIGN.md E 节 ACK 语义）----
+// 仅 SET_MODE(0x03) / WIFI_SCAN_REQ(0x06) / WIFI_CONFIG(0x08) 可携带 ACK_REQ；
+// 其余类型（FRAME_*/INPUT_*/PING/PONG/ACK/ERROR/HELLO/CAPABILITIES/
+// PHYSICAL_PREVIEW/WIFI_RESULT/WIFI_STATUS）一律禁止。
+//   Encoder（encode/encodeStream/encodeStreaming）：白名单外 + ACK_REQ
+//     → PacketError::kInvalidAckReq（实现层错误，非 wire 格式变化）；
+//   Endpoint RX：白名单外 + ACK_REQ → 忽略消息 + 计数（不回 ACK、不发错误）；
+//   StreamDecoder 保持 wire-transparent，不解释 ACK_REQ。
+bool allowedAckRequestType(uint8_t type);
+
 // ACK (0x51)：ackSeq = 被确认包的 SEQ；status = 0(OK)/1(ERR)；errorCode。
 Message makeAck(uint16_t ackSeq, uint8_t status, ErrorCode errorCode);
 

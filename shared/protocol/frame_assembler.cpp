@@ -2,20 +2,15 @@
 
 #include <utility>
 
+#include "byte_order.h"
+
 namespace espview {
 namespace proto {
 
 namespace {
 
-// 小端读取（禁止 reinterpret_cast / 未对齐访问）。
-uint16_t readU16(const uint8_t* p) {
-    return static_cast<uint16_t>(p[0]) | (static_cast<uint16_t>(p[1]) << 8);
-}
-
-uint32_t readU32(const uint8_t* p) {
-    return static_cast<uint32_t>(p[0]) | (static_cast<uint32_t>(p[1]) << 8) |
-           (static_cast<uint32_t>(p[2]) << 16) | (static_cast<uint32_t>(p[3]) << 24);
-}
+// 小端读取统一走 byte_order.h（M8-A1 内部重构；wire 字节序冻结）。
+// （file-local readU16/readU32 已删除，调用点改用 readU16LE/readU32LE。）
 
 // v0.1 仅 RGB565（bpp=2）；未知格式返回 0（BEGIN 校验时拒绝）。
 uint32_t bytesPerPixel(PixelFormat fmt) {
@@ -127,8 +122,8 @@ void FrameAssembler::handleBegin(const Message& msg) {
     if (ok) {
         const uint8_t typeByte = p[2];
         const uint8_t fmtByte = p[3];
-        const uint16_t width = readU16(p + 4);
-        const uint16_t height = readU16(p + 6);
+        const uint16_t width = readU16LE(p + 4);
+        const uint16_t height = readU16LE(p + 6);
         const bool knownType = (typeByte == static_cast<uint8_t>(FrameType::kFull) ||
                                 typeByte == static_cast<uint8_t>(FrameType::kPartial));
         ok = knownType &&
@@ -154,12 +149,12 @@ void FrameAssembler::handleBegin(const Message& msg) {
         discardTo(FrameDiscardReason::kSupersededByNewBegin);
     }
     state_ = FrameState::kInFrame;
-    begin_.frameId = readU16(p);
+    begin_.frameId = readU16LE(p);
     begin_.frameType = static_cast<FrameType>(p[2]);
     begin_.pixelFormat = static_cast<PixelFormat>(p[3]);
-    begin_.width = readU16(p + 4);
-    begin_.height = readU16(p + 6);
-    begin_.byteHint = readU32(p + 8);
+    begin_.width = readU16LE(p + 4);
+    begin_.height = readU16LE(p + 6);
+    begin_.byteHint = readU32LE(p + 8);
     rectCount_ = 0;
     byteCount_ = 0;
     if (cb_.onBegin) {
@@ -178,10 +173,10 @@ void FrameAssembler::handleRect(const Message& msg) {
     uint16_t x = 0, y = 0, w = 0, h = 0;
     uint64_t pixelBytes = 0;
     if (ok) {
-        x = readU16(p);
-        y = readU16(p + 2);
-        w = readU16(p + 4);
-        h = readU16(p + 6);
+        x = readU16LE(p);
+        y = readU16LE(p + 2);
+        w = readU16LE(p + 4);
+        h = readU16LE(p + 6);
         const uint32_t bpp = bytesPerPixel(begin_.pixelFormat);
         // 边界：w/h >= 1，x+w <= width，y+h <= height（u32 运算防溢出）。
         ok = w >= 1 && h >= 1 && bpp != 0 &&
@@ -235,9 +230,9 @@ void FrameAssembler::handleEnd(const Message& msg) {
         return;
     }
 
-    const uint16_t frameId = readU16(p);
-    const uint16_t rectCount = readU16(p + 2);
-    const uint32_t byteCount = readU32(p + 4);
+    const uint16_t frameId = readU16LE(p);
+    const uint16_t rectCount = readU16LE(p + 2);
+    const uint32_t byteCount = readU32LE(p + 4);
 
     if (frameId != begin_.frameId) {
         discardTo(FrameDiscardReason::kEndFrameIdMismatch);

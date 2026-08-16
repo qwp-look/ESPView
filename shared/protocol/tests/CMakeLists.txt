@@ -1,5 +1,9 @@
 add_executable(espview_protocol_tests
     test_main.cpp
+    byte_order_test.cpp
+    decoder_timeout_test.cpp
+    ack_req_test.cpp
+    counting_allocator.cpp
     crc_test.cpp
     packet_test.cpp
     encoder_test.cpp

@@ -2,6 +2,7 @@
 
 #include <cstring>
 
+#include "byte_order.h"
 #include "crc32.h"
 
 namespace espview {
@@ -20,23 +21,15 @@ void writeCrcCoveredHeader(const PacketHeader& h, uint8_t* dst) {
     dst[5] = h.type;
     dst[6] = h.flags;
     dst[7] = h.rsvd;
-    dst[8] = static_cast<uint8_t>(h.seq & 0xFFu);
-    dst[9] = static_cast<uint8_t>((h.seq >> 8) & 0xFFu);
-    dst[10] = static_cast<uint8_t>(h.length & 0xFFu);
-    dst[11] = static_cast<uint8_t>((h.length >> 8) & 0xFFu);
-    dst[12] = static_cast<uint8_t>((h.length >> 16) & 0xFFu);
-    dst[13] = static_cast<uint8_t>((h.length >> 24) & 0xFFu);
+    writeU16LE(dst + 8, h.seq);
+    writeU32LE(dst + 10, h.length);
 }
 
 // 完整 20 字节序列化（小端）。
 void writeHeader(const PacketHeader& h, uint8_t* out) {
     writeCrcCoveredHeader(h, out);
-    out[14] = static_cast<uint8_t>(h.crc32 & 0xFFu);
-    out[15] = static_cast<uint8_t>((h.crc32 >> 8) & 0xFFu);
-    out[16] = static_cast<uint8_t>((h.crc32 >> 16) & 0xFFu);
-    out[17] = static_cast<uint8_t>((h.crc32 >> 24) & 0xFFu);
-    out[18] = static_cast<uint8_t>(h.rsvd2 & 0xFFu);
-    out[19] = static_cast<uint8_t>((h.rsvd2 >> 8) & 0xFFu);
+    writeU32LE(out + 14, h.crc32);
+    writeU16LE(out + 18, h.rsvd2);
 }
 
 }  // namespace
@@ -93,10 +86,7 @@ PacketError decodeHeader(const uint8_t* in, size_t inSize, PacketHeader* out) {
     if (type < kMinMessageType || type > kMaxMessageType) {
         return PacketError::kInvalidType;
     }
-    const uint32_t length = static_cast<uint32_t>(in[10]) |
-                            (static_cast<uint32_t>(in[11]) << 8) |
-                            (static_cast<uint32_t>(in[12]) << 16) |
-                            (static_cast<uint32_t>(in[13]) << 24);
+    const uint32_t length = readU32LE(in + 10);
     if (length > kMaxPacketPayload) {
         return PacketError::kInvalidLength;
     }
@@ -106,13 +96,10 @@ PacketError decodeHeader(const uint8_t* in, size_t inSize, PacketHeader* out) {
     out->type = type;
     out->flags = in[6];
     out->rsvd = in[7];
-    out->seq = static_cast<uint16_t>(in[8]) | (static_cast<uint16_t>(in[9]) << 8);
+    out->seq = readU16LE(in + 8);
     out->length = length;
-    out->crc32 = static_cast<uint32_t>(in[14]) |
-                 (static_cast<uint32_t>(in[15]) << 8) |
-                 (static_cast<uint32_t>(in[16]) << 16) |
-                 (static_cast<uint32_t>(in[17]) << 24);
-    out->rsvd2 = static_cast<uint16_t>(in[18]) | (static_cast<uint16_t>(in[19]) << 8);
+    out->crc32 = readU32LE(in + 14);
+    out->rsvd2 = readU16LE(in + 18);
     return PacketError::kNone;
 }
 
@@ -135,13 +122,10 @@ PacketError encodePacket(const PacketHeader& h, const uint8_t* payload, size_t p
     wire.crc32 = 0;
     writeHeader(wire, out);
     if (payloadLen > 0) {
-        std::memcpy(out + kPacketHeaderSize, payload, payloadLen);
+        std::memmove(out + kPacketHeaderSize, payload, payloadLen);
     }
     const uint32_t crc = computePacketCrc(wire, payload, payloadLen);
-    out[14] = static_cast<uint8_t>(crc & 0xFFu);
-    out[15] = static_cast<uint8_t>((crc >> 8) & 0xFFu);
-    out[16] = static_cast<uint8_t>((crc >> 16) & 0xFFu);
-    out[17] = static_cast<uint8_t>((crc >> 24) & 0xFFu);
+    writeU32LE(out + 14, crc);
     if (written != nullptr) {
         *written = kPacketHeaderSize + payloadLen;
     }
@@ -186,6 +170,8 @@ const char* toString(PacketError e) {
             return "kMessageTooLarge";
         case PacketError::kSinkAborted:
             return "kSinkAborted";
+        case PacketError::kInvalidAckReq:
+            return "kInvalidAckReq";
     }
     return "kUnknown";
 }

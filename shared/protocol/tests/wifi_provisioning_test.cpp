@@ -614,22 +614,39 @@ void runAckReqDispatch() {
     a.pump();
     CHECK_EQ(a.ep->stats().ackReceived, 2u);
 
-    // 未知 ACK_REQ 类型 → 仍走 onAckRequest（应用决定拒绝），不 failSession。
+    // M8-A1 ACK_REQ 白名单：whitelist 外类型（INPUT_TOUCH）携带 ACK_REQ →
+    // Encoder 拒绝（kInvalidAckReq）；RX 侧收到此类包 → 忽略 + 计数
+    // （不回 ACK、不发任何 wire 错误、不 failSession）。
     const auto unknown = makeMessage(static_cast<uint8_t>(MessageType::kInputTouch), kFlagAckReq,
                                         std::vector<uint8_t>(1, 0));
-    feed.pushTo(b, unknown);
+    {
+        SequenceCounter encSeq;
+        MessageEncoder enc(encSeq);
+        std::vector<std::vector<uint8_t>> pkts;
+        CHECK_EQ(enc.encode(unknown, pkts), PacketError::kInvalidAckReq);
+    }
+    // RX 侧手工构造 whitelist 外 ACK_REQ 包（encodePacket 不做 ACK_REQ 校验）：
+    // seq=2 与 feed 的后续序号一致（避免被 seq 规则丢弃）。
+    const espview::proto::PacketHeader rh =
+        espview::proto::makeHeader(static_cast<uint8_t>(MessageType::kInputTouch), kFlagAckReq,
+                                   2, 1);
+    std::array<uint8_t, espview::proto::kPacketHeaderSize + 1> raw{};
+    size_t rawLen = 0;
+    CHECK_EQ(espview::proto::encodePacket(rh, unknown.payload.data(), unknown.payload.size(),
+                                          raw.data(), raw.size(), &rawLen),
+             PacketError::kNone);
+    b.rx.insert(b.rx.end(), raw.begin(), raw.begin() + rawLen);
     b.pump();
-    CHECK_EQ(b.ackRequests.size(), 3u);
-    CHECK_EQ(b.ackRequests[2].first, static_cast<uint8_t>(MessageType::kInputTouch));
+    CHECK_EQ(b.ackRequests.size(), 2u);  // 不再触发 onAckRequest
+    CHECK_EQ(b.ep->stats().invalidAckReq, 1u);
     CHECK_EQ(b.protoErrors.size(), 0u);
     CHECK_EQ(b.ep->state(), SessionState::kConnected);
-    b.ep->acknowledge(b.ackRequests[2].second, 1, ErrorCode::kInvalidParam);
     a.pump();
-    CHECK_EQ(a.ep->stats().ackReceived, 3u);
+    CHECK_EQ(a.ep->stats().ackReceived, 2u);  // 未回 ACK
 
     // WIFI_SCAN_RESULT / WIFI_STATUS 不带 ACK_REQ（fire-and-forget）→ 不触发
     // onAckRequest，直接走数据回调。
-    CHECK_EQ(b.ackRequests.size(), 3u);
+    CHECK_EQ(b.ackRequests.size(), 2u);
 }
 
 }  // namespace

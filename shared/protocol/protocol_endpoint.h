@@ -25,6 +25,7 @@
 
 #pragma once
 
+#include <atomic>
 #include <chrono>
 #include <cstddef>
 #include <optional>
@@ -160,6 +161,10 @@ struct SessionStats {
     uint64_t badMagic = 0;          // MAGIC 不可信次数
     uint64_t badVersion = 0;        // VERSION 不支持次数
     uint64_t badHeader = 0;         // 其余头部非法（badType/badLength 等）
+
+    // M8-A1：RX 收到 ACK_REQ 出现在白名单外类型（FRAME_*/INPUT_*/PING/...）
+    // 的次数——忽略 + 计数，不回 ACK、不发任何 wire 错误（DESIGN.md E 节 ACK 语义）。
+    uint64_t invalidAckReq = 0;
 };
 
 class ProtocolEndpoint {
@@ -229,11 +234,16 @@ public:
     // ---- Application 发送面 ----
     // 发送逻辑消息（经 MessageEncoder → PacketSink）。
     // ACK_REQ 消息（如 makeSetMode）自动登记 pending ACK；多包消息置 ACK_REQ 被拒绝。
+    // 重入约束：sink 回调内不得再次调用本端点的阻塞式 sendMessage /
+    // sendMessageStreaming（sendMutex_ 不可重入 → 自死锁）；重入只能走 tryTransmit
+    // （锁忙返回 kBackpressure）。
     SendResult sendMessage(const Message& msg);
     // 发送流式消息（M1-3C）：payload 由 source 按需产生，不要求整段驻留内存。
     // 适用于大型数据消息（FRAME_RECT 等）；wire bytes 与 sendMessage 完全一致。
     // 约束：不接受 ACK_REQ（ACK_REQ 仅限单包控制消息，见 DESIGN.md）；不支持
     //   pending-ACK 重试（数据面整帧丢弃策略），错误时返回 kInvalidMessage。
+    // 重入约束：sink/source 回调内不得再次调用本端点的阻塞式 sendMessage /
+    //   sendMessageStreaming（sendMutex_ 不可重入 → 自死锁）。
     SendResult sendMessageStreaming(const MessageHeader& header, IMessagePayloadSource& source);
     // 主动重发 HELLO（重连确认等场景）
     SendResult sendHello();
@@ -256,14 +266,22 @@ public:
     SendResult sendWifiStatus(const WifiStatusInfo& status);
 
     // ---- 心跳/超时驱动（由上层定时调用，如每 100-200ms）----
+    // M8-A1：tick() 同时驱动 StreamDecoder 的半包超时（约 500 ms →
+    // StreamDecoder::onTimeout()，见 decoder.h/protocol_endpoint.h 文档）；
+    // 并排空单槽 pendingHello_/pendingCapabilities_（RX 非阻塞回复的兜底）。
     void tick();
 
-    // ---- 状态/查询 ----
-    SessionState state() const { return state_; }
-    bool isConnected() const { return state_ == SessionState::kConnected; }
-    const SessionStats& stats() const { return stats_; }
-    const FrameStats& frameStats() const { return frames_.stats(); }
-    const HelloInfo& peerHello() const { return peerHello_; }
+    // ---- 状态/查询（M8-A1：按值返回，sessionMutex_/decoderMutex_ 短临界区保护）----
+    SessionState state() const;
+    bool isConnected() const;
+    SessionStats stats() const;    // 快照拷贝（源兼容既有 `ep.stats().field` / `const auto s = ep.stats()`）
+    FrameStats frameStats() const; // 快照拷贝（decoderMutex_ 保护 FrameAssembler）
+    // M8-A1：peerHello_ 跨线程读写（RX 写 / 任意读）——按值返回（sessionMutex_
+    // 短临界区快照；与既有调用 `ep.peerHello().width` / `.device_name.c_str()` 兼容）。
+    HelloInfo peerHello() const {
+        std::lock_guard<std::mutex> lock(sessionMutex_);
+        return peerHello_;
+    }
     uint64_t nowMs() const { return clock_(); }
 
 private:
@@ -293,8 +311,18 @@ private:
     SendResult transmit(const Message& msg, bool requireConnected, bool isRetry = false);
     SendResult tryTransmit(const Message& msg, bool requireConnected, bool isRetry = false);
     SendResult transmitImpl(const Message& msg, bool requireConnected, bool isRetry);
+    // M8-A1：encodeStream 完成后把 firstSeq/haveFirstSeq 带回给调用方，
+    //   由 afterSend()（sendMutex_ 释放后）登记 pending ACK —— 保证锁序
+    //   decoderMutex_ → sessionMutex_ → sendMutex_（不持 sendMutex_ 取 sessionMutex_）。
     SendResult transmitImplWithSink(const Message& msg, bool requireConnected, bool isRetry,
-                                    const PacketSink& sink);
+                                    const PacketSink& sink, uint16_t* firstSeq,
+                                    bool* haveFirstSeq);
+    // 发送成功后的会话登记：txMessages++ / pending ACK 注册（sessionMutex_ 保护）。
+    void afterSend(const Message& msg, bool isRetry, SendResult r, uint16_t firstSeq,
+                   bool haveFirstSeq);
+    // 单槽 pending 回复排空（tick() 调用；tryTransmit 非阻塞，kOk 清槽）。
+    void drainPendingHello();
+    void drainPendingCapabilities();
     // 流式发送（M1-3C）：transmit 的流式版本，sendMutex_ 原子送出整条流式消息。
     SendResult transmitStreaming(const MessageHeader& header, IMessagePayloadSource& source,
                                  bool requireConnected);
@@ -306,6 +334,26 @@ private:
     TrySink trySink_;  // 可为空；空时 tryTransmit 回退到 sink_
     Callbacks cb_;
     Clock clock_;
+
+    // M8-A1 并发模型（DESIGN.md I 节线程模型，M8-A1 更新）：
+    //   锁序不变量（真实边，非全序）：
+    //     - RX 路径：decoderMutex_ → sessionMutex_（feed 临界区内的消息/错误
+    //       回调可取 sessionMutex_，属允许方向）；
+    //     - TX 路径：sendMutex_ → sessionMutex_（transmitImplWithSink /
+    //       transmitStreamingImpl 内短状态快照；安全——从不持 sessionMutex_ 再取
+    //       decoderMutex_，也不在持 sessionMutex_ 时阻塞等 sendMutex_——所有
+    //       session→send 路径均用 tryTransmit/try_lock）。
+    //   其余规则：
+    //     - sessionMutex_：state_/stats_/pendingAck_/lastPingMs_/connectMs_/
+    //       lastPingSentAtMs_/lastSinglePacketSeq_/pendingHello_/pendingCapabilities_
+    //       的短临界区访问（sessionMutex_ 持锁期间绝不调用用户回调）；
+    //     - decoderMutex_：decoder_ 与 frames_ 对象访问（feed/reset/onTimeout/
+    //       onMessage/onStreamError/查询）；
+    //     - sendMutex_：整条消息编码+发送原子段；decoder 回调内的发送必须用
+    //       tryTransmit（try_lock，非阻塞无死锁）；sink 回调不得重入阻塞式
+    //       sendMessage/sendMessageStreaming（sendMutex_ 不可重入 → 自死锁）。
+    mutable std::mutex sessionMutex_;
+    mutable std::mutex decoderMutex_;
 
     SessionState state_ = SessionState::kDisconnected;
     SessionStats stats_;
@@ -322,18 +370,27 @@ private:
     // 发送串行化：整条消息原子送出（并发 sendMessage 不得交叉包）。
     std::mutex sendMutex_;
 
-    // 心跳/超时
-    uint64_t lastPeerRxMs_ = 0;     // 最近一次收到对端有效消息的时间
-    uint64_t lastPingMs_ = 0;       // 最近一次发送 PING 的时间
-    uint64_t connectMs_ = 0;        // Transport 连接时间（handshake 超时基准）
-    uint64_t lastPingSentAtMs_ = 0; // 最近一次 PING 的发送时刻（RTT 测量）
+    // 心跳/超时（M8-A1：lastPeerRxMs_/lastDecoderRxMs_ 原子——RX 写、tick 读）
+    std::atomic<uint64_t> lastPeerRxMs_{0};     // 最近一次收到对端有效消息的时间
+    std::atomic<uint64_t> lastDecoderRxMs_{0};  // 最近一次向 decoder 喂字节的时间（半包超时时钟）
+    uint64_t lastPingMs_ = 0;       // 最近一次发送 PING 的时间（sessionMutex_）
+    uint64_t connectMs_ = 0;        // Transport 连接时间（handshake 超时基准；sessionMutex_）
+    uint64_t lastPingSentAtMs_ = 0; // 最近一次 PING 的发送时刻（RTT 测量；sessionMutex_）
 
-    uint16_t lastSinglePacketSeq_ = 0;  // 最近一个单包（非 CHUNKED）的 SEQ（ACK_REQ 消息定位用）
+    uint16_t lastSinglePacketSeq_ = 0;  // 最近一个单包（非 CHUNKED）的 SEQ（ACK_REQ 消息定位用；sessionMutex_）
 
     // failSession 重入保护：decoder feed 回调内不得调用 decoder_.reset()
     // （会破坏正在迭代的缓冲），延后到下一次 onTransportData()/tick() 执行。
-    bool inDecoderCallback_ = false;
-    bool decoderResetPending_ = false;
+    // M8-A1：原子（RX 回调线程写 / tick 线程读）。
+    std::atomic<bool> inDecoderCallback_{false};
+    std::atomic<bool> decoderResetPending_{false};
+
+    // M8-A1 单槽非阻塞回复（RX 路径背压时的兜底，tick() 排空）：
+    //   pendingHello_：被动恢复时 HELLO 发送失败暂存（Connecting/Handshake 排空）；
+    //   pendingCapabilities_：sendCapabilities 背压暂存（Connected 排空）。
+    // 均受 sessionMutex_ 保护。
+    std::optional<Message> pendingHello_;
+    std::optional<Message> pendingCapabilities_;
 
     // Pending ACK（最多同时一个；v0.1 控制面串行）
     struct PendingAck {

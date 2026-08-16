@@ -30,6 +30,7 @@
 #include "packet.h"
 #include "protocol.h"
 #include "protocol_endpoint.h"
+#include "counting_allocator.h"
 #include "test_util.h"
 
 namespace {
@@ -60,6 +61,7 @@ using espview::proto::SessionState;
 using espview::proto::StreamDecoder;
 using espview::proto::kFlagAckReq;
 using espview::proto::kFlagChunked;
+using espview::proto::kMaxMessagePayload;
 using espview::proto::kMaxPacketPayload;
 
 // ---- 测试用 payload source：按 offset 实时产生字节，不持有整段向量 ----
@@ -600,6 +602,190 @@ void streaming_endpoint_send() {
     CHECK_EQ(a.ep->sendMessageStreaming(bad, src), SendResult::kInvalidMessage);
 }
 
+// ---- M8-A1：1 MiB 逻辑载荷上限 + 零堆分配热路径 ----
+
+// 恰好 1 MiB：256 个满包，kNone，与 encode() 对同一载荷逐位一致。
+void streaming_megabyte_allowed() {
+    constexpr size_t kMiB = kMaxMessagePayload;
+    const std::vector<uint8_t> ref = makeReferencePayload(kMiB);
+    const MessageHeader header{static_cast<uint8_t>(MessageType::kFrameRect), 0};
+    SequenceCounter seq;
+    MessageEncoder enc(seq);
+    PacketCollector coll;
+    PatternSource source(kMiB, [&ref](size_t off) { return ref[off]; });
+    CHECK_EQ(enc.encodeStreaming(header, source, [&coll](const uint8_t* d, size_t n) {
+                 coll.sink(d, n);
+                 return true;
+             }),
+             PacketError::kNone);
+    CHECK_EQ(coll.packets.size(), 256u);
+    // 与 encode() 对照（测试侧持有 1 MiB 参考向量；生产路径零堆分配见 alloc 测试）。
+    Message msg;
+    msg.type = static_cast<uint8_t>(MessageType::kFrameRect);
+    msg.payload = ref;
+    SequenceCounter seqA;
+    MessageEncoder encA(seqA);
+    std::vector<std::vector<uint8_t>> packetsA;
+    CHECK_EQ(encA.encode(msg, packetsA), PacketError::kNone);
+    CHECK_MSG(packetsEqual(packetsA, coll.packets), "1 MiB streaming == encode()");
+    // CHUNKED 规则 + SEQ 连续性（前 255 个 CHUNKED=1，末包 CHUNKED=0）。
+    std::vector<DecodedPacket> dps;
+    CHECK(decodeAll(coll.packets, dps));
+    for (size_t i = 0; i < dps.size(); ++i) {
+        const bool last = (i + 1 == dps.size());
+        CHECK_EQ(static_cast<bool>(dps[i].header.flags & kFlagChunked), !last);
+        CHECK_EQ(dps[i].header.seq, static_cast<uint16_t>(i));
+        CHECK_EQ(dps[i].header.type, static_cast<uint8_t>(MessageType::kFrameRect));
+    }
+}
+
+// 1 MiB − 1（1048575 B）：255 个满包 + 4095B 尾包 = 256 个包，kNone，
+// 与 encode() 对同一载荷逐位一致。
+void streaming_megabyte_minus_one_allowed() {
+    constexpr size_t kMiB = kMaxMessagePayload;
+    const std::vector<uint8_t> ref = makeReferencePayload(kMiB - 1);
+    const MessageHeader header{static_cast<uint8_t>(MessageType::kFrameRect), 0};
+    SequenceCounter seq;
+    MessageEncoder enc(seq);
+    PacketCollector coll;
+    PatternSource source(kMiB - 1, [&ref](size_t off) { return ref[off]; });
+    CHECK_EQ(enc.encodeStreaming(header, source, [&coll](const uint8_t* d, size_t n) {
+                 coll.sink(d, n);
+                 return true;
+             }),
+             PacketError::kNone);
+    CHECK_EQ(coll.packets.size(), 256u);  // 255×4096 + 4095 = 1048575
+    Message msg;
+    msg.type = static_cast<uint8_t>(MessageType::kFrameRect);
+    msg.payload = ref;
+    SequenceCounter seqA;
+    MessageEncoder encA(seqA);
+    std::vector<std::vector<uint8_t>> packetsA;
+    CHECK_EQ(encA.encode(msg, packetsA), PacketError::kNone);
+    CHECK_MSG(packetsEqual(packetsA, coll.packets), "1 MiB-1 streaming == encode()");
+    // CHUNKED 规则 + 末包 LEN=4095。
+    std::vector<DecodedPacket> dps;
+    CHECK(decodeAll(coll.packets, dps));
+    size_t total = 0;
+    for (size_t i = 0; i < dps.size(); ++i) {
+        const bool last = (i + 1 == dps.size());
+        CHECK_EQ(static_cast<bool>(dps[i].header.flags & kFlagChunked), !last);
+        total += dps[i].payload.size();
+    }
+    CHECK_EQ(total, kMiB - 1);
+}
+
+// 跨消息 staging 复用：同一 MessageEncoder 依次编码 1B/4096B/153608B/1B，
+// 每次输出都与全新 Encoder 对同一载荷的 encode() 逐位一致（证明旧消息的
+// 缓冲残留不会泄漏到下一消息）。
+void streaming_staging_reuse_cross_messages() {
+    const size_t sizes[] = {1, 4096, 153608, 1};
+    // SEQ 是跨消息连续流（握手间不重置）：复用 encoder 与参考 encoder 必须
+    // 共享同一起点并按相同步长消耗 SEQ，逐包对照才能字节一致。
+    SequenceCounter seq, refSeq;
+    MessageEncoder enc(seq), refEnc(refSeq);
+    const MessageHeader header{static_cast<uint8_t>(MessageType::kFrameRect), 0};
+    for (const size_t len : sizes) {
+        const std::vector<uint8_t> ref = makeReferencePayload(len);
+        PacketCollector coll;
+        PatternSource source(len, [&ref](size_t off) { return ref[off]; });
+        CHECK_EQ(enc.encodeStreaming(header, source, [&coll](const uint8_t* d, size_t n) {
+                     coll.sink(d, n);
+                     return true;
+                 }),
+                 PacketError::kNone);
+        Message msg;
+        msg.type = static_cast<uint8_t>(MessageType::kFrameRect);
+        msg.payload = ref;
+        std::vector<std::vector<uint8_t>> refPackets;
+        CHECK_EQ(refEnc.encode(msg, refPackets), PacketError::kNone);
+        CHECK_MSG(packetsEqual(refPackets, coll.packets),
+                  "staging reuse len " + std::to_string(len) + " == fresh encode()");
+    }
+}
+
+// 1 MiB + 1：发出 256 个满包（1 MiB prefix）后返回 kMessageTooLarge，
+// 无第 257 个包；prefix 与 encode() 对 1 MiB 载荷的输出逐位一致。
+void streaming_megabyte_plus_one_rejected() {
+    constexpr size_t kMiB = kMaxMessagePayload;
+    const std::vector<uint8_t> ref = makeReferencePayload(kMiB + 1);
+    const MessageHeader header{static_cast<uint8_t>(MessageType::kFrameRect), 0};
+    SequenceCounter seq;
+    MessageEncoder enc(seq);
+    PacketCollector coll;
+    PatternSource source(kMiB + 1, [&ref](size_t off) { return ref[off]; });
+    const PacketError err = enc.encodeStreaming(
+        header, source, [&coll](const uint8_t* d, size_t n) {
+            coll.sink(d, n);
+            return true;
+        });
+    CHECK_EQ(err, PacketError::kMessageTooLarge);
+    CHECK_EQ(coll.packets.size(), 256u);  // 恰好 256 个满包，无部分第 257 包
+    Message msg;
+    msg.type = static_cast<uint8_t>(MessageType::kFrameRect);
+    msg.payload.assign(ref.begin(), ref.begin() + kMiB);
+    SequenceCounter seqA;
+    MessageEncoder encA(seqA);
+    std::vector<std::vector<uint8_t>> packetsA;
+    CHECK_EQ(encA.encode(msg, packetsA), PacketError::kNone);
+    // 前 255 个包与 encode() 逐位一致；第 256 包载荷相同但 CHUNKED=1
+    // （流被截断：后随数据未发出，末包必须保持 CHUNKED=1，不能伪装成消息末尾）。
+    for (size_t i = 0; i + 1 < coll.packets.size(); ++i) {
+        CHECK_MSG(packetsA[i] == coll.packets[i],
+                  "prefix packet " + std::to_string(i) + " == encode()");
+    }
+    {
+        std::vector<DecodedPacket> dps;
+        CHECK(decodeAll(coll.packets, dps));
+        size_t total = 0;
+        for (const auto& dp : dps) {
+            CHECK_EQ(static_cast<bool>(dp.header.flags & kFlagChunked), true);  // 全部非末包
+            total += dp.payload.size();
+        }
+        CHECK_EQ(total, kMiB);
+    }
+}
+
+// 无限 source：256 个满包后以 kMessageTooLarge 终止（不无限循环、不溢出）。
+void streaming_infinite_source_terminates() {
+    const MessageHeader header{static_cast<uint8_t>(MessageType::kFrameRect), 0};
+    SequenceCounter seq;
+    MessageEncoder enc(seq);
+    PacketCollector coll;
+    struct InfiniteSource : public IMessagePayloadSource {
+        size_t read(uint8_t* dst, size_t maxBytes) override {
+            for (size_t i = 0; i < maxBytes; ++i) {
+                dst[i] = static_cast<uint8_t>(i * 7u + 1u);
+            }
+            return maxBytes;  // 永不 EOF
+        }
+    } infinite;
+    const PacketError err = enc.encodeStreaming(
+        header, infinite, [&coll](const uint8_t* d, size_t n) {
+            coll.sink(d, n);
+            return true;
+        });
+    CHECK_EQ(err, PacketError::kMessageTooLarge);
+    CHECK_EQ(coll.packets.size(), 256u);
+}
+
+// 单次 encodeStreaming 热路径零堆分配（counting_allocator DELTA）。
+// 二进制还链接 display/transport/oled 等 TU，故只断言单次调用前后的增量。
+void streaming_zero_alloc_hot_path() {
+    const MessageHeader header{static_cast<uint8_t>(MessageType::kFrameRect), 0};
+    SequenceCounter seq;
+    MessageEncoder enc(seq);
+    PatternSource source(153608, [](size_t off) { return static_cast<uint8_t>(off * 3u); });
+    espview::proto::test::resetAllocationCounters();
+    const PacketError err = enc.encodeStreaming(
+        header, source, [](const uint8_t*, size_t) { return true; });
+    CHECK_EQ(err, PacketError::kNone);
+    CHECK_EQ(espview::proto::test::AllocationCounters::allocations.load(
+                 std::memory_order_relaxed),
+             0u);
+    CHECK_EQ(espview::proto::test::AllocationCounters::bytes.load(std::memory_order_relaxed),
+             0u);
+}
 }  // namespace
 
 void runStreamingEncoderTests() {
@@ -628,4 +814,16 @@ void runStreamingEncoderTests() {
     streaming_rect_roundtrip();
     std::printf("  streaming_endpoint_send\n");
     streaming_endpoint_send();
+    std::printf("  streaming_megabyte_allowed\n");
+    streaming_megabyte_allowed();
+    std::printf("  streaming_megabyte_minus_one_allowed\n");
+    streaming_megabyte_minus_one_allowed();
+    std::printf("  streaming_staging_reuse_cross_messages\n");
+    streaming_staging_reuse_cross_messages();
+    std::printf("  streaming_megabyte_plus_one_rejected\n");
+    streaming_megabyte_plus_one_rejected();
+    std::printf("  streaming_infinite_source_terminates\n");
+    streaming_infinite_source_terminates();
+    std::printf("  streaming_zero_alloc_hot_path\n");
+    streaming_zero_alloc_hot_path();
 }

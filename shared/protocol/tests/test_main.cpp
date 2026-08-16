@@ -3,6 +3,9 @@
 
 #include "test_util.h"
 
+void runByteOrderTests();
+void runDecoderTimeoutTests();
+void runAckReqTests();
 void runCrcTests();
 void runPacketTests();
 void runEncoderTests();
@@ -39,6 +42,12 @@ int main() {
     // 无缓冲：测试名实时输出，便于定位挂起/超时位置（与 pc 测试工具一致）。
     std::setvbuf(stdout, nullptr, _IONBF, 0);
     std::printf("== ESPView shared/protocol host tests ==\n");
+    std::printf("[byte_order]\n");
+    runByteOrderTests();
+    std::printf("[decoder_timeout]\n");
+    runDecoderTimeoutTests();
+    std::printf("[ack_req]\n");
+    runAckReqTests();
     std::printf("[crc]\n");
     runCrcTests();
     std::printf("[packet]\n");
@@ -99,7 +108,8 @@ int main() {
     runPhysicalPreviewStateTests();
     std::printf("[wifi_wizard_state]\n");
     runWifiWizardStateTests();
-    std::printf("----\nchecks: %d, failures: %d\n", espview::proto::test::gChecks,
-                espview::proto::test::gFailures);
-    return espview::proto::test::gFailures == 0 ? 0 : 1;
+    std::printf("----\nchecks: %d, failures: %d\n",
+                espview::proto::test::gChecks.load(),
+                espview::proto::test::gFailures.load());
+    return espview::proto::test::gFailures.load() == 0 ? 0 : 1;
 }

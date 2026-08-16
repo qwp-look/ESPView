@@ -323,6 +323,14 @@ void heartbeat_does_not_block_during_streaming_transmit() {
     CHECK_EQ(ep.stats().txPing, 0u);  // 全程无 PING 发出
 }
 
+void rx_tick_hello_connected_no_seq_gap();
+void rx_tick_ping_auto_pong_and_rtt();
+void rx_tick_set_mode_ack_exactly_once();
+void rx_tick_disconnect_clears_pending_ack();
+void rx_tick_frame_flow_no_gaps();
+void rx_tick_passive_hello_try_transmit_backpressure();
+void rx_tick_capabilities_backpressure_drained();
+
 void runEndpointConcurrencyTests() {
     std::printf("  concurrent_send_serializes_messages\n");
     concurrent_send_serializes_messages();
@@ -330,4 +338,428 @@ void runEndpointConcurrencyTests() {
     encode_stream_matches_encode();
     std::printf("  heartbeat_does_not_block_during_streaming_transmit\n");
     heartbeat_does_not_block_during_streaming_transmit();
+    std::printf("  rx_tick_hello_connected_no_seq_gap\n");
+    rx_tick_hello_connected_no_seq_gap();
+    std::printf("  rx_tick_ping_auto_pong_and_rtt\n");
+    rx_tick_ping_auto_pong_and_rtt();
+    std::printf("  rx_tick_set_mode_ack_exactly_once\n");
+    rx_tick_set_mode_ack_exactly_once();
+    std::printf("  rx_tick_disconnect_clears_pending_ack\n");
+    rx_tick_disconnect_clears_pending_ack();
+    std::printf("  rx_tick_frame_flow_no_gaps\n");
+    rx_tick_frame_flow_no_gaps();
+    std::printf("  rx_tick_passive_hello_try_transmit_backpressure\n");
+    rx_tick_passive_hello_try_transmit_backpressure();
+    std::printf("  rx_tick_capabilities_backpressure_drained\n");
+    rx_tick_capabilities_backpressure_drained();
+}
+// ---- M8-A1：确定性 RX + tick 编排（单线程，假时钟 + 注入屏障）----
+
+struct RxFakeClock {
+    uint64_t now = 0;
+    uint64_t operator()() { return now; }
+};
+
+struct RxHarness {
+    RxFakeClock clock;
+    std::vector<uint8_t> rx;
+    std::vector<std::vector<uint8_t>> txPackets;
+    std::vector<SessionState> states;
+    std::vector<std::pair<uint8_t, uint16_t>> ackRequests;
+    std::vector<uint16_t> ackTimeouts;
+    std::vector<uint16_t> protoErrorCodes;
+    std::vector<espview::proto::CommittedFrame> commits;
+    std::unique_ptr<ProtocolEndpoint> ep;
+    RxHarness* peer = nullptr;
+
+    void init(RxHarness* peerSide) {
+        peer = peerSide;
+        ProtocolEndpoint::Callbacks cb;
+        cb.onSessionState = [this](SessionState s) { states.push_back(s); };
+        cb.onProtocolError = [this](espview::proto::SessionError e, std::string_view) {
+            protoErrorCodes.push_back(static_cast<uint16_t>(e));
+        };
+        cb.onAckRequest = [this](uint8_t t, const std::vector<uint8_t>&, uint16_t s) {
+            ackRequests.emplace_back(t, s);
+        };
+        cb.onAckTimeout = [this](uint16_t s) { ackTimeouts.push_back(s); };
+        cb.onFrameBegin = [](const espview::proto::FrameBeginInfo&) {};
+        cb.onFrameRect = [](const espview::proto::RectInfo&, const uint8_t*, size_t) {};
+        cb.onFrameCommit = [this](const espview::proto::CommittedFrame& f) {
+            commits.push_back(f);
+        };
+        cb.onFrameDiscard = [](espview::proto::FrameDiscardReason) {};
+        auto sink = [this](const uint8_t* d, size_t n) {
+            if (peer != nullptr) {
+                peer->rx.insert(peer->rx.end(), d, d + n);
+            }
+            txPackets.emplace_back(d, d + n);
+            return SendStatus::kOk;
+        };
+        ep = std::make_unique<ProtocolEndpoint>(EndpointConfig{}, sink, cb,
+                                                [this]() { return clock.now; });
+    }
+    void pump() {
+        std::vector<uint8_t> data = std::move(rx);
+        rx.clear();
+        if (!data.empty()) {
+            ep->onTransportData(data.data(), data.size());
+        }
+    }
+};
+
+void rxConnectPair(RxHarness& a, RxHarness& b) {
+    a.ep->onTransportConnected();
+    b.ep->onTransportConnected();
+    a.pump();
+    b.pump();
+    CHECK_EQ(a.ep->state(), SessionState::kConnected);
+    CHECK_EQ(b.ep->state(), SessionState::kConnected);
+}
+
+// HELLO 握手 → CONNECTED，握手过程零 decoder 错误（无 kSequenceGap）。
+void rx_tick_hello_connected_no_seq_gap() {
+    RxHarness a, b;
+    a.init(&b);
+    b.init(&a);
+    rxConnectPair(a, b);
+    CHECK_EQ(a.ep->state(), SessionState::kConnected);
+    CHECK_EQ(b.ep->state(), SessionState::kConnected);
+    CHECK_EQ(a.ep->stats().decoderErrors, 0u);
+    CHECK_EQ(b.ep->stats().decoderErrors, 0u);
+    // 握手后控制面立即可用：tick 到 PING 周期 → 一次往返。
+    a.clock.now = 2000;
+    a.ep->tick();
+    b.pump();
+    a.pump();
+    CHECK_EQ(b.ep->stats().rxPing, 1u);
+    CHECK_EQ(a.ep->stats().rxPong, 1u);
+    CHECK_EQ(a.protoErrorCodes.size(), 0u);
+    CHECK_EQ(b.protoErrorCodes.size(), 0u);
+}
+
+// tick 驱动 PING → 对端恰好一个自动 PONG → PONG 更新 RTT。
+void rx_tick_ping_auto_pong_and_rtt() {
+    RxHarness a, b;
+    a.init(&b);
+    b.init(&a);
+    rxConnectPair(a, b);
+
+    a.clock.now = 2000;
+    a.ep->tick();
+    CHECK_EQ(a.ep->stats().txPing, 1u);
+    b.pump();  // b 处理 PING → 自动 PONG
+    CHECK_EQ(b.ep->stats().rxPing, 1u);
+    CHECK_EQ(b.ep->stats().txPong, 1u);  // 恰好一个自动 PONG
+    a.clock.now = 2010;  // RTT 需要 now > lastPingSentAtMs_（严格递增）
+    a.pump();  // a 处理 PONG → RTT
+    CHECK_EQ(a.ep->stats().rxPong, 1u);
+    CHECK_EQ(a.ep->stats().txPong, 0u);  // a 不是接收方，无 PONG 回复
+    CHECK_EQ(a.ep->stats().rtt.samples, 1u);
+    if (a.ep->stats().rtt.lastMs.has_value()) {
+        CHECK_EQ(*a.ep->stats().rtt.lastMs, 10u);  // 2010 - 2000
+    }
+    // interval 未到 → 后续 tick 不重复 PING。
+    a.clock.now = 2100;
+    a.ep->tick();
+    CHECK_EQ(a.ep->stats().txPing, 1u);
+    CHECK_EQ(a.protoErrorCodes.size(), 0u);
+    CHECK_EQ(b.protoErrorCodes.size(), 0u);
+}
+
+// SET_MODE（ACK_REQ）→ onAckRequest 恰好一次；acknowledge → 恰好一个 ACK；
+// ACK 已收 → 后续 tick 不重试、无 onAckTimeout。
+void rx_tick_set_mode_ack_exactly_once() {
+    RxHarness a, b;
+    a.init(&b);
+    b.init(&a);
+    rxConnectPair(a, b);
+
+    CHECK_EQ(a.ep->sendMessage(
+                 espview::proto::makeSetMode(espview::proto::DisplayMode::kWindow)),
+             SendResult::kOk);
+    b.pump();
+    CHECK_EQ(b.ackRequests.size(), 1u);
+    CHECK_EQ(b.ackRequests[0].first, 0x03u);
+    CHECK_EQ(b.protoErrorCodes.size(), 0u);
+    CHECK_EQ(b.ep->stats().rxMessages, 2u);  // HELLO + SET_MODE
+
+    CHECK_EQ(b.ep->acknowledge(b.ackRequests[0].second, 0, espview::proto::ErrorCode::kNone),
+             SendResult::kOk);
+    a.pump();
+    CHECK_EQ(a.ep->stats().ackReceived, 1u);
+    CHECK_EQ(b.ep->stats().ackSent, 1u);
+
+    a.clock.now = 600;  // 已过 500ms ACK deadline；ACK 已收 → 无重试
+    a.ep->tick();
+    CHECK_EQ(a.ackTimeouts.size(), 0u);
+    CHECK_EQ(a.ep->stats().ackRetries, 0u);
+    CHECK_EQ(a.ep->stats().ackFailures, 0u);
+}
+
+// 断线清空 pendingAck：断开后即使 ACK deadline 已过也不重试、无迟到 onAckTimeout。
+void rx_tick_disconnect_clears_pending_ack() {
+    RxHarness a, b;
+    a.init(&b);
+    b.init(&a);
+    rxConnectPair(a, b);
+
+    CHECK_EQ(a.ep->sendMessage(
+                 espview::proto::makeSetMode(espview::proto::DisplayMode::kSplit)),
+             SendResult::kOk);
+    b.pump();
+    CHECK_EQ(b.ackRequests.size(), 1u);
+
+    a.ep->onTransportDisconnected();
+    a.clock.now = 600;  // 已过 500ms ACK deadline
+    a.ep->tick();
+    CHECK_EQ(a.ackTimeouts.size(), 0u);
+    CHECK_EQ(a.ep->stats().ackRetries, 0u);
+    CHECK_EQ(a.ep->stats().ackFailures, 0u);
+    CHECK_EQ(a.ep->state(), SessionState::kDisconnected);
+}
+
+// 帧消息流转：BEGIN/RECT/END 全通，无 decoder 错误（无 seq gap / chunk 违规）。
+void rx_tick_frame_flow_no_gaps() {
+    RxHarness a, b;
+    a.init(&b);
+    b.init(&a);
+    rxConnectPair(a, b);
+
+    const auto begin = espview::proto::makeFrameBegin(
+        3, espview::proto::FrameType::kFull, espview::proto::PixelFormat::kRgb565, 10, 10, 200);
+    CHECK(begin.has_value());
+    CHECK_EQ(a.ep->sendMessage(*begin), SendResult::kOk);
+    a.pump();
+    b.pump();
+
+    std::vector<uint8_t> pixels(200, 0x5A);
+    const auto rect =
+        espview::proto::makeFrameRect(0, 0, 10, 10, pixels.data(), pixels.size());
+    CHECK(rect.has_value());
+    CHECK_EQ(a.ep->sendMessage(*rect), SendResult::kOk);
+    a.pump();
+    b.pump();
+
+    CHECK_EQ(a.ep->sendMessage(espview::proto::makeFrameEnd(3, 1, 200, false)),
+             SendResult::kOk);
+    a.pump();
+    b.pump();
+
+    CHECK_EQ(b.commits.size(), 1u);
+    CHECK_EQ(b.ep->stats().decoderErrors, 0u);
+    CHECK_EQ(b.ep->stats().rxMessages, 4u);  // HELLO + BEGIN + RECT + END
+    if (!b.commits.empty()) {
+        CHECK_EQ(b.commits[0].frameId, 3u);
+        CHECK_EQ(b.commits[0].rectCount, 1u);
+    }
+}// 被动 HELLO 回复走 tryTransmit：长流式发送持有 sendMutex_ 时回复被放弃
+// （kBackpressure）且 RX 线程不阻塞；会话保持 kConnecting，pendingHello_ 由
+// 下一 tick 排空（单次发送、无重复），排空成功后完成握手。
+void rx_tick_passive_hello_try_transmit_backpressure() {
+    RxFakeClock clock;
+    std::atomic<bool> sinkBlock{false};
+    std::atomic<int> sinkCalls{0};
+    std::vector<SessionState> states;
+    std::unique_ptr<ProtocolEndpoint> ep;
+
+    ProtocolEndpoint::Callbacks cb;
+    cb.onSessionState = [&states](SessionState s) { states.push_back(s); };
+    auto sink = [&](const uint8_t* d, size_t n) -> SendStatus {
+        sinkCalls.fetch_add(1, std::memory_order_acq_rel);
+        while (sinkBlock.load(std::memory_order_acquire)) {
+            std::this_thread::yield();
+        }
+        (void)d;
+        (void)n;
+        return SendStatus::kOk;
+    };
+    ep = std::make_unique<ProtocolEndpoint>(EndpointConfig{}, sink, cb,
+                                            [&clock]() { return clock.now; });
+
+    // 1) 先正常被动握手 → CONNECTED（HELLO 计数=1）。
+    ep->onTransportConnected();
+    {
+        SequenceCounter seq(0);
+        MessageEncoder enc(seq);
+        const auto hello = espview::proto::makeHello(
+            1, 0, 320, 240, espview::proto::PixelFormat::kRgb565, 0b111, "rx-bp");
+        CHECK(hello.has_value());
+        std::vector<std::vector<uint8_t>> pkts;
+        CHECK_EQ(enc.encode(*hello, pkts), PacketError::kNone);
+        for (const auto& p : pkts) {
+            ep->onTransportData(p.data(), p.size());
+        }
+    }
+    CHECK_EQ(ep->state(), SessionState::kConnected);
+    CHECK_EQ(ep->stats().txHello, 1u);
+
+    // 2) 后台线程开始长流式发送；sink 阻塞 → sendMutex_ 被长期持有。
+    sinkBlock.store(true, std::memory_order_release);
+    struct BlockingSource : espview::proto::IMessagePayloadSource {
+        std::vector<uint8_t> data;
+        size_t off = 0;
+        explicit BlockingSource(size_t n) : data(n, 0xAB) {}
+        size_t read(uint8_t* dst, size_t maxBytes) override {
+            const size_t n = std::min(maxBytes, data.size() - off);
+            if (n > 0) {
+                std::memcpy(dst, data.data() + off, n);
+                off += n;
+            }
+            return n;
+        }
+    };
+    std::atomic<bool> started{false};
+    const int sinkBaseline = sinkCalls.load(std::memory_order_acquire);
+    std::thread tx([&]() {
+        started.store(true, std::memory_order_release);
+        espview::proto::MessageHeader h;
+        h.type = static_cast<uint8_t>(espview::proto::MessageType::kFrameRect);
+        h.flags = 0;
+        BlockingSource src(10000);
+        ep->sendMessageStreaming(h, src);  // 阻塞在 sink，直到 sinkBlock 释放
+    });
+    while (!started.load(std::memory_order_acquire)) {
+        std::this_thread::yield();
+    }
+    // 确认后台线程已进入 sink（sinkCalls 超过握手 HELLO 的基线）→ sendMutex_ 已持有。
+    while (sinkCalls.load(std::memory_order_acquire) == sinkBaseline) {
+        std::this_thread::yield();
+    }
+
+    // 3) 断线 + 对端 HELLO → 被动恢复：tryTransmit 锁忙 → kBackpressure →
+    //    pendingHello_ 暂存；保持 kConnecting（不完成握手）；RX 未阻塞。
+    ep->onTransportDisconnected();
+    {
+        SequenceCounter seq(0);
+        MessageEncoder enc(seq);
+        const auto hello = espview::proto::makeHello(
+            1, 0, 320, 240, espview::proto::PixelFormat::kRgb565, 0b111, "rx-bp");
+        CHECK(hello.has_value());
+        std::vector<std::vector<uint8_t>> pkts;
+        CHECK_EQ(enc.encode(*hello, pkts), PacketError::kNone);
+        for (const auto& p : pkts) {
+            ep->onTransportData(p.data(), p.size());
+        }
+    }
+    CHECK_EQ(ep->state(), SessionState::kConnecting);  // 未完成握手（HELLO 未发出）
+    CHECK_EQ(ep->stats().txHello, 1u);                 // 回复被放弃，无新 HELLO
+    CHECK_EQ(ep->stats().decoderErrors, 0u);              // F1：被动恢复路径零 decoder 错误
+
+    // 4) 释放 sink → 后台发送完成、sendMutex_ 释放；tick 排空 pendingHello_。
+    sinkBlock.store(false, std::memory_order_release);
+    tx.join();
+    ep->tick();
+    CHECK_EQ(ep->state(), SessionState::kConnected);  // 排空成功后完成握手
+    CHECK_EQ(ep->stats().txHello, 2u);                // 恰好 2 次（首次 + 排空）
+    CHECK_EQ(ep->stats().decoderErrors, 0u);              // tick 排空 completeHandshake 无 decoder 错误
+
+    // 5) 后续 tick 不重复发送（单槽已清）。
+    ep->tick();
+    CHECK_EQ(ep->stats().txHello, 2u);
+    CHECK_EQ(ep->stats().decoderErrors, 0u);              // 重复 tick 无副作用
+    CHECK_EQ(ep->state(), SessionState::kConnected);
+}
+
+// sendCapabilities 走 tryTransmit：背压时返回 kBackpressure 并暂存单槽，
+// 由 tick() 在 CONNECTED 后排空（单次发送、无重复）。
+void rx_tick_capabilities_backpressure_drained() {
+    RxFakeClock clock;
+    std::atomic<bool> sinkBlock{false};
+    std::atomic<int> sinkCalls{0};
+    std::vector<SessionState> states;
+    std::unique_ptr<ProtocolEndpoint> ep;
+
+    ProtocolEndpoint::Callbacks cb;
+    cb.onSessionState = [&states](SessionState s) { states.push_back(s); };
+    auto sink = [&](const uint8_t* d, size_t n) -> SendStatus {
+        sinkCalls.fetch_add(1, std::memory_order_acq_rel);
+        while (sinkBlock.load(std::memory_order_acquire)) {
+            std::this_thread::yield();
+        }
+        (void)d;
+        (void)n;
+        return SendStatus::kOk;
+    };
+    ep = std::make_unique<ProtocolEndpoint>(EndpointConfig{}, sink, cb,
+                                            [&clock]() { return clock.now; });
+
+    // 正常被动握手 → CONNECTED。
+    ep->onTransportConnected();
+    {
+        SequenceCounter seq(0);
+        MessageEncoder enc(seq);
+        const auto hello = espview::proto::makeHello(
+            1, 0, 320, 240, espview::proto::PixelFormat::kRgb565, 0b111, "rx-bp");
+        CHECK(hello.has_value());
+        std::vector<std::vector<uint8_t>> pkts;
+        CHECK_EQ(enc.encode(*hello, pkts), PacketError::kNone);
+        for (const auto& p : pkts) {
+            ep->onTransportData(p.data(), p.size());
+        }
+    }
+    CHECK_EQ(ep->state(), SessionState::kConnected);
+
+    // 后台长流式发送持有 sendMutex_。
+    sinkBlock.store(true, std::memory_order_release);
+    struct BlockingSource : espview::proto::IMessagePayloadSource {
+        std::vector<uint8_t> data;
+        size_t off = 0;
+        explicit BlockingSource(size_t n) : data(n, 0xAB) {}
+        size_t read(uint8_t* dst, size_t maxBytes) override {
+            const size_t n = std::min(maxBytes, data.size() - off);
+            if (n > 0) {
+                std::memcpy(dst, data.data() + off, n);
+                off += n;
+            }
+            return n;
+        }
+    };
+    std::atomic<bool> started{false};
+    const int sinkBaseline = sinkCalls.load(std::memory_order_acquire);
+    std::thread tx([&]() {
+        started.store(true, std::memory_order_release);
+        espview::proto::MessageHeader h;
+        h.type = static_cast<uint8_t>(espview::proto::MessageType::kFrameRect);
+        h.flags = 0;
+        BlockingSource src(10000);
+        ep->sendMessageStreaming(h, src);
+    });
+    while (!started.load(std::memory_order_acquire)) {
+        std::this_thread::yield();
+    }
+    while (sinkCalls.load(std::memory_order_acquire) == sinkBaseline) {
+        std::this_thread::yield();
+    }
+
+    // sendCapabilities → tryTransmit 锁忙 → kBackpressure + 单槽暂存。
+    espview::proto::CapabilitiesInfo caps;
+    caps.virtualPresent = true;
+    caps.physicalPresent = true;
+    caps.width = 320;
+    caps.height = 240;
+    caps.pixelFormat = espview::proto::PixelFormat::kRgb565;
+    caps.colorDepth = 16;
+    caps.virtualCanReadback = true;
+    caps.modeMask = 0b1111;
+    caps.physWidth = 128;
+    caps.physHeight = 64;
+    caps.physPixelFormat = espview::proto::PhysicalPixelFormat::kMono1;
+    caps.physColorDepth = 1;
+    caps.physMono = true;
+    caps.physController = espview::proto::CapabilitiesController::kSsd1306;
+    caps.physI2cAddress = 0x3C;
+    caps.sceneSupport = 0b11;
+    const SendResult r = ep->sendCapabilities(caps);
+    CHECK_EQ(r, SendResult::kBackpressure);
+    CHECK_EQ(ep->stats().txCapabilities, 0u);
+
+    // 释放 → tick 排空（单次发送、无重复）。
+    sinkBlock.store(false, std::memory_order_release);
+    tx.join();
+    ep->tick();
+    CHECK_EQ(ep->state(), SessionState::kConnected);
+    CHECK_EQ(ep->stats().txCapabilities, 1u);
+    ep->tick();
+    CHECK_EQ(ep->stats().txCapabilities, 1u);
 }

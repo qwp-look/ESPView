@@ -3,27 +3,30 @@
 #include <cstring>
 #include <utility>
 
+#include "byte_order.h"
+
 namespace espview {
 namespace proto {
 
 namespace {
 
+// LE 写入统一走 byte_order.h（M8-A1 内部重构；wire 字节序冻结，逐位不变）。
 void putU16(std::vector<uint8_t>& v, uint16_t val) {
-    v.push_back(static_cast<uint8_t>(val & 0xFFu));
-    v.push_back(static_cast<uint8_t>((val >> 8) & 0xFFu));
+    const size_t off = v.size();
+    v.resize(off + 2);
+    writeU16LE(v.data() + off, val);
 }
 
 void putU32(std::vector<uint8_t>& v, uint32_t val) {
-    v.push_back(static_cast<uint8_t>(val & 0xFFu));
-    v.push_back(static_cast<uint8_t>((val >> 8) & 0xFFu));
-    v.push_back(static_cast<uint8_t>((val >> 16) & 0xFFu));
-    v.push_back(static_cast<uint8_t>((val >> 24) & 0xFFu));
+    const size_t off = v.size();
+    v.resize(off + 4);
+    writeU32LE(v.data() + off, val);
 }
 
 void putU64(std::vector<uint8_t>& v, uint64_t val) {
-    for (int i = 0; i < 8; ++i) {
-        v.push_back(static_cast<uint8_t>((val >> (8 * i)) & 0xFFu));
-    }
+    const size_t off = v.size();
+    v.resize(off + 8);
+    writeU64LE(v.data() + off, val);
 }
 
 // 网络序 u32（AF.2：serverIp/ip 字段按大端写线；入参为网络序 u32）。
@@ -35,8 +38,8 @@ void pushNetU32(std::vector<uint8_t>& v, uint32_t val) {
 }
 
 uint16_t readU16(BytesView p, size_t off) {
-    return static_cast<uint16_t>(p[off]) |
-           static_cast<uint16_t>(static_cast<uint16_t>(p[off + 1]) << 8);
+    // 小端读取（调用方保证 off+2 <= p.size()）。
+    return readU16LE(p.data() + off);
 }
 
 // 网络序 u32 读取（首字节 = 地址第一段）。
@@ -588,6 +591,21 @@ Message makeFrameEnd(uint16_t frameId, uint16_t rectCount, uint32_t byteCount, b
     putU32(p, byteCount);
     p.push_back(aborted ? kFrameEndFlagAborted : 0u);
     return messageWithPayload(static_cast<uint8_t>(MessageType::kFrameEnd), 0, std::move(p));
+}
+
+// M8-A1 ACK_REQ 白名单：仅这些控制消息可携带 ACK_REQ（DESIGN.md E 节 ACK 语义
+// v0.1 SET_MODE + M7-D3 WIFI_SCAN_REQ/WIFI_CONFIG「必须 ACK_REQ」）。其余类型
+// （FRAME_*/INPUT_*/PING/PONG/ACK/ERROR/HELLO/CAPABILITIES/PHYSICAL_PREVIEW/
+// WIFI_RESULT/WIFI_STATUS）一律禁止。
+bool allowedAckRequestType(uint8_t type) {
+    switch (static_cast<MessageType>(type)) {
+        case MessageType::kSetMode:      // 0x03 SET_MODE
+        case MessageType::kWifiScanReq:  // 0x06 WIFI_SCAN_REQ
+        case MessageType::kWifiConfig:   // 0x08 WIFI_CONFIG
+            return true;
+        default:
+            return false;
+    }
 }
 
 }  // namespace proto

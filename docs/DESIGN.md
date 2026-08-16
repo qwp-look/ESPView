@@ -45,6 +45,19 @@
 > Layer 4 docs+security / tag 触发 release / 手动 hardware-smoke；security_scan + check_bat_crlf 静态检查；
 > 文档 docs/ci.md、badges；wire format 零改动。详见 AM 章。
 > **修订记录（M7-G, 2026-08-16）**：发布前最终化套件——G1 固件 provisioning/TCP handoff 硬化、G2 Wi-Fi 向导最终化（B1–B6 + TCP handoff 观察器 + 错误码 20–23）、G3 Display UI 最终化、G4 README 重写、G5 中文用户文档集、G6 工具链/profile 系统/check_docs + G1 硬件 harness、G8 开发者文档、G9 测试文档；G7 i18n / G10 检查器 / G11 验收 已收尾（证据与验收清单见 AL 章）。wire format 零改动。详见 AL 章。
+> **修订记录（M8-A1, 2026-08-16）**：共享协议实现硬化（仅 shared/protocol；wire format 冻结零改动）。
+> T1 LE 字节序助手合并（`byte_order.h`：read/write U16/U32/U64 LE；`readNetU32` 大端保留）；
+> T2 流式 Encoder 1 MiB 上限 + 4116B 单缓冲 staging（`encodeStreaming` 热路径逐包零堆分配，
+> 恰好 1 MiB → kNone，超限 → kMessageTooLarge、已发 prefix 保留）；T3 半包 500ms 超时改由
+> `ProtocolEndpoint::tick()` 驱动（`StreamDecoder::onTimeout()`，expectedSeq 不变）；
+> T4 会话并发最小加固（sessionMutex_/decoderMutex_ 短锁 + 原子字段 + 锁序
+> decoderMutex_→sessionMutex_→sendMutex_ + 回调锁外）；RX 被动回复改非阻塞
+> tryTransmit + 单槽 pendingHello_/pendingCapabilities_ 由 tick() 排空；
+> T5 ACK_REQ 白名单 {SET_MODE, WIFI_SCAN_REQ, WIFI_CONFIG}（Encoder kInvalidAckReq；
+> RX 忽略 + `invalidAckReq` 计数）；T6 测试新增 byte_order/decoder_timeout/ack_req/
+> counting_allocator 并扩展 streaming/concurrency；T7 协议基准
+> （bench/protocol_bench，6 项 × 5 载荷 × 5 trials，结果 m8a1_baseline.csv）。
+> host 386,307 checks / 0 failures。详见 E/I/J 节。
 
 ---
 
@@ -253,7 +266,7 @@ public:
 - **Frame（帧）**：一次显示事务 = `FRAME_BEGIN` 消息 + 0..n 个 `FRAME_RECT` 消息 + `FRAME_END` 消息。帧是“整帧提交 / 整帧丢弃”的唯一载体。
 - 控制消息（HELLO/SET_MODE/INPUT_*/PING/PONG/ERROR/ACK）**不属于任何帧**，可以穿插在不同 Message 之间，但**不得插入同一个 CHUNKED Message 的连续 Packet 之间**；帧状态机只响应 BEGIN/END。
 - 对于一个 CHUNKED Message：Packet[0] … Packet[n-2] 的 CHUNKED=1，Packet[n-1] 的 CHUNKED=0；期间 TYPE 必须保持一致；Packet 必须连续（SEQ 连续）；不允许其他 Message 的 Packet 插入。
-- **实现（M1-3C）**：`MessageEncoder` 同时支持完整 payload 编码（`encode`）与流式编码（`encodeStreaming(header, source, sink)`：payload 由 `IMessagePayloadSource::read()` 按需产生，先聚到 4096B packet 级 staging 再编码，逐包交给 PacketSink）。两条路径对同一逻辑 payload 产生**逐位一致**的 Packet（同一拆分 / CHUNKED / SEQ / CRC 规则）。**ESPView 不要求完整 Message payload 常驻内存**：经典 ESP32 用流式 RECT 发送 153608B 级 FRAME_RECT，峰值额外内存 ≈ 4096B staging + 4116B 单包缓冲（≈ 8.2KB），避免 153KB 连续堆分配。
+- **实现（M1-3C）**：`MessageEncoder` 同时支持完整 payload 编码（`encode`）与流式编码（`encodeStreaming(header, source, sink)`：payload 由 `IMessagePayloadSource::read()` 按需产生，先聚到 4096B packet 级 staging 再编码，逐包交给 PacketSink）。两条路径对同一逻辑 payload 产生**逐位一致**的 Packet（同一拆分 / CHUNKED / SEQ / CRC 规则）。**ESPView 不要求完整 Message payload 常驻内存**：经典 ESP32 用流式 RECT 发送 153608B 级 FRAME_RECT，峰值额外内存 = 单个可复用 ≈ 4116B 单包缓冲（20B 头 + 4096B payload，M8-A1 合并原 4096B staging + 4116B 缓冲），热路径逐包零堆分配、缓冲跨消息复用，避免 153KB 连续堆分配。
 
 ### Streaming Message API（正式设计，M1-3C 冻结）
 
@@ -266,8 +279,8 @@ public:
   `IMessagePayloadSource::read(dst, maxBytes)` → packet 级 staging（≤ 4096B）→ CRC32 → `IPacketSink::writePacket(data, len)` → Transport。
   同一逻辑 payload 下两条路径产生**逐位一致**的 Packet 序列（同一拆分 / CHUNKED / SEQ / CRC 规则），host 单测逐字节比对。
 - **内存语义**：
-  - `MAX_MESSAGE_PAYLOAD = 1 MiB` 只是**协议级上限**（wire 上一条逻辑 Message 拼接后的 payload 上限），**不要求任何组件分配 1 MiB 缓冲**；
-  - 320×240 RGB565 = 153600 bytes 的 FRAME_RECT **不要求 153600B 连续缓冲**：流式发送时峰值额外内存 ≈ 4096B staging + 4116B 单包缓冲（≈ 8.2KB）；
+  - `MAX_MESSAGE_PAYLOAD = 1 MiB` 只是**协议级上限**（wire 上一条逻辑 Message 拼接后的 payload 上限），**不要求任何组件分配 1 MiB 缓冲**；Encoder 超限拒绝（`kMessageTooLarge`：流式路径逐包累计检查，恰好 1 MiB → kNone，超限停止读源、已发出的 prefix 保留在 wire 上），Decoder 逐包增量累计、同样不预分配；
+  - 320×240 RGB565 = 153600 bytes 的 FRAME_RECT **不要求 153600B 连续缓冲**：流式发送时峰值额外内存 = 单个可复用 ≈ 4116B 单包缓冲（20B 头 + 4096B payload；M8-A1 合并原 4096B staging + 4116B 缓冲，热路径逐包零堆分配、跨消息复用）；
   - 经典 ESP32 已实测：153608B 单 RECT 以 38 个 CHUNKED Packet 流式发送，`heap_caps_get_free_size(MALLOC_CAP_INTERNAL)` 前/中/后无 153KB 连续堆分配。
 
 ### 最终 Packet Header（固定 20 字节）
@@ -294,6 +307,11 @@ public:
 > - 1 MiB 仅是 wire-level 最大值，**不要求任何组件分配固定 1 MiB 缓冲**；
 > - ESPView 必须允许流式/分段处理，**不得因该上限产生固定 1 MiB framebuffer**；
 > - 实现（M1-3C）：`MessageEncoder` 提供 Streaming Message API（`IMessagePayloadSource` + `encodeStreaming`），完整 payload 可不驻留内存。
+
+> **实现说明（M8-A1）**：`shared/protocol/byte_order.h` 统一 LE 读写助手
+> （`readU16LE/writeU16LE/readU32LE/writeU32LE/readU64LE/writeU64LE`）；
+> packet/message/frame_assembler/protocol_endpoint 内部手工 LE 读写全部改走该头，
+> **wire 字节序冻结不变**；`readNetU32`（message.cpp，IP 字段）保持大端、不改名。
 
 ### CRC32 规范（全参数固定）
 
@@ -427,9 +445,10 @@ public:
 
 ### ACK 语义（只服务控制消息）
 
-- 仅**单包控制消息**可置 ACK_REQ（v0.1：SET_MODE；未来：SET_RESOLUTION/SET_PIXEL_FORMAT/RESET）。
+- **ACK_REQ 白名单（M8-A1 冻结）**：仅 {SET_MODE(0x03), WIFI_SCAN_REQ(0x06), WIFI_CONFIG(0x08)} 三类**单包控制消息**可置 ACK_REQ；其余类型（FRAME_BEGIN/FRAME_RECT/FRAME_END/PHYSICAL_PREVIEW/INPUT_KEY/INPUT_MOUSE/INPUT_TOUCH/PING/PONG/ACK/ERROR/HELLO/CAPABILITIES/WIFI_SCAN_RESULT/WIFI_STATUS）一律禁止。未来新增控制类型须先加入白名单。
 - 接收方处理完后回 `ACK{ackSeq=该包SEQ, status, errorCode}`；无 ACK_REQ 绝不主动回 ACK。
 - 发送方置 ACK_REQ 后启动 500 ms 超时，最多重试 2 次，仍失败则上报 ERROR/UI。
+- **违规处理（M8-A1）**：Encoder 对白名单外类型携带 ACK_REQ → `PacketError::kInvalidAckReq`（实现层错误，会话层映射为 `kInvalidMessage`）；ACK_REQ 且 payload > 4096（单包规则）同样拒绝。接收端对白名单外类型携带 ACK_REQ → **忽略该消息并计数**（`SessionStats::invalidAckReq`）：不回 ACK、不回调、不发任何 wire 错误（无新 wire 错误码）。`StreamDecoder` 保持 wire-transparent，不解释 ACK_REQ。
 - 显示数据（FRAME_*）与输入（INPUT_*）一律 fire-and-forget；可靠性由帧级语义（BEGIN/END + 丢帧丢弃）保证；HELLO 的确认 = 对端 HELLO；PING/PONG 独立机制。
 
 ### 字节流解码状态机（两端共用）
@@ -457,7 +476,7 @@ public:
 ```
 
 - **粘包**：缓冲内循环消费所有完整包。
-- **半包**：残留部分留在缓冲等待；**超过 500 ms 未收齐 → 强制回 SYNC**（防串口残留字节毒化）。
+- **半包**：残留部分留在缓冲等待；**超过 500 ms 未收齐 → 强制回 SYNC**（防串口残留字节毒化）。M8-A1：半包时钟由 `ProtocolEndpoint::tick()` 驱动（上层每 100–200 ms 调用；ESP32 sessionLoop / PC serial_worker），满足 `decoder_.bufferedBytes() > 0 || assemblingMessage()` 且距最近一次喂数据 ≥ 500 ms 时调用 `StreamDecoder::onTimeout()`——丢弃滞留字节、回 SYNC、作废组装中的 Message；**expectedSeq 保持不变**（不重定位基线、不触发会话失败）；若当时在帧内，经 `FrameAssembler::onStreamError` 作废当前帧。
 - **重同步性质**：CRC 失败/seq 跳变只作废当前帧，下一个 FRAME_BEGIN 即恢复，最多损失一帧延迟。
 
 ### 帧级错误处理
@@ -466,7 +485,7 @@ public:
 |------|------|
 | seq 跳变（收到非 last+1） | 当前帧作废：丢弃本帧全部已收 RECT，直到下一个 FRAME_BEGIN |
 | CRC 错误 | 丢弃该包；该包所属消息作废；若在帧内 → 当前帧作废，继续重同步 |
-| 半包 | 缓冲等待；> 500 ms 未收齐回 SYNC |
+| 半包 | 缓冲等待；> 500 ms 未收齐回 SYNC（M8-A1：`tick()` 驱动 `StreamDecoder::onTimeout()`，expectedSeq 不变） |
 | 粘包 | 缓冲内循环消费 |
 | 未 END 又收到 FRAME_BEGIN | 上一帧作废，开始新帧 |
 | FRAME_END.frameId ≠ BEGIN.frameId | 本帧作废（丢弃帧内数据） |
@@ -605,6 +624,16 @@ ESP32 物理触摸(未来) ─────────────────�
 - 通信：framebuffer 用 `QImage` 由 Worker 更新后以 `Qt::QueuedConnection` 发到主线程；输入事件从主线程投递到 Worker 的 TX 队列。
 - 断线重连：Worker 状态机（Disconnected→Handshaking→Connected→Error→重连），超时由 PING/PONG 驱动；重连成功先清黑 QImage，收到完整 FULL 帧才开始绘制。
 
+### ProtocolEndpoint 线程归属（M8-A1）
+
+- **RX 回调线程**：`onTransportData()` 喂 `StreamDecoder`、触发消息/错误回调；decoder feed 在 `decoderMutex_` 临界区内执行，统计计数在 `sessionMutex_` 内递增。
+- **tick 线程**：半包超时（500 ms）、心跳 PING、ACK 重试、对端超时判定等**决策**都在 `ProtocolEndpoint::tick()` 完成；不直接编码/发送大消息。
+- **发送调用线程**：`sendMessage/sendStreaming/acknowledge` → 编码（MessageEncoder）→ sink（Transport IO），由 `sendMutex_` 串行化。
+- **sink 重入禁止**：sink/trySink/source 回调内不得重入本端点的阻塞式 `sendMessage/sendMessageStreaming`（`sendMutex_` 不可重入 → 自死锁）；RX/回调路径的回复一律走 `tryTransmit`（锁忙返回 `kBackpressure`）。
+- **锁**：`sessionMutex_`（会话字段：state/pendingAck/stats/时间戳/pendingHello_/pendingCapabilities_ 等，短临界区，读取按值快照）、`decoderMutex_`（decoder_/frames_ 对象访问）。锁序不变量（真实边，非全序）：RX 路径 `decoderMutex_ → sessionMutex_`（feed 内回调可取 sessionMutex_）；TX 路径 `sendMutex_ → sessionMutex_`（发送实现内短状态快照；安全——从不持 sessionMutex_ 取 decoderMutex_，也不持 sessionMutex_ 阻塞等 sendMutex_，所有 session→send 路径均走 tryTransmit/try_lock）。`sessionMutex_` 持锁期间绝不调用用户回调（先取快照、释放锁再分发）；`failSession` 先完成 session 临界区、释放后再清理 decoder/frames。
+- **RX 路径非阻塞**：RX 线程的被动回复（HELLO、CAPABILITIES）改用 `tryTransmit`（单次尝试，背压立即返回），失败登记单槽 `pendingHello_/pendingCapabilities_`，由 `tick()` 排空（成功即清除，单槽无重复）。
+- 原子字段：`seq_`（SequenceCounter，relaxed）、`lastPeerRxMs_/lastDecoderRxMs_`、`inDecoderCallback_/decoderResetPending_`。
+
 ### M4 运行态统计层（实现语义；**不改变协议**）
 
 M4 不新增任何 wire 字段，不修改 Packet/Message/Frame 布局；下列全部是**实现层语义**，
@@ -679,6 +708,28 @@ M4 不新增任何 wire 字段，不修改 Packet/Message/Frame 布局；下列�
 - **现实带宽限制（115200 baseline）**：整帧 ≥ 13.5 s，**高频整帧推送不可能**；常态目标是 **dirty rectangle + PARTIAL + streaming + 帧调度** 的部分更新（小 dirty rect 时负载 < 5%）。FULL 帧只用于握手/重同步/大范围变化。
 - 帧率上限由 TX 侧帧调度控制；UART 背压时按 E 节策略**整帧丢弃**。
 - 输入/心跳报文极小（<64B），带宽可忽略；PC 端 QImage 镜像在 PC 内存，不计入 ESP32 预算。
+
+### 协议层基准（host，M8-A1 实测）
+
+方法：`shared/protocol/bench/protocol_bench`（Release -O2，MinGW64 g++，Windows 11 x86_64；
+固定种子 `mt19937(0x5EED)`，载荷在计时区外构建；每项 5 trials 取中位数；正确性 guard 全绿
+——decode/CRC/checksum、onMessage 恰好一次、frame commit==1，checksum 退出时打印防优化器消除）。
+完整 CSV（含 wire_bytes/packets/iterations/bytes_per_sec/alloc_count/alloc_bytes）见
+`shared/protocol/bench/results/m8a1_baseline.csv`。下表为 `elapsed_us_per_op` 中位数
+（1 MiB 行 16 次迭代，其余 64 次）：
+
+| op | 1024B | 4096B | 65536B | 153600B | 1048576B |
+|----|-------|-------|--------|---------|----------|
+| packet_encode | 1.812 | 7.141 | 114.953 | 273.453 | 1880.125 |
+| packet_decode | 1.812 | 7.094 | 116.266 | 270.141 | 1928.250 |
+| message_encode | 1.984 | 7.938 | 118.328 | 282.062 | 2305.375 |
+| stream_encode | 1.938 | 7.812 | 127.094 | 292.938 | 2036.312 |
+| decoder_feed | 2.188 | 7.812 | 204.344 | 487.156 | 3472.500 |
+| frame_assembly | 2.688 | 7.891 | 154.891 | 324.562 | 3143.688 |
+
+（frame_assembly 为完整 BEGIN+RECT(s)+END 帧；stream_encode 热路径逐包 0 堆分配
+（alloc_count=0），message_encode/decoder_feed 的 alloc 列来自输出/重组 vector 缓冲，
+非协议自身固定分配。）
 
 ---
 ## K. ESP-IDF component 工程结构

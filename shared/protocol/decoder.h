@@ -51,7 +51,7 @@ const char* toString(DecoderError e);
 //
 // 已固定的行为（与 DESIGN.md 一致，供测试与上层依赖）：
 //   - 伪 MAGIC：HEADER 校验失败时丢弃候选 MAGIC 的首字节，从第二个字节继续搜索；
-//   - 半包：滞留缓冲等待；由上层按 500ms 周期调用 onTimeout() 强制回 SYNC；
+//   - 半包：滞留缓冲等待；M8-A1 起由 ProtocolEndpoint::tick() 驱动（上层每 100–200ms 调 tick；ESP32 sessionLoop / PC serial_worker），满足条件时调用 onTimeout() 强制回 SYNC；
 //   - 粘包：单次 feed 内循环消费所有完整包；
 //   - CRC 错误：整包（20B 头 + payload）丢弃，从包尾之后继续扫描；正在组装的
 //     CHUNKED Message 作废；seq 基线重定位为失败包 seq+1（其头部语法已合法，
@@ -93,7 +93,8 @@ public:
     // 与 reset() 的区别：可在 decoder 消息回调内安全调用（不触碰缓冲/状态机）。
     void resetSeqBaseline();
 
-    // 半包滞留超时（由上层 transport/worker 按 500ms 周期调用）：
+    // 半包滞留超时（M8-A1 起由 ProtocolEndpoint::tick() 驱动：上层每 100–200ms 调 tick，满足
+    // bufferedBytes()>0 || assemblingMessage() 且距最近一次喂数据 ≥ 500ms 时调用）：
     // 丢弃全部滞留字节、回 SYNC、作废组装中的 Message；expectedSeq 保持不变。
     void onTimeout();
 
