@@ -627,7 +627,7 @@ private slots:
         }
         const QString path = QFileDialog::getSaveFileName(
             this, tr_("Save current display"), QStringLiteral("espview_snapshot.png"),
-            QStringLiteral("PNG image (*.png)"));
+            tr_("PNG image (*.png)"));
         if (path.isEmpty()) {
             return;
         }
@@ -721,6 +721,10 @@ private:
         }
         if (previewWidget_ != nullptr) {
             previewWidget_->setUiLanguage(static_cast<int>(lang_));
+        }
+        if (screen_ != nullptr) {
+            screen_->setUiLanguage(static_cast<int>(lang_));
+            screen_->update();
         }
         transportCombo_->setItemText(0, tr_("TCP"));
         transportCombo_->setItemText(1, tr_("UART"));

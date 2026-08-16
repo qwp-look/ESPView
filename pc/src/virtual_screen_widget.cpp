@@ -10,6 +10,7 @@
 #include <QWheelEvent>
 
 #include "coordinate_mapper.h"
+#include "i18n.h"
 #include "input_controller.h"
 #include "qt_key_adapter.h"
 
@@ -36,6 +37,14 @@ VirtualScreenWidget::VirtualScreenWidget(QWidget* parent) : QWidget(parent) {
     setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
     setFocusPolicy(Qt::StrongFocus);
     setMouseTracking(true);  // M3：无按键按住也要收到 mouseMoveEvent
+}
+
+void VirtualScreenWidget::setUiLanguage(int lang) {
+    const espview::pc::UiLang next = static_cast<espview::pc::UiLang>(lang);
+    if (next != lang_) {
+        lang_ = next;
+        update();  // 重绘无信号占位文案
+    }
 }
 
 void VirtualScreenWidget::setFrame(const DisplayFrame& frame) {
@@ -126,7 +135,8 @@ void VirtualScreenWidget::paintEvent(QPaintEvent* event) {
     if (!hasImage_ || image_.isNull()) {
         painter.setPen(QColor(0x88, 0x88, 0x88));
         painter.drawText(rect(), Qt::AlignCenter,
-                         tr("No signal — waiting for FULL frame"));
+                         QString::fromUtf8(trText(
+                             lang_, "No signal — waiting for FULL frame")));
         return;
     }
 

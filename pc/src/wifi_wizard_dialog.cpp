@@ -838,7 +838,7 @@ void WifiWizardDialog::onWifiScanResult(const espview::proto::WifiScanResultInfo
         ScanEntry e;
         e.ssid = rec.ssid;
         e.display = QString::fromUtf8(rec.ssid.c_str(), static_cast<int>(rec.ssid.size())) +
-                    QStringLiteral("  [RSSI %1 dBm · ch %2]")
+                    tr_("[RSSI %1 dBm · ch %2]")
                         .arg(static_cast<int>(rec.rssi))
                         .arg(static_cast<int>(rec.channel));
         scanEntries_.push_back(std::move(e));

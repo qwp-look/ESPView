@@ -334,6 +334,37 @@ const std::map<std::string, std::string>& enDict() {
         {"Preview Disabled", "Preview Disabled"},
         {"Stale", "Stale"},
         {"Live", "Live"},
+        // ---- M7-G7：i18n 完整性 —— G3 Display Mode UI 遗留 10 键 ----
+        {"Applied", "Applied"},
+        {"Selected", "Selected"},
+        {"Just now", "Just now"},
+        {"Updated %1 s ago", "Updated %1 s ago"},
+        {"Stale — last update %1 s ago", "Stale — last update %1 s ago"},
+        {"Both displays show the same application view.",
+         "Both displays show the same application view."},
+        {"Only the PC display is active; the physical side keeps showing diagnostics.",
+         "Only the PC display is active; the physical side keeps showing diagnostics."},
+        {"Only the physical display is active; the PC side is cleared.",
+         "Only the physical display is active; the PC side is cleared."},
+        {"PC shows the application; physical shows diagnostics.",
+         "PC shows the application; physical shows diagnostics."},
+        {"(cleared)", "(cleared)"},
+        // ---- M7-G7：全 GUI 审计补键（Main / Wi-Fi Wizard / VirtualScreen）----
+        {"Wi-Fi Wizard", "Wi-Fi Wizard"},
+        {"TCP port", "TCP port"},
+        {"PNG image (*.png)", "PNG image (*.png)"},
+        {"[RSSI %1 dBm · ch %2]", "[RSSI %1 dBm · ch %2]"},
+        {"No signal — waiting for FULL frame", "No signal — waiting for FULL frame"},
+        // ---- M7-G7：Wi-Fi Wizard 错误词条补入 enDict（zh 已在 zhDict，键集对称）----
+        {"UART bootstrap unavailable", "UART bootstrap unavailable"},
+        {"TCP handoff failed (Wi-Fi connected)", "TCP handoff failed (Wi-Fi connected)"},
+        {"Wi-Fi authentication failed", "Wi-Fi authentication failed"},
+        {"Wi-Fi network not found", "Wi-Fi network not found"},
+        {"DHCP timeout - no IP address", "DHCP timeout - no IP address"},
+        {"TCP server unreachable", "TCP server unreachable"},
+        {"Wi-Fi provisioning requires the UART bootstrap link",
+         "Wi-Fi provisioning requires the UART bootstrap link"},
+        {"Waiting for ESP32 TCP handoff...", "Waiting for ESP32 TCP handoff..."},
     };
     return kEn;
 }
@@ -650,6 +681,26 @@ const std::map<std::string, std::string>& zhDict() {
         {"Preview Disabled", "预览已禁用"},
         {"Stale", "过期"},
         {"Live", "实时"},
+        // ---- M7-G7：i18n 完整性 —— G3 Display Mode UI 遗留 10 键 ----
+        {"Applied", "已应用"},
+        {"Selected", "已选择"},
+        {"Just now", "刚刚"},
+        {"Updated %1 s ago", "更新于 %1 秒前"},
+        {"Stale — last update %1 s ago", "过期 — 最后更新于 %1 秒前"},
+        {"Both displays show the same application view.", "两个显示屏显示相同的应用画面。"},
+        {"Only the PC display is active; the physical side keeps showing diagnostics.",
+         "仅 PC 显示屏激活；物理侧继续显示诊断。"},
+        {"Only the physical display is active; the PC side is cleared.",
+         "仅物理显示屏激活；PC 侧已清除。"},
+        {"PC shows the application; physical shows diagnostics.",
+         "PC 显示应用；物理侧显示诊断。"},
+        {"(cleared)", "（已清除）"},
+        // ---- M7-G7：全 GUI 审计补键（Main / Wi-Fi Wizard / VirtualScreen）----
+        {"Wi-Fi Wizard", "Wi-Fi 向导"},
+        {"TCP port", "TCP 端口"},
+        {"PNG image (*.png)", "PNG 图像 (*.png)"},
+        {"[RSSI %1 dBm · ch %2]", "[RSSI %1 dBm · 信道 %2]"},
+        {"No signal — waiting for FULL frame", "无信号 — 等待全帧"},
     };
     return kZh;
 }

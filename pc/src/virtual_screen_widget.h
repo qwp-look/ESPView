@@ -27,6 +27,7 @@
 #include <QWidget>
 
 #include "display_frame.h"
+#include "i18n.h"
 
 namespace espview {
 namespace pc {
@@ -56,6 +57,9 @@ public:
     // letterbox 黑边外的鼠标事件不会上送（spec §12 推荐行为）。
     void setInputController(InputController* c) { inputController_ = c; }
 
+    // M7-G7：语言切换（只改无信号占位文案，不触碰帧/输入链路）。
+    void setUiLanguage(int lang);
+
 protected:
     void paintEvent(QPaintEvent* event) override;
     void mousePressEvent(QMouseEvent* event) override;
@@ -78,6 +82,7 @@ private:
     QString pngDumpDir_;
     QStringList dumpedPngFrameIds_;  // 已保存的 frameId，避免重复写盘
     InputController* inputController_ = nullptr;
+    UiLang lang_ = UiLang::kEnglish;  // M7-G7：无信号占位文案语言
 };
 
 }  // namespace pc

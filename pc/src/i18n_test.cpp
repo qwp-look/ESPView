@@ -207,6 +207,46 @@ const M7eEntry kM7e[] = {
      "Wi-Fi 扫描期间显示已临时暂停"},
 };
 
+// M7-G7 i18n 完整性：G3 Display Mode UI 遗留键 + 全 GUI 审计补键。
+// 中英均钉死：en = 英文原文（恒等），zh = 简体中文（见目录）。
+struct M7g7Entry {
+    const char* en;
+    const char* zh;
+};
+
+const M7g7Entry kM7g7[] = {
+    // ---- G3 Display Mode UI 遗留 10 键 ----
+    {"Applied", "已应用"},
+    {"Selected", "已选择"},
+    {"Just now", "刚刚"},
+    {"Updated %1 s ago", "更新于 %1 秒前"},
+    {"Stale — last update %1 s ago", "过期 — 最后更新于 %1 秒前"},
+    {"Both displays show the same application view.", "两个显示屏显示相同的应用画面。"},
+    {"Only the PC display is active; the physical side keeps showing diagnostics.",
+     "仅 PC 显示屏激活；物理侧继续显示诊断。"},
+    {"Only the physical display is active; the PC side is cleared.",
+     "仅物理显示屏激活；PC 侧已清除。"},
+    {"PC shows the application; physical shows diagnostics.",
+     "PC 显示应用；物理侧显示诊断。"},
+    {"(cleared)", "（已清除）"},
+    // ---- 全 GUI 审计补键（Main / Wi-Fi Wizard / VirtualScreen）----
+    {"Wi-Fi Wizard", "Wi-Fi 向导"},
+    {"TCP port", "TCP 端口"},
+    {"PNG image (*.png)", "PNG 图像 (*.png)"},
+    {"[RSSI %1 dBm · ch %2]", "[RSSI %1 dBm · 信道 %2]"},
+    {"No signal — waiting for FULL frame", "无信号 — 等待全帧"},
+    // ---- Wi-Fi Wizard 错误词条（enDict 补齐，键集对称）----
+    {"UART bootstrap unavailable", "UART 引导链路不可用 - 请检查串口与线缆"},
+    {"TCP handoff failed (Wi-Fi connected)", "Wi-Fi 已连接，但 TCP 交接失败"},
+    {"Wi-Fi authentication failed", "Wi-Fi 认证失败（请检查密码）"},
+    {"Wi-Fi network not found", "未找到该 Wi-Fi 网络"},
+    {"DHCP timeout - no IP address", "DHCP 超时，未获取到 IP 地址"},
+    {"TCP server unreachable", "TCP 服务器不可达"},
+    {"Wi-Fi provisioning requires the UART bootstrap link",
+     "Wi-Fi 配网需要使用 UART 引导链路"},
+    {"Waiting for ESP32 TCP handoff...", "正在等待 ESP32 TCP 交接……"},
+};
+
 // 11. English 返回英文（key 即英文原文；未命中回退英文原文）。
 void test11English() {
     std::printf("[11] English returns English\n");
@@ -359,6 +399,30 @@ void test15M7eProvisioningCopy() {
     CHECK(std::strlen(trText(UiLang::kChinese, "displayTemporarilyPausedDuringWifiScan")) > 10u);
 }
 
+// 16. M7-G7：新补 key 中英均非空且钉死（en = 英文原文；zh 走目录）；
+//     全部键必须在 uiKeys() 清单内（防目录缺词）。
+void test16M7g7NewKeys() {
+    std::printf("[16] M7-G7 new keys bilingual and in uiKeys()\n");
+    const std::vector<std::string>& keys = uiKeys();
+    for (const M7g7Entry& e : kM7g7) {
+        const char* en = trText(UiLang::kEnglish, e.en);
+        const char* zh = trText(UiLang::kChinese, e.en);
+        CHECK(en != nullptr && en[0] != '\0');
+        CHECK(zh != nullptr && zh[0] != '\0');
+        CHECK(std::strcmp(en, e.en) == 0);  // en = 英文原文（恒等）
+        CHECK(std::strcmp(zh, e.zh) == 0);  // zh 钉死
+        CHECK(std::strcmp(en, zh) != 0);    // 中英不同（可翻译词条）
+        bool found = false;
+        for (const std::string& k : keys) {
+            if (k == e.en) {
+                found = true;
+                break;
+            }
+        }
+        CHECK(found);  // 键必须在目录清单里（防缺词）
+    }
+}
+
 int main() {
     std::setvbuf(stdout, nullptr, _IONBF, 0);
     std::printf("== ESPView pc i18n host tests ==\n");
@@ -367,6 +431,7 @@ int main() {
     test13LanguageSwitchIsPure();
     test14AllKeysBothLanguages();
     test15M7eProvisioningCopy();
+    test16M7g7NewKeys();
     std::printf("i18n_test: %d checks, %d failures\n", g_checks, g_failures);
     return g_failures == 0 ? 0 : 1;
 }

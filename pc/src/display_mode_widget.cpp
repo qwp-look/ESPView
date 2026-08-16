@@ -354,7 +354,7 @@ void DisplayModeWidget::updateStatusLine() {
     statusLine_->setText(html);
 
     if (!state_.lastError.empty()) {
-        statusLine_->setToolTip(QString::fromStdString(state_.lastError));
+        statusLine_->setToolTip(t(state_.lastError.c_str()));
     } else {
         statusLine_->setToolTip(QString());
     }
@@ -410,7 +410,7 @@ void DisplayModeWidget::updateConditionLabel() {
     conditionLabel_->setStyleSheet(
         QStringLiteral("color:%1;font-weight:bold;").arg(color));
     if (!state_.lastError.empty()) {
-        conditionLabel_->setToolTip(QString::fromStdString(state_.lastError));
+        conditionLabel_->setToolTip(t(state_.lastError.c_str()));
     } else {
         conditionLabel_->setToolTip(QString());
     }
