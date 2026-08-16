@@ -42,14 +42,18 @@ namespace espview {
 // TcpTransport 配置。默认值引用 Kconfig（CONFIG_ESPVIEW_TCP_*），本地测试凭据
 // （Wi-Fi SSID/密码）来自 menuconfig / 未跟踪 sdkconfig，不写死在源码。
 struct TcpTransportConfig : public TransportConfig {
-    const char* server_ip = "";        // PC TCP server IPv4（本地测试配置）
+    const char* server_ip = "";        // PC TCP server IPv4（本地测试配置/handoff 凭据）
     uint16_t server_port = 8765;       // PC TCP server port
     uint32_t connect_timeout_ms = 10000;  // TCP connect 超时
     uint32_t reconnect_delay_ms = 3000;   // 断开后重连退避
     uint32_t rx_timeout_ms = 200;         // RX select 周期（close 及时性）
     uint32_t send_timeout_ms = 5000;      // 单次 sendAll 的总预算
     size_t rx_buf = 4096;                 // RX chunk（栈上 buffer）
-    WifiStaConfig wifi;                   // Wi-Fi STA 凭据/参数
+    WifiStaConfig wifi;                   // Wi-Fi STA 凭据/参数（adopt 模式下未用）
+    // M7-G：TCP handoff 模式 —— 复用已由 WifiProvisioning 初始化的 Wi-Fi 驱动
+    // （驱动已含凭据并取得 GOT_IP）。为 true 时本类不 init/deinit/startConnect/
+    // waitForIp：直接进入 TCP connect 阶段（UART bootstrap → TCP handoff）。
+    bool adopt_existing_wifi = false;
 };
 
 class TcpTransport : public ITransport {

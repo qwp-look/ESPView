@@ -114,15 +114,19 @@ esp_err_t TcpTransport::open(const TransportConfig& cfg) {
     setState(State::Connecting);
 
     // Wi-Fi STA 初始化（凭据来自 Kconfig/未跟踪 sdkconfig；失败即 Error）。
-    const esp_err_t werr = wifi_.init(cfg_.wifi);
-    if (werr != ESP_OK) {
-        setState(State::Error);
-        {
-            ScopedLock lock(stateMutex_);
-            running_ = false;  // CS-5：open 失败完全回滚（close() 幂等兜底）
+    // M7-G：adopt 模式跳过 —— 驱动由 WifiProvisioning 持有（含凭据 + GOT_IP），
+    // 本类只做 TCP client（UART bootstrap → TCP handoff 不重复 init）。
+    if (!cfg_.adopt_existing_wifi) {
+        const esp_err_t werr = wifi_.init(cfg_.wifi);
+        if (werr != ESP_OK) {
+            setState(State::Error);
+            {
+                ScopedLock lock(stateMutex_);
+                running_ = false;  // CS-5：open 失败完全回滚（close() 幂等兜底）
+            }
+            wifi_.deinit();  // 幂等：确保半初始化的 Wi-Fi 也释放
+            return werr;
         }
-        wifi_.deinit();  // 幂等：确保半初始化的 Wi-Fi 也释放
-        return werr;
     }
 
     const BaseType_t terr = xTaskCreate(linkTaskEntry, "espview_tcp_link", kLinkTaskStackWords,
@@ -134,7 +138,9 @@ esp_err_t TcpTransport::open(const TransportConfig& cfg) {
             ScopedLock lock(stateMutex_);
             running_ = false;  // CS-5：open 失败完全回滚
         }
-        wifi_.deinit();  // 回滚已初始化的 Wi-Fi（TransportManager close() 兜底安全）
+        if (!cfg_.adopt_existing_wifi) {
+            wifi_.deinit();  // 回滚已初始化的 Wi-Fi（TransportManager close() 兜底安全）
+        }
         return ESP_ERR_NO_MEM;
     }
     ESP_LOGI(kTag, "open: target=%s:%u timeout=%u delay=%u", cfg_.server_ip,
@@ -196,7 +202,9 @@ void TcpTransport::close() {
         linkTask_ = nullptr;
         rxTask_ = nullptr;
     }
-    wifi_.deinit();
+    if (!cfg_.adopt_existing_wifi) {
+        wifi_.deinit();  // M7-G：adopt 模式下驱动归 WifiProvisioning 所有，不卸载
+    }
     setState(State::Disconnected);
     ESP_LOGI(kTag, "closed");
 }
@@ -311,19 +319,24 @@ void TcpTransport::linkLoop() {
 
         // ---- 阶段 1：Wi-Fi 连接 + GOT_IP ----
         setState(State::Connecting);
-        if (!wifi_.hasIp()) {
-            wifi_.startConnect();
-            const bool got = wifi_.waitForIp(cfg_.connect_timeout_ms);
-            {
-                ScopedLock lock(stateMutex_);
-                if (!running_) {
-                    break;
+        // M7-G：adopt 模式跳过 Wi-Fi 阶段 —— 驱动由 WifiProvisioning 持有且已
+        // 取得 GOT_IP（handoff 触发点）；Wi-Fi 掉线由 provisioning 自行重连，
+        // 本阶段在 IP 恢复前表现为 TCP connect 失败并退避重试。
+        if (!cfg_.adopt_existing_wifi) {
+            if (!wifi_.hasIp()) {
+                wifi_.startConnect();
+                const bool got = wifi_.waitForIp(cfg_.connect_timeout_ms);
+                {
+                    ScopedLock lock(stateMutex_);
+                    if (!running_) {
+                        break;
+                    }
                 }
-            }
-            if (!got) {
-                ESP_LOGW(kTag, "wifi wait for IP timed out; retrying");
-                xSemaphoreTake(linkWake_, pdMS_TO_TICKS(cfg_.reconnect_delay_ms));
-                continue;
+                if (!got) {
+                    ESP_LOGW(kTag, "wifi wait for IP timed out; retrying");
+                    xSemaphoreTake(linkWake_, pdMS_TO_TICKS(cfg_.reconnect_delay_ms));
+                    continue;
+                }
             }
         }
 

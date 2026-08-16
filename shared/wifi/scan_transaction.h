@@ -59,11 +59,12 @@ public:
     void setCallbacks(ScanTransactionCallbacks callbacks);
 
     // kIdle/kError/kDisconnected -> kPreparing；同步调用 suspendDisplay()：
-    //   成功 -> 进入挂起（suspended 置位，等待 onScanStarted）；
-    //   失败 -> kError（不进入挂起，也不恢复——本会话从未挂起）。
+    //   成功 -> 返回 true（已进入挂起，suspended 置位，等待 onScanStarted）；
+    //   失败 -> kError（不进入挂起，也不恢复——本会话从未挂起），返回 false。
     // 活动相位（Preparing/DisplaySuspended/Scanning/Collecting/Restoring）重复调用
-    // 为 no-op（double begin 幂等，不重复 suspend）。
-    void begin();
+    // 为 no-op（double begin 幂等，不重复 suspend），返回 false。
+    // 驱动可用返回值决定是否继续启动扫描（契约：挂起失败则绝不无保护扫描）。
+    bool begin();
 
     // kPreparing -> kDisplaySuspended（suspendedOk=true）；suspendedOk=false -> kError
     // （begin 内 suspend 已成功，故仍恢复显示恰一次）。其他相位调用为 no-op。

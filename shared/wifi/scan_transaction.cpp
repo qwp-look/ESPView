@@ -37,7 +37,7 @@ void ScanTransaction::setCallbacks(ScanTransactionCallbacks callbacks) {
     callbacks_ = std::move(callbacks);
 }
 
-void ScanTransaction::begin() {
+bool ScanTransaction::begin() {
     // 幂等：仅从终态（kIdle/kError/kDisconnected）启动；活动相位重复 begin 为 no-op。
     switch (phase_) {
         case ScanPhase::kIdle:
@@ -45,17 +45,19 @@ void ScanTransaction::begin() {
         case ScanPhase::kDisconnected:
             break;
         default:
-            return;
+            return false;
     }
     phase_ = ScanPhase::kPreparing;
     suspended_ = false;
     resetWindowClock();
-    // 同步调用 suspendDisplay：失败 -> kError，本会话从未挂起（不恢复）。
+    // 同步调用 suspendDisplay：成功 -> 已挂起（返回 true）；失败 -> kError，
+    // 本会话从未挂起（不恢复），返回 false（驱动不得无保护启动扫描）。
     if (callbacks_.suspendDisplay && callbacks_.suspendDisplay()) {
         suspended_ = true;
-    } else {
-        phase_ = ScanPhase::kError;
+        return true;
     }
+    phase_ = ScanPhase::kError;
+    return false;
 }
 
 void ScanTransaction::onScanStarted(bool suspendedOk) {

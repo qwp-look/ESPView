@@ -158,9 +158,12 @@ void WifiSta::deinit() {
 }
 
 bool WifiSta::apInfo(int8_t* rssi, uint8_t* channel) const {
-    if (rssi == nullptr || channel == nullptr || !wifiConnected_) {
+    if (rssi == nullptr || channel == nullptr) {
         return false;
     }
+    // 以驱动实际关联状态为准（未关联时 esp_wifi_sta_get_ap_info 返回失败）：
+    // 不再依赖本地 wifiConnected_ 标志——M7-G adopt 模式（驱动由 provisioning
+    // 持有、本类未 init）下诊断仍能取到 rssi/channel。
     wifi_ap_record_t ap = {};
     if (esp_wifi_sta_get_ap_info(&ap) != ESP_OK) {
         return false;

@@ -13,7 +13,12 @@
 //   - CLEAR：flags bit0 → 清零凭据 + 断开（不重连）。
 //   - 状态机：IDLE/SCANNING/CONFIG_APPLYING/WIFI_CONNECTING/WIFI_CONNECTED/
 //     GOT_IP/ERROR/CLEARED；onStatus 回调（tick 去重）。TCP 相位
-//     （TCP_CONNECTING/TCP_CONNECTED）由 D6 握手期外部设置，本模块不产生。
+//     （TCP_CONNECTING/TCP_CONNECTED）由 M7-G handoff 编排（main.cpp）经
+//     setTcpPhase() 外部设置，本模块不自行产生；server 不可达由
+//     setServerUnreachable() 上报（kError + kServerUnreachable）。
+//   - 扫描相位恢复（F Bug1）：扫描（SCANNING）期间 STA/GOT_IP 事件延迟应用，
+//     扫描终态按策略恢复——先应用延迟断线（错误终态或重连+DHCP 计时重启）、
+//     其次延迟 GOT_IP、否则恢复 prevPhase_，绝不无条件回卷。
 //   - 错误映射：认证类 reason → kAuthFailed；NO_AP_FOUND → kApNotFound；
 //     连接后限时无 IP → kDhcpTimeout；ESP-IDF API 失败 → kApiError。
 //
@@ -95,6 +100,19 @@ public:
     // CLEAR：清零凭据并断开（AF.4）。
     void requestClear();
 
+    // ---- M7-G：TCP handoff 外部相位（main/transport 握手期调用）----
+    // kTcpConnecting/kTcpConnected 由本模块之外的 handoff 编排设置（本模块不
+    // 自行产生 TCP 相位）。线程安全（互斥保护）；立即上行 WIFI_STATUS（调用方
+    // 保证时机：kTcpConnecting 在 switchTo 之前、kTcpConnected 在 TCP 会话
+    // CONNECTED 之后）。
+    void setTcpPhase(uint8_t phase);   // 仅接受 kTcpConnecting(6)/kTcpConnected(7)
+    // TCP server 不可达（连接超时/失败）→ 相位 kError + errorCode kServerUnreachable(10)。
+    // 线程安全；凭据保留（AF.4：可重试/CLEAR 覆盖）。
+    void setServerUnreachable();
+    // 强制重发当前状态快照（会话重连同步用：上次发送因会话未就绪/背压被丢弃
+    // 时由调用方在 CONNECTED 后补发）。线程安全；无状态变更。
+    void republishStatus();
+
     // 会话任务每 ~200ms 调用：处理命令队列、驱动相位机、派发 onStatus/onScanResult。
     // 必须在 esp_event 默认循环已创建后调用（main 中构造后即可，首次命令前懒 init）。
     void tick(uint64_t nowMs);
@@ -169,12 +187,26 @@ private:
     uint64_t connectStartMs_ = 0;
     uint8_t prevPhase_ = 0;        // 扫描前相位（SCAN_DONE 后恢复）
 
+    // M7-G：扫描活动标志与扫描期间延迟的 Wi-Fi 事件。
+    // 扫描（RF 窗口）期间 STA_CONNECTED/STA_DISCONNECTED/GOT_IP 不再立即推进
+    // 相位（否则异步事件会击穿 SCAN_DONE 消费、事务停挂/结果丢弃）；事件先
+    // 记录于此，扫描终态统一应用（F Bug1 相位恢复策略，DESIGN.md 状态机）。
+    bool scanActive_ = false;           // 扫描进行中（与 phase_==kScanning 解耦）
+    bool pendingDisconnect_ = false;    // 扫描期间收到 STA_DISCONNECTED（延后应用）
+    uint8_t pendingDisconnectCode_ = 0; // 延后断线的错误码（0=瞬态重连）
+    bool pendingGotIp_ = false;         // 扫描期间收到 GOT_IP（延后应用）
+
     // 扫描结果缓冲（tick 内填充/派发）。
     uint8_t scanMaxEntries_ = 32;  // 本次扫描 top-N（0=默认 32）
     bool scanDonePending_ = false;
     uint8_t scanGen_ = 0;          // M7-F：扫描代际（每次 startScan 递增；SCAN_DONE 归属匹配）
     uint8_t scanDoneGen_ = 0;      // M7-F：SCAN_DONE 记录时的代际（消费端须与 scanGen_ 一致）
     bool scanDoneFailed_ = false;  // M7-F：SCAN_DONE status!=0（扫描被终止/失败，结果无意义）
+    // M7-G：会话代际。notifySessionDisconnected 时递增；startScan 记录发起时
+    // 代际，派发时不一致则丢弃结果（WIFI_SCAN_RESULT 不跨会话派发，防迟到
+    // 结果落入新会话；与 scanGen_ 并存——scanGen_ 管扫描归属，本字段管会话）。
+    uint8_t scanSessionId_ = 0;
+    uint8_t scanSessionIdAtStart_ = 0;
     bool scanReady_ = false;
     uint8_t scanSeq_ = 0;
     bool scanTruncated_ = false;

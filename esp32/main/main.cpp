@@ -94,6 +94,21 @@ void logBootStage(const char* stage) {
              static_cast<unsigned>(esp_get_free_heap_size()));
 }
 
+// ---- M7-G：TCP handoff 目标/编排状态（UART bootstrap → TCP client）----
+// 目标（serverIp/serverPort）来自 WIFI_CONFIG provisioning 凭据（AF.2），
+// 不是 menuconfig 常量；所有读写均发生在会话任务（sessionLoop）上下文，
+// g_mgr 工厂 lambda 仅在 switchTo 时（同一上下文）读取，无跨任务竞争。
+// 绝不打印凭据/目标地址。
+constexpr uint64_t kHandoffConnectTimeoutMs = 15000;  // 切换后首次 TCP 连接+会话窗口
+constexpr uint64_t kHandoffDropTimeoutMs = 30000;     // 已连后掉线重连窗口
+enum class HandoffPhase : uint8_t { kIdle = 0, kConnecting = 1, kConnected = 2 };
+bool g_handoffActive = false;       // 工厂 lambda 分支开关（仅会话上下文读写）
+HandoffPhase g_handoff = HandoffPhase::kIdle;
+char g_handoffServerIp[16] = {};    // 点分 IPv4（工厂读取）
+uint16_t g_handoffServerPort = 0;
+uint64_t g_handoffStageStartMs = 0;  // 当前阶段起点（monotonicMs）
+bool g_handoffDisabled = false;      // ServerUnreachable 后锁存；新 CONFIG/CLEAR 解锁
+
 // M6-C：运行时 Transport 选择（§三/§五）。initial 仍由 menuconfig 决定
 // （编译期初始选择）；运行时经 TransportManager::switchTo() 在 UART/TCP 间切换。
 // 上层（ProtocolEndpoint / LVGL / InputManager / 会话状态机）只面对
@@ -107,6 +122,19 @@ espview::transport::TransportManager g_mgr(
             return std::make_shared<espview::transport::Esp32UartAdapter>(cfg);
         }
         ::espview::TcpTransportConfig cfg;
+        if (g_handoffActive) {
+            // M7-G：provisioning 驱动的 TCP handoff —— 目标来自 WIFI_CONFIG 凭据
+            // （AF.2 serverIp/serverPort；非 menuconfig 常量），Wi-Fi 驱动由
+            // provisioning 持有（adopt：不重复 init，直接复用已连接驱动）。
+            cfg.server_ip = g_handoffServerIp;
+            cfg.server_port = g_handoffServerPort;
+            cfg.adopt_existing_wifi = true;
+            if (cfg.server_ip[0] == '\0' || cfg.server_port == 0) {
+                ESP_LOGE(kTag, "handoff target missing; TCP unavailable");
+                return nullptr;
+            }
+            return std::make_shared<espview::transport::Esp32TcpAdapter>(cfg);
+        }
 #if CONFIG_ESPVIEW_TRANSPORT_TCP
         cfg.server_ip = CONFIG_ESPVIEW_TCP_SERVER_IP;
         cfg.server_port = static_cast<uint16_t>(CONFIG_ESPVIEW_TCP_SERVER_PORT);
@@ -118,12 +146,16 @@ espview::transport::TransportManager g_mgr(
 #if defined(CONFIG_ESPVIEW_WIFI_PS_NONE) && CONFIG_ESPVIEW_WIFI_PS_NONE
         cfg.wifi.ps_none = true;
 #endif
-#endif
         if (cfg.wifi.ssid[0] == '\0') {
             ESP_LOGE(kTag, "Wi-Fi SSID not configured; TCP unavailable (menuconfig / local sdkconfig)");
             return nullptr;
         }
         return std::make_shared<espview::transport::Esp32TcpAdapter>(cfg);
+#else
+        // 非 handoff 且非 TCP 构建：TCP 不可用（与旧行为一致：switchTo 失败）。
+        ESP_LOGE(kTag, "TCP transport not available (CONFIG_ESPVIEW_TRANSPORT_TCP=n)");
+        return nullptr;
+#endif
     },
 #if CONFIG_ESPVIEW_TRANSPORT_TCP
     espview::transport::TransportType::kTcp
@@ -361,6 +393,10 @@ void onSessionState(SessionState s) {
     // M7-D1：每会话 CONNECTED 后发送一次 CAPABILITIES（重连重发，AD.3）。
     if (s == SessionState::kConnected) {
         sendCapabilitiesMessage();
+        // M7-G：会话（重）连接后重发当前 WIFI_STATUS —— 保证 TCP handoff
+        // 失败回退 UART 后 kError/kServerUnreachable 必达向导（首发的背压/
+        // 会话未就绪丢弃由本次补发覆盖）。
+        g_wifiProv.republishStatus();
 #if CONFIG_ESPVIEW_OLED_ENABLE
         // M7-D2（AE.3）：握手重置预览槽 frameId/清槽（重连后 PC 首帧无条件接受）。
         if (g_oled) {
@@ -716,6 +752,135 @@ void updateFlushWaitFromTransport() {
 }
 #endif
 
+// ---- M7-G：TCP handoff 编排（UART bootstrap → TCP client）----
+// DESIGN.md AF/AG 序列：GOT_IP(5) → kTcpConnecting(6)（switchTo 前经 UART
+// 上报）→ switchTo(kTcp)（目标来自 provisioning 凭据，adopt 复用 Wi-Fi 驱动）
+// → kTcpConnected(7)（TCP 会话 CONNECTED 后经 TCP 上报）；连接超时/失败 →
+// 回退 UART bootstrap + kError/kServerUnreachable（凭据保留，向导可重试/
+// CLEAR）。全部在会话任务上下文执行（非阻塞；switchTo 的 close-join 最坏
+// 有界 ~15s，仅发生在故障回退路径）。
+void abortTcpHandoff();  // 前向声明（beginTcpHandoff 的失败回退路径引用）
+void beginTcpHandoff(const WifiProvStatus& st, uint64_t nowMs) {
+    if (st.serverIp == 0 || st.serverPort == 0) {
+        ESP_LOGW(kTag, "TCP handoff: no server target");
+        g_handoffDisabled = true;
+        g_wifiProv.setServerUnreachable();
+        return;
+    }
+    // 网络序 uint32（值语义，AF.2 大端写线；首字节 = 地址第一段）→ 点分
+    // IPv4。必须按网络序移位取段：小端机器上
+    // reinterpret_cast<const uint8_t*>(&st.serverIp) 会得到逆序段
+    // （64 01 A8 C0 → "100.1.168.192"），TCP connect 将打到错误地址。
+    std::snprintf(g_handoffServerIp, sizeof(g_handoffServerIp), "%u.%u.%u.%u",
+                  static_cast<unsigned>((st.serverIp >> 24) & 0xFFu),
+                  static_cast<unsigned>((st.serverIp >> 16) & 0xFFu),
+                  static_cast<unsigned>((st.serverIp >> 8) & 0xFFu),
+                  static_cast<unsigned>(st.serverIp & 0xFFu));
+    g_handoffServerPort = st.serverPort;
+    g_handoffActive = true;  // 工厂 lambda 在 switchTo 时读取（同一上下文）
+    g_handoffStageStartMs = nowMs;
+    // 先报 kTcpConnecting（仍走 UART bootstrap），再切换。
+    g_wifiProv.setTcpPhase(static_cast<uint8_t>(WifiStatusPhase::kTcpConnecting));
+    const bool ok = g_mgr.switchTo(espview::transport::TransportType::kTcp);
+    if (!ok) {
+        ESP_LOGE(kTag, "TCP handoff: switchTo(kTcp) failed");
+        abortTcpHandoff();
+        return;
+    }
+    g_handoff = HandoffPhase::kConnecting;
+    ESP_LOGI(kTag, "TCP handoff: switched to TCP (target from provisioning)");
+}
+
+void abortTcpHandoff() {
+    ESP_LOGW(kTag, "TCP handoff: server unreachable; falling back to UART bootstrap");
+    g_handoff = HandoffPhase::kIdle;
+    g_handoffActive = false;
+    g_handoffDisabled = true;  // 锁存：直到用户重新 CONFIG/CLEAR（相位 < kGotIp）
+    // 回退 UART bootstrap（向导/用户仍在 UART 侧）。endpoint 重新握手后
+    // WIFI_STATUS kError/kServerUnreachable 经 UART 上行（onSessionState
+    // republish + 本分支的保持断言）。
+    g_mgr.switchTo(espview::transport::TransportType::kUart);
+    g_wifiProv.setServerUnreachable();
+}
+
+// 每 200ms 由 sessionLoop 调用；驱动 GOT_IP → switchTo → 相位 6/7 → 回退。
+void tickTcpHandoff(uint64_t nowMs) {
+    const WifiProvStatus st = g_wifiProv.statusSnapshot();
+    const espview::transport::ITransport::State ts =
+        static_cast<espview::transport::ITransport::State>(g_transportState.load());
+    switch (g_handoff) {
+        case HandoffPhase::kIdle: {
+            // 新 CONFIG（phase=2..4 < kGotIp）或 CLEAR（kCleared=9）解锁
+            // ServerUnreachable 锁存：CLEAR 后相位回到 kCleared，不得继续强推
+            // kServerUnreachable（数值上 kCleared=9 > kGotIp=5，需显式判定）。
+            if (st.phase < static_cast<uint8_t>(WifiStatusPhase::kGotIp) ||
+                st.phase == static_cast<uint8_t>(WifiStatusPhase::kCleared)) {
+                g_handoffDisabled = false;
+            } else if (g_handoffDisabled &&
+                       g_endpoint.state() == SessionState::kConnected &&
+                       st.phase != static_cast<uint8_t>(WifiStatusPhase::kError)) {
+                // ServerUnreachable 后 Wi-Fi 事件可能覆盖相位：会话内保持
+                // kError/kServerUnreachable 可见（直到用户重新 CONFIG/CLEAR）。
+                g_wifiProv.setServerUnreachable();
+            }
+            // 触发：GOT_IP + 当前不在 TCP + 未被锁存（provisioning 驱动）。
+            if (st.phase == static_cast<uint8_t>(WifiStatusPhase::kGotIp) &&
+                g_mgr.current() != espview::transport::TransportType::kTcp &&
+                !g_handoffDisabled) {
+                beginTcpHandoff(st, nowMs);
+            }
+            break;
+        }
+        case HandoffPhase::kConnecting: {
+            if (ts == espview::transport::ITransport::State::kConnected) {
+                // TCP 链路已建立；等 endpoint 会话 CONNECTED（PC HELLO）后才
+                // 上报 kTcpConnected（sendWifiStatus 经 tryTransmit CONNECTED 门控）。
+                if (g_endpoint.state() == SessionState::kConnected) {
+                    g_wifiProv.setTcpPhase(static_cast<uint8_t>(WifiStatusPhase::kTcpConnected));
+                    g_handoff = HandoffPhase::kConnected;
+                    g_handoffStageStartMs = nowMs;
+                    ESP_LOGI(kTag, "TCP handoff: session CONNECTED");
+                } else if (nowMs - g_handoffStageStartMs >= kHandoffConnectTimeoutMs) {
+                    abortTcpHandoff();
+                }
+            } else if (nowMs - g_handoffStageStartMs >= kHandoffConnectTimeoutMs) {
+                abortTcpHandoff();  // 首次连接窗口超时 → ServerUnreachable
+            }
+            break;
+        }
+        case HandoffPhase::kConnected: {
+            // 仅当 provisioning 相位仍在 TCP 窗口（5/6/7）时本编排才覆写相位；
+            // Wi-Fi 侧错误（kError）不被 TCP 观察态覆盖，向导保持可见。
+            const uint8_t p = st.phase;
+            const bool inTcpWindow =
+                p == static_cast<uint8_t>(WifiStatusPhase::kGotIp) ||
+                p == static_cast<uint8_t>(WifiStatusPhase::kTcpConnecting) ||
+                p == static_cast<uint8_t>(WifiStatusPhase::kTcpConnected);
+            if (ts == espview::transport::ITransport::State::kConnected) {
+                g_handoffStageStartMs = nowMs;  // 保持已连
+                if (inTcpWindow && g_endpoint.state() == SessionState::kConnected &&
+                    st.phase != static_cast<uint8_t>(WifiStatusPhase::kTcpConnected)) {
+                    g_wifiProv.setTcpPhase(static_cast<uint8_t>(WifiStatusPhase::kTcpConnected));
+                }
+            } else if (ts == espview::transport::ITransport::State::kConnecting) {
+                // 掉线重连中：相位回 kTcpConnecting（观察态；AG.2 不单独推进）。
+                if (inTcpWindow) {
+                    g_wifiProv.setTcpPhase(static_cast<uint8_t>(WifiStatusPhase::kTcpConnecting));
+                }
+            } else {
+                // kDisconnected/kError：同样进入重连窗口。
+                if (inTcpWindow) {
+                    g_wifiProv.setTcpPhase(static_cast<uint8_t>(WifiStatusPhase::kTcpConnecting));
+                }
+            }
+            if (nowMs - g_handoffStageStartMs >= kHandoffDropTimeoutMs) {
+                abortTcpHandoff();  // 已连后掉线重连超时 → 回退 UART
+            }
+            break;
+        }
+    }
+}
+
 // ---- 会话驱动：每 200ms tick（心跳 2s / 对端超时 5s / ACK 重试 500ms）----
 // 注意：本任务绝不做阻塞式发送。流式大帧（153608B FRAME_RECT）会持有
 // sendMutex_ 十余秒，任何阻塞式 sendMessage 都会让 tick() 饿死（心跳停摆、
@@ -725,6 +890,11 @@ void updateFlushWaitFromTransport() {
 //（decoder/frame/ACK/seq/InputManager 清零）+ HELLO + FULL resync（§五/§六）。
 #if CONFIG_ESPVIEW_TEST_TRANSPORT_SWITCH
 void debugTransportSwitch() {
+    // M7-G：handoff 活动期间禁止 F12 手动切换（避免与 provisioning 编排冲突）。
+    if (g_handoffActive) {
+        ESP_LOGW(kTag, "debug transport switch ignored (TCP handoff active)");
+        return;
+    }
     g_switchEntryMs.store(monotonicMs());
     g_switchActive.store(true);
     // M6-D 修正：切换前先作废当前会话（endpoint 置 Disconnected → alive 检查立即
@@ -795,6 +965,8 @@ void sessionLoop(void*) {
         g_endpoint.tick();
         // M7-D3：Wi-Fi Provisioning 相位机（命令/扫描结果/状态去重；非阻塞回调）。
         g_wifiProv.tick(monotonicMs());
+        // M7-G：TCP handoff 编排（GOT_IP → switchTo → 相位 6/7 → 超时回退）。
+        tickTcpHandoff(monotonicMs());
 #if CONFIG_ESPVIEW_OLED_ENABLE
         // M7-D2（AE.3）：2Hz 节拍发送 Physical Preview（内部 tryTransmit，非阻塞）。
         if (g_oled && g_endpoint.state() == SessionState::kConnected) {

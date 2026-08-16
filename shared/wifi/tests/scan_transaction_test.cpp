@@ -262,6 +262,48 @@ void timeoutFlow() {
     }
 }
 
+// ---- 3b. begin() 返回挂起结果（M7-G：驱动据此决定是否启动扫描）----
+void beginReturnsSuspendResult() {
+    // 成功：true，kPreparing + 已挂起
+    {
+        MockOLED oled;
+        ScanTransaction tx(makeCallbacks(oled));
+        CHECK(tx.begin());
+        CHECK(tx.phase() == ScanPhase::kPreparing);
+        CHECK(tx.displaySuspended());
+        tx.onScanStarted(true);
+        tx.onScanDone(true);
+        CHECK(tx.phase() == ScanPhase::kIdle);
+        CHECK(oled.balanced());
+    }
+    // 失败：false，kError + 未挂起（不 resume）
+    {
+        MockOLED oled;
+        oled.pauseResult = false;
+        ScanTransaction tx(makeCallbacks(oled));
+        CHECK(!tx.begin());
+        CHECK(tx.phase() == ScanPhase::kError);
+        CHECK(!tx.displaySuspended());
+        CHECK_EQ(oled.pauseCount(), 1);
+        CHECK_EQ(oled.resumeCount(), 0);
+        CHECK(oled.backToActive());
+    }
+    // 活动相位重复 begin：false（no-op，不重复 suspend）
+    {
+        MockOLED oled;
+        ScanTransaction tx(makeCallbacks(oled));
+        CHECK(tx.begin());
+        CHECK(!tx.begin());  // kPreparing：no-op
+        CHECK_EQ(oled.pauseCount(), 1);
+        tx.onScanStarted(true);
+        CHECK(!tx.begin());  // kDisplaySuspended：no-op
+        CHECK_EQ(oled.pauseCount(), 1);
+        tx.onScanDone(true);
+        CHECK(tx.phase() == ScanPhase::kIdle);
+        CHECK(oled.balanced());
+    }
+}
+
 // ---- 4. double suspend（begin 幂等，不重复 suspend）----
 void doubleBeginIdempotent() {
     MockOLED oled;
@@ -384,7 +426,7 @@ void suspendFailure() {
     // 6c. 回调未注入：suspendDisplay 为空视同暂停失败（保守，绝不无保护扫描）
     {
         ScanTransaction tx;  // 无回调
-        tx.begin();
+        CHECK(!tx.begin());
         CHECK(tx.phase() == ScanPhase::kError);
         CHECK(!tx.displaySuspended());
     }
@@ -594,6 +636,8 @@ void runScanTransactionTests() {
     scanFailures();
     std::printf("[scan_transaction] timeout\n");
     timeoutFlow();
+    std::printf("[scan_transaction] begin_return\n");
+    beginReturnsSuspendResult();
     std::printf("[scan_transaction] double_begin\n");
     doubleBeginIdempotent();
     std::printf("[scan_transaction] double_resume\n");

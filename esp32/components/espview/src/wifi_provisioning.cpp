@@ -252,10 +252,11 @@ void WifiProvisioning::handleEvent(esp_event_base_t base, int32_t id, void* data
                     break;
                 }
                 xSemaphoreTake(mutex_, portMAX_DELAY);
-                // M7-F：代际保护。仅在扫描相位记录 SCAN_DONE 并绑定当前代际
-                // （scanGen_）；status!=0 表示扫描被 esp_wifi_scan_stop/esp_wifi_stop
-                // 终止或失败，其结果无意义。迟到事件由消费端代际+相位双重检查丢弃。
-                if (phase_ == 1 /* kScanning */) {
+                // M7-F：代际保护。仅在扫描活动（scanActive_）时记录 SCAN_DONE
+                // 并绑定当前代际（scanGen_）；status!=0 表示扫描被
+                // esp_wifi_scan_stop/esp_wifi_stop 终止或失败，其结果无意义。
+                // 迟到事件由消费端代际+活动标志双重检查丢弃。
+                if (scanActive_) {
                     scanDonePending_ = true;
                     scanDoneGen_ = scanGen_;
                     scanDoneFailed_ = (ev != nullptr && ev->status != 0);
@@ -275,11 +276,15 @@ void WifiProvisioning::handleEvent(esp_event_base_t base, int32_t id, void* data
                     break;
                 }
                 xSemaphoreTake(mutex_, portMAX_DELAY);
-                phase_ = 4;  // kWifiConnected
-                errorCode_ = 0;
                 rssi_ = rssi;
                 channel_ = channel;
-                statusDirty_ = true;
+                if (!scanActive_) {
+                    // M7-G：非扫描期正常推进；扫描期间仅更新 AP 信息，相位
+                    // 保持 SCANNING（事件由扫描终态统一处理，F Bug1）。
+                    phase_ = 4;  // kWifiConnected
+                    errorCode_ = 0;
+                    statusDirty_ = true;
+                }
                 xSemaphoreGive(mutex_);
                 break;
             }
@@ -291,19 +296,33 @@ void WifiProvisioning::handleEvent(esp_event_base_t base, int32_t id, void* data
                     break;
                 }
                 xSemaphoreTake(mutex_, portMAX_DELAY);
-                if (code != 0) {
+                if (scanActive_) {
+                    // M7-G：扫描期间断线只记录不处理——不推进相位、不调用
+                    // esp_wifi_connect()（会杀掉底层扫描、SCAN_DONE 变失败态、
+                    // 事务停挂 OLED 直至看门狗）。扫描终态统一应用。
+                    pendingDisconnect_ = true;
+                    pendingDisconnectCode_ = static_cast<uint8_t>(code);
+                } else if (code != 0) {
                     // 终态错误：认证失败/AP 未找到 → kError（不自动重连，等待
                     // 用户重试重新 Apply；AF.4 凭据仍在 RAM，CLEAR/新 CONFIG 覆盖）。
                     phase_ = 8;  // kError
                     errorCode_ = code;
+                    // F Bug1：断线即清 IP/信号（否则 DHCP 超时被旧 IP 旁路）。
+                    ip_ = 0;
+                    rssi_ = -128;
+                    channel_ = 0;
+                    statusDirty_ = true;
                 } else if (configured_) {
                     // 瞬态断开：自动重连，相位回到 CONNECTING，重启 DHCP 计时。
                     phase_ = 3;  // kWifiConnecting
                     errorCode_ = 0;
+                    ip_ = 0;  // F Bug1：清旧 IP，DHCP 超时计时才生效
+                    rssi_ = -128;
+                    channel_ = 0;
                     connectStartMs_ = static_cast<uint64_t>(esp_timer_get_time() / 1000);
                     reconnect = true;
+                    statusDirty_ = true;
                 }
-                statusDirty_ = true;
                 xSemaphoreGive(mutex_);
                 if (reconnect) {
                     const esp_err_t err = esp_wifi_connect();
@@ -325,9 +344,14 @@ void WifiProvisioning::handleEvent(esp_event_base_t base, int32_t id, void* data
         if (ev != nullptr) {
             ip_ = ev->ip_info.ip.addr;  // 网络序
         }
-        phase_ = 5;  // kGotIp
-        errorCode_ = 0;
-        statusDirty_ = true;
+        if (!scanActive_) {
+            phase_ = 5;  // kGotIp
+            errorCode_ = 0;
+            statusDirty_ = true;
+        } else {
+            // M7-G：扫描期间 GOT_IP 延后应用（扫描终态恢复时不得回卷）。
+            pendingGotIp_ = true;
+        }
         xSemaphoreGive(mutex_);
     }
 }
@@ -337,12 +361,34 @@ void WifiProvisioning::tick(uint64_t nowMs) {
         return;
     }
 
-    // M7-E：消费跨任务断线通知（RX/传输任务只置标志）→ 进行中的扫描事务进入
-    // Disconnected 终态并恢复 OLED；无活动事务时 no-op（可随后重新 begin）。
+    // M7-E/M7-G：消费跨任务断线通知（RX/传输任务只置标志）。
+    // 无活动事务时仅作废在途扫描结果（防跨会话派发）；有活动扫描事务时同时
+    // 取消底层扫描（esp_wifi_scan_stop + 代际作废，杜绝迟到的 SCAN_DONE 把
+    // 结果派发到新会话/让相位悬挂），事务进入 Disconnected 终态并恢复 OLED。
     if (sessionDisconnectPending_.exchange(false, std::memory_order_acq_rel)) {
+        {
+            xSemaphoreTake(mutex_, portMAX_DELAY);
+            if (scanReady_) {
+                scanReady_ = false;  // 未派发的扫描结果作废（跨会话不派发）
+                scanCount_ = 0;
+            }
+            if (scanActive_) {
+                scanActive_ = false;
+                scanDonePending_ = false;
+                scanGen_ = static_cast<uint8_t>(scanGen_ + 1u);  // 作废在途 SCAN_DONE
+                pendingDisconnect_ = false;
+                pendingGotIp_ = false;
+                if (phase_ == 1 /* kScanning */) {
+                    phase_ = prevPhase_;
+                }
+                statusDirty_ = true;
+            }
+            xSemaphoreGive(mutex_);
+        }
         const wifi::ScanPhase p = scanTransaction_.phase();
         if (p != wifi::ScanPhase::kIdle && p != wifi::ScanPhase::kError &&
             p != wifi::ScanPhase::kDisconnected) {
+            esp_wifi_scan_stop();  // 终止底层扫描（其后 SCAN_DONE 失败态，代际不匹配丢弃）
             scanTransaction_.onDisconnect();
         }
     }
@@ -352,33 +398,72 @@ void WifiProvisioning::tick(uint64_t nowMs) {
     bool scanFailed = false;
     {
         xSemaphoreTake(mutex_, portMAX_DELAY);
-        // M7-F：代际匹配 + 相位匹配。仅当 SCAN_DONE 属于当前扫描（代际一致）
-        // 且仍处于扫描相位时消费；被配置/清除终止的扫描的迟到事件在此丢弃，
-        // 不会污染下一次扫描或推进中的配置相位。
-        scanHandled = scanDonePending_ && scanDoneGen_ == scanGen_ && phase_ == 1;
+        // M7-F/M7-G：代际匹配 + 活动标志匹配。仅当 SCAN_DONE 属于当前扫描
+        // （代际一致）且扫描仍活动时消费；被配置/清除/断线/看门狗终止的扫描
+        // 的迟到事件在此丢弃（scanActive_ 已清 + 代际已作废），不会污染下一
+        // 次扫描或推进中的配置/连接相位（F Bug3 闭环）。
+        scanHandled = scanDonePending_ && scanDoneGen_ == scanGen_ && scanActive_;
         scanFailed = scanDoneFailed_;
         scanDonePending_ = false;
         xSemaphoreGive(mutex_);
     }
     if (scanHandled) {
-        bool scanOk = false;  // M7-E：结果收集成功标志（onScanDone(ok)）
+        bool scanOk = false;   // M7-E：结果收集成功标志（onScanDone(ok)）
+        bool doReconnect = false;  // M7-G：延迟断线应用后的自动重连
         if (scanFailed) {
             // M7-F：扫描被终止/驱动失败 → 事务终态 Error（恢复 OLED），不取结果。
-            setError(5);  // kScanFailed
+            xSemaphoreTake(mutex_, portMAX_DELAY);
+            scanActive_ = false;
+            scanReady_ = false;
+            scanCount_ = 0;
+            pendingDisconnect_ = false;
+            pendingGotIp_ = false;
+            phase_ = 8;  // kError
+            errorCode_ = 5;  // kScanFailed
+            statusDirty_ = true;
+            xSemaphoreGive(mutex_);
         } else {
             uint16_t apNum = 0;
             if (esp_wifi_scan_get_ap_num(&apNum) != ESP_OK) {
-                setError(5);  // kScanFailed
+                xSemaphoreTake(mutex_, portMAX_DELAY);
+                scanActive_ = false;
+                scanReady_ = false;
+                scanCount_ = 0;
+                pendingDisconnect_ = false;
+                pendingGotIp_ = false;
+                phase_ = 8;  // kError
+                errorCode_ = 5;  // kScanFailed
+                statusDirty_ = true;
+                xSemaphoreGive(mutex_);
             } else {
-            const bool truncated = apNum > kMaxScanRecords;
-            const uint16_t fetch = truncated ? kMaxScanRecords : apNum;
-            auto* aps = static_cast<wifi_ap_record_t*>(std::malloc(fetch * sizeof(wifi_ap_record_t)));
+                const bool truncated = apNum > kMaxScanRecords;
+                const uint16_t fetch = truncated ? kMaxScanRecords : apNum;
+                auto* aps =
+                    static_cast<wifi_ap_record_t*>(std::malloc(fetch * sizeof(wifi_ap_record_t)));
             if (aps == nullptr) {
-                setError(12);  // kApiError
+                xSemaphoreTake(mutex_, portMAX_DELAY);
+                scanActive_ = false;
+                scanReady_ = false;
+                scanCount_ = 0;
+                pendingDisconnect_ = false;
+                pendingGotIp_ = false;
+                phase_ = 8;  // kError
+                errorCode_ = 12;  // kApiError
+                statusDirty_ = true;
+                xSemaphoreGive(mutex_);
             } else {
                 uint16_t got = fetch;
                 if (esp_wifi_scan_get_ap_records(&got, aps) != ESP_OK) {
-                    setError(5);  // kScanFailed
+                    xSemaphoreTake(mutex_, portMAX_DELAY);
+                    scanActive_ = false;
+                    scanReady_ = false;
+                    scanCount_ = 0;
+                    pendingDisconnect_ = false;
+                    pendingGotIp_ = false;
+                    phase_ = 8;  // kError
+                    errorCode_ = 5;  // kScanFailed
+                    statusDirty_ = true;
+                    xSemaphoreGive(mutex_);
                 } else {
                     // 按 RSSI 降序（简单插入排序，n ≤ 64）。
                     for (uint16_t i = 1; i < got; ++i) {
@@ -414,13 +499,39 @@ void WifiProvisioning::tick(uint64_t nowMs) {
                         scanTruncated_ = truncated || (got > n);
                         scanTotal_ = apNum;
                         scanReady_ = true;
-                        // 扫描结束：相位恢复到扫描前。M7-F：仅当仍处于扫描相位时
-                        // 恢复——配置/连接可能已推进相位（异步 Wi-Fi 事件），
-                        // 无条件回卷会破坏进行中的配置状态机。
-                        if (phase_ == 1 /* kScanning */) {
+                        // ---- M7-G：相位恢复策略（F Bug1，DESIGN.md 状态机）----
+                        // 扫描期间 STA 事件已被延迟；终态按优先级应用：
+                        //   1. 延迟断线：认证类错误 → kError（清 IP）；瞬态 →
+                        //      kWifiConnecting + 重启 DHCP 计时 + 自动重连；
+                        //   2. 延迟 GOT_IP：→ kGotIp（不回卷到 prevPhase_）；
+                        //   3. 均无 → 恢复 prevPhase_（延迟机制下事件不会击穿
+                        //      SCANNING，else 分支仅防御）。
+                        scanActive_ = false;
+                        if (pendingDisconnect_) {
+                            pendingDisconnect_ = false;
+                            pendingGotIp_ = false;
+                            ip_ = 0;  // F Bug1：清旧 IP，DHCP 超时计时才生效
+                            rssi_ = -128;
+                            channel_ = 0;
+                            if (pendingDisconnectCode_ != 0) {
+                                phase_ = 8;  // kError
+                                errorCode_ = pendingDisconnectCode_;
+                            } else {
+                                phase_ = 3;  // kWifiConnecting
+                                errorCode_ = 0;
+                                connectStartMs_ = nowMs;
+                                doReconnect = true;
+                            }
+                        } else if (pendingGotIp_) {
+                            pendingGotIp_ = false;
+                            phase_ = 5;  // kGotIp
+                            errorCode_ = 0;
+                        } else if (phase_ == 1 /* kScanning */) {
                             phase_ = prevPhase_;
+                            errorCode_ = 0;
+                        } else {
+                            errorCode_ = 0;  // 防御：非扫描相位保持现状
                         }
-                        errorCode_ = 0;
                         statusDirty_ = true;
                         xSemaphoreGive(mutex_);
                     }
@@ -432,6 +543,12 @@ void WifiProvisioning::tick(uint64_t nowMs) {
         }
         // M7-E：结果收集完成（成功/失败）→ 事务终态（成功/失败都恢复 OLED）。
         scanTransaction_.onScanDone(scanOk);
+        if (doReconnect) {
+            const esp_err_t err = esp_wifi_connect();
+            if (err != ESP_OK && err != ESP_ERR_WIFI_NOT_STARTED) {
+                ESP_LOGW(kTag, "scan-finalize reconnect failed: %s", esp_err_to_name(err));
+            }
+        }
     }
 
     // 2) 派发扫描结果（锁外回调；缓冲只在下次扫描前有效）。
@@ -441,6 +558,8 @@ void WifiProvisioning::tick(uint64_t nowMs) {
         bool truncated = false;
         uint16_t total = 0;
         size_t count = 0;
+        uint8_t sessionAtStart = 0;
+        uint8_t sessionNow = 0;
         {
             xSemaphoreTake(mutex_, portMAX_DELAY);
             ready = scanReady_;
@@ -448,12 +567,17 @@ void WifiProvisioning::tick(uint64_t nowMs) {
             truncated = scanTruncated_;
             total = scanTotal_;
             count = scanCount_;
+            sessionAtStart = scanSessionIdAtStart_;
+            sessionNow = scanSessionId_;
             if (ready) {
                 scanReady_ = false;
             }
             xSemaphoreGive(mutex_);
         }
-        if (ready && cb_.onScanResult) {
+        // M7-G：会话代际匹配。扫描发起后发生过会话断开（代际推进）→ 丢弃，
+        // 结果绝不派发到新会话（扫描缓冲在断开路径已清，本检查捕获 tick 中段
+        // 断线窗口：断开通知在收集后、派发前到达的情形）。
+        if (ready && sessionAtStart == sessionNow && cb_.onScanResult) {
             cb_.onScanResult(seq, truncated, total, scanRecords_, count);
         }
     }
@@ -479,23 +603,43 @@ void WifiProvisioning::tick(uint64_t nowMs) {
                 p != wifi::ScanPhase::kDisconnected) {
                 break;
             }
-            scanTransaction_.begin();
+            // M7-G：begin() 内同步挂起 OLED（恰一次；后续 startScan 不再二次
+            // suspend）。挂起失败（回调显式返回 false，正常不可达）→ 不开扫描
+            // （ScanTransaction 契约：绝不无保护扫描）。
+            if (!scanTransaction_.begin()) {
+                setError(12);  // kApiError（防御；main 注入回调恒返回 true）
+                break;
+            }
             startScan(cmd.maxEntries);
             break;
         }
         case CommandKind::kConfig:
         case CommandKind::kClear: {
-            // M7-F：配置/清除不得打断进行中的扫描事务（esp_wifi_stop/applyClear
-            // 会终止扫描、事务停挂 OLED 等看门狗，且终止的扫描结果可能按新 seq
-            // 上报）。先显式结束事务、停止扫描并作废滞留 SCAN_DONE（代际推进）。
+            // M7-F/M7-G：配置/清除不得打断进行中的扫描事务（esp_wifi_stop/
+            // applyClear 会终止扫描、事务停挂 OLED 等看门狗，且终止的扫描结果
+            // 可能按新 seq 上报）。先显式收敛：停止扫描、作废滞留 SCAN_DONE 与
+            // 未派发结果（代际推进 + scanActive_/scanReady_ 清除），再应用
+            // （F Bug2 扫描收敛保证）。
             const wifi::ScanPhase sp = scanTransaction_.phase();
-            if (sp != wifi::ScanPhase::kIdle && sp != wifi::ScanPhase::kError &&
-                sp != wifi::ScanPhase::kDisconnected) {
+            const bool scanRunning =
+                scanActive_ || (sp != wifi::ScanPhase::kIdle &&
+                                sp != wifi::ScanPhase::kError &&
+                                sp != wifi::ScanPhase::kDisconnected);
+            if (scanRunning) {
                 xSemaphoreTake(mutex_, portMAX_DELAY);
+                scanActive_ = false;
                 scanDonePending_ = false;
+                scanReady_ = false;
+                scanCount_ = 0;
+                pendingDisconnect_ = false;
+                pendingGotIp_ = false;
                 scanGen_ = static_cast<uint8_t>(scanGen_ + 1u);  // 作废在途 SCAN_DONE
+                if (phase_ == 1 /* kScanning */) {
+                    phase_ = prevPhase_;
+                }
+                statusDirty_ = true;
                 xSemaphoreGive(mutex_);
-                esp_wifi_scan_stop();  // 终止进行中的扫描（其后 SCAN_DONE 为失败态，被消费端丢弃）
+                esp_wifi_scan_stop();  // 终止进行中的扫描（其后 SCAN_DONE 失败态，代际不匹配丢弃）
                 scanTransaction_.onScanDone(false);  // 立即恢复 OLED；事务回 kError（可重新 begin）
             }
             if (cmd.kind == CommandKind::kConfig) {
@@ -528,13 +672,44 @@ void WifiProvisioning::tick(uint64_t nowMs) {
     publishStatus();
 
     // 6) M7-E：扫描事务超时驱动（扫描卡死/无 SCAN_DONE 时恢复 OLED）。
+    const wifi::ScanPhase txBefore = scanTransaction_.phase();
     scanTransaction_.tick(nowMs, kScanTimeoutMs);
+    if (scanTransaction_.phase() == wifi::ScanPhase::kError &&
+        txBefore != wifi::ScanPhase::kError) {
+        // M7-G：看门狗超时（本 tick 主动终态已在对应路径清理）→ 取消底层
+        // 扫描 + 作废滞留 SCAN_DONE/未派发结果，防止迟到 SCAN_DONE 把结果
+        // 派发到新会话或让相位悬挂在 SCANNING。
+        xSemaphoreTake(mutex_, portMAX_DELAY);
+        if (scanActive_) {
+            scanActive_ = false;
+            scanDonePending_ = false;
+            scanReady_ = false;
+            scanCount_ = 0;
+            pendingDisconnect_ = false;
+            pendingGotIp_ = false;
+            scanGen_ = static_cast<uint8_t>(scanGen_ + 1u);
+            if (phase_ == 1 /* kScanning */) {
+                phase_ = prevPhase_;
+            }
+            statusDirty_ = true;
+        }
+        xSemaphoreGive(mutex_);
+        esp_wifi_scan_stop();
+    }
 }
 
 void WifiProvisioning::notifySessionDisconnected() {
     // M7-E：会话断开（onSessionState 回调，可能运行于 RX/传输任务）→ 只置
     // 原子挂起标志；事务终态转换由会话任务 tick() 消费执行（同一任务内对
     // scanTransaction_ 的全部访问，避免跨任务数据竞争）。
+    // M7-G：同时推进会话代际（互斥保护；立即生效，不等 tick）——在途/迟到
+    // 的 WIFI_SCAN_RESULT 派发时按代际丢弃，绝不跨会话派发（含 tick 中段
+    // 断线的窗口：派发比较发生在同一 tick 的收集之后，可捕获本窗口）。
+    if (mutex_ != nullptr) {
+        xSemaphoreTake(mutex_, portMAX_DELAY);
+        scanSessionId_ = static_cast<uint8_t>(scanSessionId_ + 1u);
+        xSemaphoreGive(mutex_);
+    }
     sessionDisconnectPending_.store(true, std::memory_order_release);
 }
 
@@ -552,10 +727,17 @@ void WifiProvisioning::startScan(uint8_t maxEntries) {
         phase_ = 1;  // kScanning
         errorCode_ = 0;
         scanMaxEntries_ = maxEntries;
-        // M7-F：新扫描代际（uint8 回绕安全：0→1；匹配仅需与上一代不同）。
-        // 同时清掉上一扫描遗留的 SCAN_DONE 标志（与代际检查互为防御）。
+        // M7-F/M7-G：新扫描代际（uint8 回绕安全：0→1；匹配仅需与上一代不同）。
+        // 同时清掉上一扫描遗留的 SCAN_DONE 标志（与代际检查互为防御），并置
+        // 扫描活动标志（与相位解耦：扫描期间异步 Wi-Fi 事件不再击穿相位，
+        // F Bug1/Bug3）。
         scanGen_ = static_cast<uint8_t>(scanGen_ + 1u);
+        // M7-G：记录发起时会话代际（派发时不一致 → 丢弃，不跨会话派发）。
+        scanSessionIdAtStart_ = scanSessionId_;
         scanDonePending_ = false;
+        scanActive_ = true;
+        pendingDisconnect_ = false;
+        pendingGotIp_ = false;
         statusDirty_ = true;
         xSemaphoreGive(mutex_);
     }
@@ -581,8 +763,11 @@ void WifiProvisioning::startScan(uint8_t maxEntries) {
         const esp_err_t startErr = esp_wifi_start();
         if (startErr != ESP_OK) {
             ESP_LOGE(kTag, "esp_wifi_start failed: %s", esp_err_to_name(startErr));
+            xSemaphoreTake(mutex_, portMAX_DELAY);
+            scanActive_ = false;  // 未启动：清活动标志（无 SCAN_DONE 会来）
+            xSemaphoreGive(mutex_);
             setError(12);  // kApiError
-            // M7-E：扫描未启动 → 事务终态 Error（尚未挂起，恢复 no-op）。
+            // M7-E：扫描未启动 → 事务终态 Error（begin 已挂起则恢复一次）。
             scanTransaction_.onScanStarted(false);
             return;
         }
@@ -590,13 +775,17 @@ void WifiProvisioning::startScan(uint8_t maxEntries) {
     }
     if (err != ESP_OK) {
         ESP_LOGW(kTag, "esp_wifi_scan_start failed: %s", esp_err_to_name(err));
+        xSemaphoreTake(mutex_, portMAX_DELAY);
+        scanActive_ = false;  // 未启动：清活动标志（无 SCAN_DONE 会来）
+        xSemaphoreGive(mutex_);
         setError(5);  // kScanFailed
-        // M7-E：扫描启动失败 → 事务终态 Error（尚未挂起，恢复 no-op）。
+        // M7-E：扫描启动失败 → 事务终态 Error（begin 已挂起则恢复一次）。
         scanTransaction_.onScanStarted(false);
         return;
     }
-    // M7-E：扫描已启动 → 挂起 OLED（失败由事务记录），进入 DisplaySuspended。
-    scanTransaction_.onScanStarted(suspendDisplay());
+    // M7-E/M7-G：扫描已启动。挂起已在 begin() 内同步完成（恰一次，不再二次
+    // 调用 suspendDisplay）；此处只通知事务进入 DisplaySuspended。
+    scanTransaction_.onScanStarted(true);
 }
 
 void WifiProvisioning::applyConfig(Command cmd) {
@@ -697,6 +886,43 @@ void WifiProvisioning::setError(uint16_t code) {
     errorCode_ = code;
     statusDirty_ = true;
     xSemaphoreGive(mutex_);
+}
+
+void WifiProvisioning::setTcpPhase(uint8_t phase) {
+    if (mutex_ == nullptr) {
+        return;
+    }
+    if (phase != 6 /* kTcpConnecting */ && phase != 7 /* kTcpConnected */) {
+        return;  // 只接受 TCP 相位（M7-G handoff 编排专用）
+    }
+    xSemaphoreTake(mutex_, portMAX_DELAY);
+    phase_ = phase;
+    errorCode_ = 0;
+    statusDirty_ = true;
+    xSemaphoreGive(mutex_);
+    publishStatus();  // 立即上行（调用方保证时机：kTcpConnecting 在 switchTo 前）
+}
+
+void WifiProvisioning::setServerUnreachable() {
+    if (mutex_ == nullptr) {
+        return;
+    }
+    xSemaphoreTake(mutex_, portMAX_DELAY);
+    phase_ = 8;  // kError
+    errorCode_ = 10;  // kServerUnreachable（AF.2 错误码 10）
+    statusDirty_ = true;
+    xSemaphoreGive(mutex_);
+    publishStatus();  // 立即上行（回退 UART 后；会话重连后由 endpoint 门控发送）
+}
+
+void WifiProvisioning::republishStatus() {
+    if (mutex_ == nullptr) {
+        return;
+    }
+    xSemaphoreTake(mutex_, portMAX_DELAY);
+    statusDirty_ = true;
+    xSemaphoreGive(mutex_);
+    publishStatus();
 }
 
 void WifiProvisioning::publishStatus() {
