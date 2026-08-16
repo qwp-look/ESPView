@@ -34,7 +34,7 @@ scripts\espview_build_flash.bat -esp32 -p COM4 --no-reset
 | `-host` | host 全套（shared/protocol 单测 + ctest + pc 工具），调用 `verify_host.bat` |
 | `-qt` | Qt 6 GUI 构建（`espview_virtual_display.exe`），调用 `verify_qt.bat` |
 | `-esp32` | ESP32 固件构建（`idf.py -B build\<profile> build`） |
-| `-b <profile>` | ESP32 构建子目录（`esp32\build\<profile>`），默认 `uart_hw` |
+| `-b <profile>` | ESP32 构建子目录（`esp32\build\<profile>`），默认 `uart_hw`；每个 profile 使用自己的 `build\<profile>\sdkconfig`（首次从 `esp32\sdkconfig` 引导拷贝），互不漂移 |
 | `--check` | 只做 preflight（MSYS2 / ESP-IDF 探测），不构建 |
 | `-h` / `--help` | 帮助 |
 
@@ -62,7 +62,7 @@ scripts\espview_build_flash.bat -esp32 -p COM4 --no-reset
 | --- | --- |
 | `-p <port>` | 串口，默认 `COM4`；裸数字也可（`4` = `COM4`） |
 | `-b <profile>` | 构建子目录，默认 `uart_hw`（即烧 `esp32\build\uart_hw\espview_esp32.bin`） |
-| `--no-reset` | 烧录后不复位芯片。ESP-IDF v6.0.2 的 `idf.py flash` 没有原生 `--no-reset`，脚本映射为 esptool `--after no-reset`（经 `idf.py --extra-args` 透传） |
+| `--no-reset` | 烧录后不复位芯片。ESP-IDF v6.0.2 的 `idf.py flash` 没有原生 `--no-reset`，脚本直接调用 esptool（`--before default-reset --after no-reset write-flash @flash_args`）烧录并保持芯片运行 |
 | `--dry-run` | 只做参数解析 + COM 口 + bin 存在性校验，**不实际烧录** |
 | `-h` / `--help` | 帮助 |
 
@@ -81,7 +81,7 @@ scripts\espview_build_flash.bat -esp32 -p COM4 --no-reset
 
 ## espview_build_flash.bat
 
-先构建再烧录；构建参数（`-host`/`-qt`/`-esp32`/`-b`/`--check`）与烧录参数（`-p`/`--no-reset`/`--dry-run`）均可透传。默认 `-host -qt -esp32 -p COM4 -b uart_hw`；指定了任一 `-host`/`-qt`/`-esp32` 时只构建指定目标。退出码 = 首个失败步骤的码（build 0/1/2/3，flash 0/2/3/4/5/6）。
+先构建再烧录；构建参数（`-host`/`-qt`/`-esp32`/`-b`/`--check`）与烧录参数（`-p`/`--no-reset`/`--dry-run`）均可透传。默认 `-host -qt -esp32 -p COM4 -b uart_hw`；指定了任一 `-host`/`-qt`/`-esp32` 时只构建指定目标。`--check` 只做 preflight 且自动把烧录参数加 `--dry-run`（绝不真烧）。退出码 = 首个失败步骤的码（build 0/1/2/3，flash 0/2/3/4/5/6）。
 
 ## Profile 说明
 
@@ -94,6 +94,8 @@ scripts\espview_build_flash.bat -esp32 -p COM4 --no-reset
 | `dev_uart`（规划中） | 未创建 | **Developer UART**：UART + OLED + diagnostics |
 
 新 profile = 用 menuconfig 配置后另建构建目录（如 `idf.py -B build\tcp_production` 生成），脚本无需改动，直接 `-b tcp_production` 构建/烧录。
+
+**M7-F F4：profile sdkconfig 隔离**——每个 profile 使用自己的 `esp32\build\<profile>\sdkconfig`（脚本通过 `idf.py -DSDKCONFIG=...` 显式指定）。首次构建/烧录时若该文件不存在，脚本从本地 `esp32\sdkconfig` 引导拷贝一份（保留 UART 引脚、波特率与 Wi-Fi 凭据），此后各 profile 完全隔离，共享的 `esp32\sdkconfig` 不再被构建/烧录覆盖。
 
 ### 凭据与隐私
 

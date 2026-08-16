@@ -2,7 +2,7 @@
 REM ============================================================
 REM ESPView M5-A: LVGL display backend verification entrypoint.
 REM
-REM   [1/3] host tests (shared/protocol + shared/display)
+REM   [1/3] host tests (shared/protocol + shared/display + shared/wifi)
 REM         via MSYS2 MinGW64 (g++, cmake, ctest);
 REM   [2/3] ESP32 build via ESP-IDF v6.0.2 (esp32/, LVGL app);
 REM   [3/3] optional COM3 LVGL sanity (only when ESPVIEW_COM3 is set,
@@ -26,10 +26,10 @@ if "%ESPVIEW_PYTHON%"=="" set "ESPVIEW_PYTHON=C:\Espressif\tools\python\v6.0.2\v
 set "ROOT=%~dp0.."
 set "BUILD=%ROOT%\build\verify_lvgl"
 
-echo [1/3] Configure + build host tests (protocol + display)
+echo [1/3] Configure + build host tests (protocol + display + wifi)
 cmake -S "%ROOT%\shared\protocol" -B "%BUILD%\protocol" -G "MinGW Makefiles" -DCMAKE_BUILD_TYPE=Release
 if errorlevel 1 goto :fail
-cmake --build "%BUILD%\protocol" --target espview_protocol_tests -j 8
+cmake --build "%BUILD%\protocol" --target espview_protocol_tests scan_transaction_test -j 8
 if errorlevel 1 goto :fail
 ctest --test-dir "%BUILD%\protocol" --output-on-failure
 if errorlevel 1 goto :fail

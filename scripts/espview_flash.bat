@@ -9,8 +9,10 @@ REM   Defaults: port COM4, profile uart_hw (esp32\build\uart_hw).
 REM   -p <port>    serial port, e.g. COM4 (bare number allowed: 4 = COM4)
 REM   -b <name>    ESP32 build sub-directory under esp32\build\ (default uart_hw)
 REM   --no-reset   do not reset the chip after flashing. ESP-IDF v6.0.2
-REM                idf.py flash has no native --no-reset, so this maps to
-REM                esptool --after no-reset via idf.py --extra-args.
+REM                idf.py flash has no native --no-reset, so this calls
+REM                esptool directly (--before default-reset --after
+REM                no-reset write-flash @flash_args) so the chip keeps
+REM                running after the write completes.
 REM   --dry-run    parse args + validate only; do NOT flash anything.
 REM
 REM   Exit codes:
@@ -78,6 +80,18 @@ REM ---- firmware binary check ------------------------------------
 set "BIN=%ROOT%\esp32\build\%ESP32_PROFILE%\espview_esp32.bin"
 if not exist "%BIN%" goto :no_bin
 
+REM M7-F F4: mirror the build script's per-profile sdkconfig isolation.
+REM idf.py flash reconfigures the build dir, so it must use the same
+REM build\<profile>\sdkconfig the profile was built with (bootstrap-copied
+REM from esp32\sdkconfig on first use so machine settings are preserved).
+set "PROFILE_SDKCONFIG=%ROOT%\esp32\build\%ESP32_PROFILE%\sdkconfig"
+if not exist "%PROFILE_SDKCONFIG%" (
+    if exist "%ROOT%\esp32\sdkconfig" (
+        echo [flash] bootstrap profile sdkconfig: esp32\sdkconfig -^> build\%ESP32_PROFILE%\sdkconfig
+        copy /y "%ROOT%\esp32\sdkconfig" "%PROFILE_SDKCONFIG%" >nul
+    )
+)
+
 set "PROFILE_LABEL=%ESP32_PROFILE%"
 if /i "%ESP32_PROFILE%"=="uart_hw" set "PROFILE_LABEL=uart_hw (UART verification firmware: ESPVIEW_DEFAULT_MODE=2, OLED, LVGL, TEST hooks)"
 
@@ -96,7 +110,7 @@ if defined DRY_RUN (
 
 if defined NO_RESET goto :flash_noreset
 echo [flash] running: idf.py -B build\%ESP32_PROFILE% -p %PORT% flash
-powershell -NoProfile -ExecutionPolicy Bypass -Command "$ErrorActionPreference='Stop'; try { & { . '%ESPIDF_PROFILE%' }; Set-Location '%ROOT%\esp32'; idf.py -B build/%ESP32_PROFILE% -p %PORT% flash; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE } } catch { Write-Host ('[flash] ERROR: ' + $_.Exception.Message); exit 6 }"
+powershell -NoProfile -ExecutionPolicy Bypass -Command "$ErrorActionPreference='Stop'; try { & { . '%ESPIDF_PROFILE%' }; Set-Location '%ROOT%\esp32'; idf.py -B build/%ESP32_PROFILE% -D SDKCONFIG=%PROFILE_SDKCONFIG% -p %PORT% flash; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE } } catch { Write-Host ('[flash] ERROR: ' + $_.Exception.Message); exit 6 }"
 goto :flash_check
 
 :flash_noreset

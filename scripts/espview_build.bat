@@ -12,6 +12,9 @@ REM   -esp32    : ESP32 firmware build (idf.py -B build\<profile> build)
 REM   -b <name> : ESP32 build sub-directory under esp32\build\ (default uart_hw)
 REM               uart_hw = UART verification firmware (ESPVIEW_DEFAULT_MODE=2,
 REM               OLED, LVGL, TEST hooks). Future profiles get their own dir.
+REM               Each profile keeps its own sdkconfig inside its build dir
+REM               (build\<profile>\sdkconfig), seeded once from esp32\sdkconfig;
+REM               the shared esp32\sdkconfig is never overwritten by builds.
 REM   --check   : preflight only (PATH / MSYS2 / ESP-IDF probe); no build.
 REM
 REM   Exit codes:
@@ -109,7 +112,20 @@ if errorlevel 1 ( set "ERR=1" & goto :fail )
 if not defined DO_ESP32 goto :done
 echo.
 echo [3/3] ESP32 firmware build (profile=%ESP32_PROFILE%, dir=esp32\build\%ESP32_PROFILE%)
-powershell -NoProfile -ExecutionPolicy Bypass -Command "$ErrorActionPreference='Stop'; try { & { . '%ESPIDF_PROFILE%' }; Set-Location '%ROOT%\esp32'; idf.py -B build/%ESP32_PROFILE% build; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE } } catch { Write-Host ('[esp32] ERROR: ' + $_.Exception.Message); exit 1 }"
+REM M7-F F4: per-profile sdkconfig isolation. IDF's default SDKCONFIG is the
+REM shared esp32\sdkconfig; building several profiles through it makes every
+REM profile drift to the last-built config. Each profile gets its own sdkconfig
+REM inside its build dir (bootstrap-copied from esp32\sdkconfig on first use so
+REM machine-specific settings + Wi-Fi credentials are preserved, and it stays
+REM inside the gitignored build tree).
+set "PROFILE_SDKCONFIG=%ROOT%\esp32\build\%ESP32_PROFILE%\sdkconfig"
+if not exist "%PROFILE_SDKCONFIG%" (
+    if exist "%ROOT%\esp32\sdkconfig" (
+        echo [esp32] bootstrap profile sdkconfig: esp32\sdkconfig -^> build\%ESP32_PROFILE%\sdkconfig
+        copy /y "%ROOT%\esp32\sdkconfig" "%PROFILE_SDKCONFIG%" >nul
+    )
+)
+powershell -NoProfile -ExecutionPolicy Bypass -Command "$ErrorActionPreference='Stop'; try { & { . '%ESPIDF_PROFILE%' }; Set-Location '%ROOT%\esp32'; idf.py -B build/%ESP32_PROFILE% -D SDKCONFIG=%PROFILE_SDKCONFIG% build; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE } } catch { Write-Host ('[esp32] ERROR: ' + $_.Exception.Message); exit 1 }"
 if errorlevel 1 ( set "ERR=1" & goto :fail )
 
 :done
@@ -128,6 +144,7 @@ echo [build] ERROR: expected profile at %ESPIDF_PROFILE% (ESP-IDF not found; run
 set "ERR=3" & goto :fail
 
 :usage
+if not defined ERR set "ERR=2"
 echo.
 echo Usage: scripts\espview_build.bat [-host] [-qt] [-esp32] [-b ^<profile^>] [--check]
 echo   default (no args): -host -qt -esp32

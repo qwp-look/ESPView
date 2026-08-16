@@ -7,6 +7,7 @@ REM   with the first failing step's exit code.
 REM
 REM   Build args: -host -qt -esp32 -b <profile> --check
 REM   Flash args: -p <port> --no-reset --dry-run
+REM   --check also implies flash --dry-run: preflight only, never flashes.
 REM   Defaults : -host -qt -esp32 -p COM4 -b uart_hw
 REM
 REM   Exit codes: see espview_build.bat (0/1/2/3) and
@@ -26,7 +27,7 @@ if /i "%~1"=="-qt"     ( set "BUILD_ARGS=%BUILD_ARGS% -qt"    & set "TARGET_GIVE
 if /i "%~1"=="-esp32"  ( set "BUILD_ARGS=%BUILD_ARGS% -esp32" & set "TARGET_GIVEN=1" & shift & goto :parse )
 if /i "%~1"=="-b"      ( if "%~2"=="" goto :usage
                           set "BUILD_ARGS=%BUILD_ARGS% -b %~2" & set "FLASH_ARGS=%FLASH_ARGS% -b %~2" & shift & shift & goto :parse )
-if /i "%~1"=="--check" ( set "BUILD_ARGS=%BUILD_ARGS% --check" & shift & goto :parse )
+if /i "%~1"=="--check" ( set "BUILD_ARGS=%BUILD_ARGS% --check" & set "FLASH_ARGS=%FLASH_ARGS% --dry-run" & shift & goto :parse )
 if /i "%~1"=="-p"      ( if "%~2"=="" goto :usage
                           set "FLASH_ARGS=%FLASH_ARGS% -p %~2" & shift & shift & goto :parse )
 if /i "%~1"=="--no-reset" ( set "FLASH_ARGS=%FLASH_ARGS% --no-reset" & shift & goto :parse )
@@ -65,6 +66,7 @@ echo        [-b ^<profile^>] [-p ^<port^>] [--no-reset] [--dry-run] [--check]
 echo   Build args : -host -qt -esp32 -b ^<profile^> --check
 echo   Flash args : -p ^<port^> --no-reset --dry-run
 echo   Defaults   : -host -qt -esp32 -p COM4 -b uart_hw
+echo   --check    preflight only; implies flash --dry-run (never flashes)
 echo   -h/--help   show this help
 exit /b %ERR%
 

@@ -12,8 +12,12 @@ zero password involvement):
 
 Per-mode flow (optional steps):
   1. build the profile (equivalent idf.py flow: PowerShell loads the ESP-IDF
-     profile, then idf.py -B build\\<profile> -D SDKCONFIG_DEFAULTS="..." build;
-     gated behind --build, skipped by default to avoid parallel-agent clashes);
+     profile, then idf.py -B build\\<profile> -D SDKCONFIG_DEFAULTS="..."
+     -D SDKCONFIG=build\\<profile>\\sdkconfig build; the profile sdkconfig is
+     regenerated from defaults + the mode override each run so the intended
+     OLED config actually applies (M7-F F4 sdkconfig isolation; the shared
+     esp32\\sdkconfig is never touched); gated behind --build, skipped by
+     default to avoid parallel-agent clashes);
   2. flash (scripts\\espview_flash.bat -b <profile> -p <port> --no-reset;
      gated behind --flash, skipped by default);
   3. open COM4 @ 115200 -> DTR/RTS reset -> wait for ESP32 HELLO ->
@@ -661,6 +665,17 @@ class Harness:
             print("[fail] ESP-IDF profile not found: %s" % idf_profile,
                   flush=True)
             return False
+        profile_sdkconfig = os.path.join(esp32_dir, "build", spec["profile"],
+                                         "sdkconfig")
+        # M7-F F4: regenerate the profile sdkconfig from defaults + this mode's
+        # whitelisted override (never from the shared esp32/sdkconfig). Deleting
+        # the stale profile sdkconfig is required: IDF keeps existing sdkconfig
+        # values over SDKCONFIG_DEFAULTS changes, so an inherited OLED_ENABLE=y
+        # would silently defeat a mode C (OLED=n) run.
+        try:
+            os.remove(profile_sdkconfig)
+        except OSError:
+            pass
         defaults_join = "%s;%s" % (base_defaults, overrides)
         ps = "\n".join([
             "$ErrorActionPreference = 'Stop'",
@@ -670,8 +685,9 @@ class Harness:
             "{ Write-Host '[build] idf.py not available'; exit 3 }",
             "  Set-Location %s" % ps_quote(esp32_dir),
             "  $env:ESPVIEW_SDKCONFIG = %s" % ps_quote(defaults_join),
-            "  idf.py -B build/%s -D SDKCONFIG_DEFAULTS=\"$env:ESPVIEW_SDKCONFIG\" build"
-            % spec["profile"],
+            "  idf.py -B build/%s -D SDKCONFIG_DEFAULTS=\"$env:ESPVIEW_SDKCONFIG\""
+            " -D SDKCONFIG=%s build"
+            % (spec["profile"], ps_quote(profile_sdkconfig)),
             "  if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }",
             "} catch { Write-Host ('[build] ERROR: ' + $_.Exception.Message); "
             "exit 1 }",
@@ -679,8 +695,9 @@ class Harness:
         self.event("build", mode=mode, profile=spec["profile"],
                    config=",".join("%s=%s" % (k, v) for k, v in
                                    sorted(spec["config"].items())))
-        print("  running: idf.py -B build/%s -D SDKCONFIG_DEFAULTS=... build"
-              % spec["profile"], flush=True)
+        print("  running: idf.py -B build/%s -D SDKCONFIG_DEFAULTS=... "
+              "-D SDKCONFIG=build/%s/sdkconfig build"
+              % (spec["profile"], spec["profile"]), flush=True)
         proc = subprocess.run(["powershell", "-NoProfile", "-ExecutionPolicy",
                                "Bypass", "-Command", ps], cwd=self.repo_root)
         try:
@@ -950,8 +967,9 @@ def dry_run(args):
                         sorted(spec["config"].items())), flush=True)
         if args.build:
             print("  build : idf.py -B build/%s "
-                  "-D SDKCONFIG_DEFAULTS=<repo sdkconfig.defaults>;<temp override> build"
-                  % spec["profile"], flush=True)
+                  "-D SDKCONFIG_DEFAULTS=<repo sdkconfig.defaults>;<temp override> "
+                  "-D SDKCONFIG=build/%s/sdkconfig build"
+                  % (spec["profile"], spec["profile"]), flush=True)
         if args.flash:
             print("  flash : espview_flash.bat -p %s -b %s --no-reset" %
                   (args.port, spec["profile"]), flush=True)
