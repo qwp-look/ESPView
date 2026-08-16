@@ -44,12 +44,12 @@
 | `fcdaa50` | M7-E | A/B/C 硬件实验 harness（espview_e_ab_harness.py） |
 | `04102b4` | M7-E | DESIGN AJ：power-aware provisioning 设计 |
 | `cb8b5b9` | M7-E | 修复 esptool 直调参数顺序（--no-reset，esptool 5.3.1） |
-| `56f9dff` | M7-E | 记录 A/B/C 硬件结果（DESIGN AJ.7b） |
+| `56f9dff` | M7-E | 记录 A/B/C 硬件结果（DESIGN AJ.8） |
 | `bd892d1` | M7-F F1 | 硬件证据探针：win32_com_probe + boot 插桩 |
 | `71217c9` | M7-F F2 | Provisioning 事务硬化（timeout / retry / disconnect 收敛） |
 | `456763a` | M7-F F3 | Wizard 硬化 + preview/OLED 修复（15 文件） |
 | `5d758a2` | M7-F F4 | Build/Flash UX + per-profile sdkconfig 隔离 |
-| `c48efcd` | M7-F F5 | 硬件证据矩阵 + AJ.7b / AI.3 / AG.2 措辞修正（当前 HEAD） |
+| `c48efcd` | M7-F F5 | 硬件证据矩阵 + AJ.8 / AI.3 / AG.2 措辞修正（当前 HEAD） |
 
 ## M7-G（本轮，未提交）
 

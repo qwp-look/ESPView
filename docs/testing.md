@@ -147,7 +147,7 @@ Profile 语义：`esp32\build\<profile>`（默认 `uart_hw`）；每个 profile 
 
 ### 5.1 UART baseline（COM4/COM3 @ 115200 8N1）
 
-端口说明：板载 CH340 在早期里程碑（M1–M5）枚举为 **COM3**，M6-A 起在开发机上为 **COM4**（DESIGN §T.10/§U.1）；M7-E/F 使用外置 USB-SERIAL CH340 模块同样为 **COM4**（§AJ.7b）。工具均用 `--port` 指定实际枚举端口（默认值随工具而异：`pc_com3_*.py` 默认 COM3，`pc_oled_monitor.py` / `wifi_provision_probe` / `win32_com_probe` 默认 COM4）。
+端口说明：板载 CH340 在早期里程碑（M1–M5）枚举为 **COM3**，M6-A 起在开发机上为 **COM4**（DESIGN §T.10/§U.1）；M7-E/F 使用外置 USB-SERIAL CH340 模块同样为 **COM4**（§AJ.8）。工具均用 `--port` 指定实际枚举端口（默认值随工具而异：`pc_com3_*.py` 默认 COM3，`pc_oled_monitor.py` / `wifi_provision_probe` / `win32_com_probe` 默认 COM4）。
 
 真实命令（需先烧录对应固件；`--no-reset` 表示不触发 DTR/RTS 复位）：
 
@@ -236,8 +236,8 @@ Host 侧 OLED 测试（无硬件）：OledFb、命令/分段生成、恢复策�
 - **UART FULL ≈ 13.5 s**：320×240 RGB565 整帧 @115200 实测 ≈13.5 s（有效 payload ≈11.1 KB/s），高频整帧推送不可能；硬件测试需预留时间预算，FULL 期间依赖 PING 维持会话（§Y.7）。
 - **AP outage 未完全硬件验证**：AP 断电强制验收 deferred（§X.15）。已覆盖路径：TCP 断开 → 指数退避重连 → PC server 重启 → 重新 accept → HELLO → FULL resync；Wi-Fi STA DISCONNECTED → 自动重连路径未在 router 可控断电下实测。
 - **外置 CH340 / RF boot instability**：Wi-Fi RF 上电与 CH340 USB 掉线时间强相关（**高可信假设，非已证实**；物理机制——电源余量 vs EMI vs 驱动——未经电压/电流实测，§AK.4）。影响所有 Wi-Fi/TCP 硬件测试的 boot 阶段。软件降流（PASSIVE scan、PM 80MHz、TX 功率 2dBm）降低挂死概率但无法可靠消除掉线；推荐带供电 USB HUB / 外接 5V / 优质线材。
-- **部分硬件测试依赖稳定供电**：`wifi_provision_probe` 在当前板卡预期 FAIL；`espview_e_ab_harness.py` 在当下硬件止步于 boot+握手（未进入扫描期，§AJ.7b）。供电改善后可直接复用（`--modes A,B,C`，无需重新构建 B/C）。
-- **配置漂移纪律（F4 已修复）**：per-profile sdkconfig 隔离；做硬件对比实验必须核验 `build\<profile>\config\sdkconfig.h`，防止共享 sdkconfig 被后续构建覆盖（§AJ.7b 修正记录）。
+- **部分硬件测试依赖稳定供电**：`wifi_provision_probe` 在当前板卡预期 FAIL；`espview_e_ab_harness.py` 在当下硬件止步于 boot+握手（未进入扫描期，§AJ.8）。供电改善后可直接复用（`--modes A,B,C`，无需重新构建 B/C）。
+- **配置漂移纪律（F4 已修复）**：per-profile sdkconfig 隔离；做硬件对比实验必须核验 `build\<profile>\config\sdkconfig.h`，防止共享 sdkconfig 被后续构建覆盖（§AJ.8 修正记录）。
 - **结果分级纪律**：Observed / Hypothesis 不得表述为 Confirmed（§AK.4）；本文档只引用已记录的实测与 DESIGN.md 证据。
 
 ## 8. 凭据与安全

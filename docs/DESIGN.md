@@ -3,7 +3,7 @@
 > ESP32 Virtual Display & Input Bridge
 > 目标：让 PC 成为真实 ESP32 的“远程显示屏 + 远程输入设备”，ESP32 始终是显示状态的唯一权威。
 
-> **修订记录（Pre-M0 Review, 2026-08-12）**：ESPView 不持有长期完整 framebuffer（所有权归 Application/LVGL）；RemoteDisplay 采用 writeRect()/dirty-rect 汇入模型；协议改为 Packet/Message/Frame 三层并新增 FRAME_BEGIN、删除独立 FRAME_FULL；MAX_PACKET_PAYLOAD=4096；CRC32 全参数钉死；UART 重同步状态机与重连整帧重同步；ACK 只服务控制消息；TX 背压整帧丢弃；ITransport 增加状态回调；v0.1 只实现编译期 DisplayMode。详见 E/F/H/J 节。
+> **修订记录（Pre-M0 Review, 2026-08-12）**：ESPView 不持有长期完整 framebuffer（所有权归 Application/LVGL）；RemoteDisplay 采用 writeRect()/dirty-rect 汇入模型；协议改为 Packet/Message/Frame 三层并新增 FRAME_BEGIN、删除独立整帧 FULL 消息类型；MAX_PACKET_PAYLOAD=4096；CRC32 全参数钉死；UART 重同步状态机与重连整帧重同步；ACK 只服务控制消息；TX 背压整帧丢弃；ITransport 增加状态回调；v0.1 只实现编译期 DisplayMode。详见 E/F/H/J 节。
 > **修订记录（M1-3C, 2026-08-13）**：新增 Streaming Message API（`IMessagePayloadSource` + `MessageEncoder::encodeStreaming`）——payload 不要求驻留内存，逐 4096B Packet 编码，与完整 payload 编码逐位等价；正式硬件 baseline 定为 115200（921600 = experimental / unreliable for large burst）；经典 ESP32 可流式发送 153608B 级 FRAME_RECT，避免 153KB 连续堆分配。wire format 不变。
 > **修订记录（M1-3D, 2026-08-13）**：文档同步 + 测试工具 CI 收尾 + M2 前架构冻结检查。正式写入 115200 硬件 baseline 与 921600 experimental 的准确表述；带宽表改用真实测量（153600B 整帧 ≈ 13.5 s，有效 payload ≈ 11.1 KB/s）；E 节新增 Streaming Message API 正式设计；里程碑更新至 M1-3C 完成；P 节移除已过时建议；新增 host-only 验证入口 `scripts/verify_host.bat`（含 `com3_frame_test --selftest-queue`，无需 COM3/ESP32）。协议 wire format 与 M0–M1-3C 全部不变。
 > **修订记录（M2, 2026-08-13）**：PC Qt 6 Virtual Display 完成。`pc/` 新增 Qt 6.11.1 (MSYS2 MinGW64) 目标 `espview_virtual_display`：SerialWorker（独立线程）持有 HostUartTransport + ProtocolEndpoint（StreamDecoder + FrameAssembler 在内），以 DisplayFrame（frameId/frameType/width/height/pixelFormat/rectCount/byteCount/rects）经 Qt::QueuedConnection 投递 GUI；VirtualScreenWidget 仅消费 DisplayFrame（RGB565 LE → QImage::Format_RGB888 显式转换；FULL 重建 QImage，PARTIAL 只写目标 RECT，letterbox 等比缩放，断线清空/重连等新 FULL）。被动 HELLO + 7s 主动重试 + 断线 1.5s 自动重连（复位 ESP32 重同步）。真实硬件验收：COM3 @ 115200，HELLO / FULL small / FULL large(153600B) / PARTIAL / disconnect / reconnect / FULL resync 全部通过，PNG 像素逐点校验与 TestPattern 公式一致。新增 `scripts/verify_qt.bat`（Qt 工程 host build）与 `scripts/verify_png_pixels.ps1`（像素校验）。协议 wire format 与 M0–M1-3D 全部不变。
@@ -39,6 +39,8 @@
 > 堆趋势 5% 泄漏判定）。实测：30 分钟 UART 长跑 heap first=160096/last=168568（+8472）、
 > 0 CRC；TCP reconnect stress 10/10 OK（~2.0s/轮）；host 218,625 checks / 0 failures；
 > 生产固件 1,092,448 B（app 余量 48%）。wire format 不变。详见 Z 节。
+> **修订记录（M7-F, 2026-08-16）**：硬件路径判别 + Wi-Fi Provisioning 生产化。F1 win32_com_probe + boot 插桩判别实验（uart_hw 45s 无掉线 vs TCP/RF 固件 boot 期 CH340 掉线）→ boot 期掉线触发事件 = Wi-Fi RF 上电（高可信假设）；F2 事务硬化 / F3 wizard 硬化 / F4 per-profile sdkconfig 隔离；结论强度分级（Confirmed/High confidence/Hypothesis/Unknown），AI.3 / AG.2 措辞修订（含 AJ.8 实测结果修正声明）。wire format 不变。详见 AK 章。
+> **修订记录（M7-G, 2026-08-16）**：发布前最终化套件——G1 固件 provisioning/TCP handoff 硬化、G2 Wi-Fi 向导最终化（B1–B6 + TCP handoff 观察器 + 错误码 20–23）、G3 Display UI 最终化、G4 README 重写、G5 中文用户文档集、G6 工具链/profile 系统/check_docs + G1 硬件 harness、G8 开发者文档、G9 测试文档；G7 i18n / G10 检查器 / G11 验收 待完成。wire format 零改动。详见 AL 章。
 
 ---
 
@@ -742,7 +744,7 @@ ESPView/
 - `StatusModel`：QAbstractListModel 或简单 struct，展示 COM 口、波特率、分辨率、像素格式、FPS、RX/TX 字节、延迟。
 - CMake 需 `find_package(Qt6 COMPONENTS Widgets SerialPort)`；本机用 MSYS2 MinGW Qt 6.11.1：`-DCMAKE_PREFIX_PATH=C:/msys64/mingw64`，运行时把 `C:\msys64\mingw64\bin` 加入 PATH。
 
-## M. MVP 开发阶段划分（当前进度，M6-B 更新）
+## M. MVP 开发阶段划分（当前进度，M7-G 更新）
 
 | 阶段 | 内容 | 状态 |
 |------|------|------|
@@ -764,6 +766,19 @@ ESPView/
 | M6-C | Runtime Transport Selection + Transport-aware TX Pacing（TransportManager + capabilities 模型；UART 保持 115200 pacing、TCP 取消 UART 固定节流；有界 TX 队列 + 整帧丢弃 + 控制公平；safe switch + 会话重置 + FULL resync；host transport tests；真实硬件双向运行时切换与断线重连验收；wire format 未修改） | ✅ 完成（2026-08-14 真实硬件 COM4：UART 13.2s/FULL 无回归，TCP 235–254ms/FULL、qp=2、0 drop；TCP↔UART 运行时切换零协议错误；断线重连 FULL resync；host 208910 checks / 0 failures；详见 V 章） |
 | M7-A | 独立 OLED 状态显示（128×64 I2C SSD1306/SH1106，SDA=GPIO21 SCL=GPIO22；状态页 = transport/session/IP/RSSI/FRM/ERR/HEAP/UP；1KB 页式 fb + ≤32B 分段上传；有界错误恢复；wire format 未修改） | ✅ 完成（2026-08-15 真实硬件：probe 0x3C/SSD1306、15min 298 行 err=0 ok=1、0 CRC/bad_magic；host 210,504 checks / 0 failures；详见 Y 节） |
 | M7-B | OLED 生产语义收尾（M7-A 审计 Mandatory 修复：OLED/I2C 生命周期、Transport 快照、OledStatus 可观测性；statsLoop `mem` 堆诊断行；pc_oled_monitor.py 重写；wire format 未修改） | ✅ 完成（2026-08-15 真实硬件：30 分钟 UART 长跑 heap +8472、0 CRC；TCP reconnect stress 10/10 OK；host 218,625 checks / 0 failures；详见 Z 节） |
+| M7-C1 | DisplayCapabilities / IDisplaySink / DisplayRouter 抽象 + additive kSplit（SET_MODE 0..3 白名单、HELLO mode_mask=0b1111） | ✅ 完成（2026-08-15；wire additive 仅 kSplit=3；详见 AA 章） |
+| M7-C2 | 物理显示后端：OLED 提升为 PhysicalDisplaySink + PhysicalRenderer（RGB565→Mono1）+ LVGL flush_cb→Router 映射 | ✅ 完成（2026-08-15 真实硬件 COM4 @ 115200：F11 模式循环 2→3→0→1→2 全对、0 CRC/0 seq；host 224,136 checks / 0 failures；详见 AA 章） |
+| M7-C3 | Qt 多显示 UI / Split Drawer / 双语界面（capability-driven UI、Safe Switch 复用 M6-D、i18n 744 checks） | ✅ 完成（2026-08-15 真实硬件：FULL/OLED 遥测/模式循环 PASS；host 224,501 checks / 0 failures；详见 AB 章） |
+| M7-C4 | Capability / Split Diagnostics 产品化（PhysicalCapabilitySnapshot 能力/健康分离、会话 epoch 帧门控、DiagnosticsRing 加锁、i18n 完整化） | ✅ 完成（2026-08-15 真实硬件：四模式矩阵 + 660.2s 长稳 0 crash/0 CRC；host 224,777 checks / 0 failures；详见 AC 章） |
+| M7-D1 | CAPABILITIES（TYPE 0x02，32B 定长 LE，每会话一次，两端实现） | ✅ 完成（2026-08-15；host 224,899 checks / 0 failures；wire additive；详见 AD 章） |
+| M7-D2 | PHYSICAL_PREVIEW（TYPE 0x13，1032B，OLED 预览 2Hz 上行） | ✅ 完成（2026-08-15；host 383,672 checks / 0 failures；wire additive；详见 AE 章） |
+| M7-D3 | Wi-Fi Provisioning 协议族（WIFI_SCAN_REQ/RESULT/CONFIG/STATUS + 错误码 5..12；凭据仅 UART 下发） | ✅ 完成（2026-08-15 冻结；host 384,104+ checks / 0 failures；wire additive；详见 AF 章） |
+| M7-D4 | Wi-Fi 配网向导（WizardStep 0..13 + 探针降级 + 凭据生命周期 + i18n 51 词条） | ✅ 完成（2026-08-15 冻结；详见 AG 章） |
+| M7-D5 | Build/Flash UX（espview_build/flash/build_flash.bat + --check/--dry-run） | ✅ 完成（2026-08-15；preflight/dry-run PASS；详见 AH 章） |
+| M7-D6 | UART 真实验收 + 电源修正（startScan 修正、PASSIVE 扫描、PM 80MHz、TX 功率 2dBm） | ✅ 完成（2026-08-16；host 384,438 checks / 0 failures；详见 AI 章） |
+| M7-E | Power-Aware Wi-Fi Provisioning（OLED suspend/resume + ScanTransaction + preview 挂起 + A/B/C 实验 harness；wire format 未修改） | ✅ 完成（2026-08-16；host 384,438+192 checks / 0 failures；详见 AJ 章） |
+| M7-F | Hardware Path Diagnosis + Wi-Fi Provisioning 生产化（F1 判别探针 / F2 事务硬化 / F3 wizard 硬化 / F4 per-profile sdkconfig 隔离 / F5 证据矩阵；wire format 未修改） | ✅ 完成（2026-08-16；判别实验 uart_hw 45s 无掉线 vs RF 固件 boot 期掉线；详见 AK 章） |
+| M7-G | 发布前最终化套件（G1 provisioning/TCP handoff 硬化、G2 向导最终化、G3 Display UI 最终化、G4 README、G5 用户文档、G6 工具链/check_docs、G8/G9 文档；G7/G10/G11 待完成；wire format 零改动） | ✅ 进行中（G1–G6/G8/G9 已完成；详见 AL 章） |
 | M6(未来) | 真实 LCD (DEVICE/MIRROR)、触摸（INPUT_TOUCH）、TinyUSB、运行时 DisplayMode | 未开始 |
 
 ### M2 前置架构冻结（M1-3D 检查）
@@ -1052,8 +1067,8 @@ InputManager / RemoteDisplay`；TCP 不新增任何 Message / Packet / CRC 变�
 
 硬件与链路：
 
-- ESP32-D0WDQ6（4MB flash；M6-A 时 app 分区 1MB，M6-B 扩为 2MB，LVGL 应用固件）；板载 USB-SERIAL CH340 接 **COM4**（console 115200 8N1，DTR/RTS 关闭只读）；PC 有线网 192.168.3.15。
-- Wi-Fi：本地开发网络（凭据仅存于未跟踪本地 sdkconfig，T.7）。STA 扫描实测 17 个 AP（含 5GHz）；目标网络存在（2.4GHz ch6，RSSI ≈ -29 dBm，WPA2-PSK），连接成功并经 DHCP 取得 GOT_IP 192.168.3.128。
+- ESP32-D0WDQ6（4MB flash；M6-A 时 app 分区 1MB，M6-B 扩为 2MB，LVGL 应用固件）；板载 USB-SERIAL CH340 接 **COM4**（console 115200 8N1，DTR/RTS 关闭只读）；PC 有线网 `<pc-lan-ip>`（示例占位，非真实地址）。
+- Wi-Fi：本地开发网络（凭据仅存于未跟踪本地 sdkconfig，T.7）。STA 扫描实测 17 个 AP（含 5GHz）；目标网络存在（2.4GHz ch6，RSSI ≈ -29 dBm，WPA2-PSK），连接成功并经 DHCP 取得 GOT_IP `<device-ip>`（示例占位，非真实地址）。
 - TCP：ESP32 STA client → PC TCP server `0.0.0.0:8765`；Windows 防火墙入站规则仅放行 `build\verify_qt\espview_virtual_display.exe`（Private/Public），GUI 必须从该路径启动（否则 0xC0000139 / 连接被拦）。
 
 验收结果：
@@ -2503,7 +2518,7 @@ M7-D4 冻结 PC 侧 Wi-Fi 配网向导：UI 状态机 `WifiWizardState`（纯 C+
 | `kConfigApplying=2` | kApplying(7) 停留至 WIFI_CONFIG ACK(ok) → kConnecting(8) |
 | `kWifiConnecting=3` / `kWifiConnected=4` | 观察（不单独推进） |
 | `kGotIp=5` | → kGotIp(9) |
-| `kTcpConnecting=6` | 观察（不单独推进；固件 TCP client 相位为 D6 遗留，见 AJ.10） |
+| `kTcpConnecting=6` | 观察（不单独推进；固件 TCP client 相位为 D6 遗留，见 AJ.11） |
 | `kTcpConnected=7` | → kTcpConnected(10) |
 | `kError=8` | → kError(13)（经错误码路由 retryStep） |
 
@@ -2807,7 +2822,7 @@ D6 不改 wire format；对 AF.2/AF.3/AF.4 冻结的协议内容零改动。
 - 判定纪律：单次失败不定义为电源不足；`--strict` 把 ReadFile 错误/意外
   重启/CRC 错误升级为 FAIL；退出码 0/1/2。结果默认仅 stdout，密码零参与。
 
-### AJ.7b A/B/C 实测结果（2026-08-16，外置 USB-SERIAL CH340 COM4 @ 115200）
+### AJ.8 A/B/C 实测结果（2026-08-16，外置 USB-SERIAL CH340 COM4 @ 115200）
 
 > **M7-F 结论强度修正（F1/F4，2026-08-16）**：A/B/C 实验存在配置漂移——
 > `esp32/build/mode_c/config/sdkconfig.h` 实测为 `OLED_ENABLE=y +
@@ -2850,7 +2865,7 @@ D6 不改 wire format；对 AF.2/AF.3/AF.4 冻结的协议内容零改动。
   可直接复用本 harness 完成扫描期 A/B/C 对比（`--modes A,B,C`，
   B/C 无需重新构建，mode_a 需先 `--build`）。
 
-### AJ.8 Long-run 行为
+### AJ.9 Long-run 行为
 
 - 事务是每会话一次性结构：扫描完成/失败/超时/断线后回到 Idle/Error/
   Disconnected，可重复扫描；不积累状态。
@@ -2859,7 +2874,7 @@ D6 不改 wire format；对 AF.2/AF.3/AF.4 冻结的协议内容零改动。
 - 会话级重连（AE.3）与挂起正交：断线期间若扫描在途，事务经 onDisconnect
   收敛；新会话握手重置 previewSlot/frameId，首帧无条件接受（既有语义）。
 
-### AJ.9 Security
+### AJ.10 Security
 
 - 无 wire format 改动：Packet Header / CRC / Message layout / Frame 语义
   全部不变；不新增任何协议字段。
@@ -2868,7 +2883,7 @@ D6 不改 wire format；对 AF.2/AF.3/AF.4 冻结的协议内容零改动。
 - 向导只显示「显示临时暂停/已恢复」文案，杜绝「电源不足已证实」暗示
   （i18n 测试断言新文案不含 power/insufficient/电源/电量/不足）。
 
-### AJ.10 Boundary
+### AJ.11 Boundary
 
 - 本机制不等价于证明 USB 供电不足；不提供 OTA/LCD/Touch/TinyUSB/UDP/
   mDNS/TLS/WebSocket/Cloud/multi-device/AP-outage 任何新增能力。
@@ -2878,7 +2893,7 @@ D6 不改 wire format；对 AF.2/AF.3/AF.4 冻结的协议内容零改动。
 - 生产默认 = mode B（`ESPVIEW_SCAN_SUSPEND_OLED=y`）；mode A/C 仅供 A/B
   实验，不作为生产默认。
 
-### AJ.11 已实现（M7-E，2026-08-16）
+### AJ.12 已实现（M7-E，2026-08-16）
 
 - `esp32/components/oled`：`kSuspendedForWifiScan` + 挂起/恢复 API + 段级
   中止谓词 + 挂起中止不记账。
@@ -2925,8 +2940,8 @@ M7-F 两条并行主线：
 | Test | Profile | OLED | Wi-Fi | Scan | COM | Result | Evidence |
 |---|---|---|---|---|---|---|---|
 | UART baseline（M6-C） | uart | y | off | n/a | 板载 CH340 COM4 | 稳定无掉线 | DESIGN V.7 |
-| M7-E A/B/C boot（mode_b） | mode_b | y（实配） | RF 上电 | 不可达 | 外置 CH340 COM4 | 掉线 ~0.5–1.5s | AJ.7b |
-| M7-E A/B/C boot（mode_c） | mode_c | y（漂移；本应 n） | RF 上电 | 不可达 | 外置 CH340 COM4 | 掉线同上 | AJ.7b + F1 sdkconfig.h 取证 |
+| M7-E A/B/C boot（mode_b） | mode_b | y（实配） | RF 上电 | 不可达 | 外置 CH340 COM4 | 掉线 ~0.5–1.5s | AJ.8 |
+| M7-E A/B/C boot（mode_c） | mode_c | y（漂移；本应 n） | RF 上电 | 不可达 | 外置 CH340 COM4 | 掉线同上 | AJ.8 + F1 sdkconfig.h 取证 |
 | M7-F F1 uart_hw（无 RF） | uart_hw | y | off | n/a | 外置 CH340 COM4 | 45s 无掉线；HELLO t=663ms | win32_com_probe --pulse-reset |
 | M7-F F1 TCP/RF（mode_b/c） | mode_b/c | y | RF 上电 | n/a | 外置 CH340 COM4 | boot ~747ms 掉线；重枚举后 27s 零响应 | win32_com_probe |
 | M7-F F2 provisioning 事务硬化 | uart_hw | y | — | host | n/a（host） | 事务状态机测试通过 | F2 |
@@ -2980,4 +2995,133 @@ M7-F 两条并行主线：
   收敛）。
 - F3 `456763a`：Qt wizard 硬化 + preview/OLED 修复（15 文件）。
 - F4 `5d758a2`：build/flash UX + per-profile sdkconfig 隔离（本文件
-  AI.3 / AJ.7b / AG.2 / AK 同步修订）。
+  AI.3 / AJ.8 / AG.2 / AK 同步修订）。
+
+## AL. M7-G 最终化（2026-08-16；wire format 零改动）
+
+### AL.1 定位
+
+M7-G 是发布前最终化套件：在 M7-D/E/F 已冻结的协议与功能之上，完成
+用户可见收尾（Wi-Fi 向导 / 显示 UI / 用户与开发者文档）与工具链固化
+（统一 build/flash/verify + profile 系统 + check_docs + G1 硬件
+harness）。本章为章节骨架：已完成的子项给出指向与提交；未完成的
+子项（G1 硬件实验证据、G7、G11）只留占位，不编造结果。
+
+**wire format 零改动声明**：Packet Header / CRC32 / Message layout /
+Frame 语义 / CAPABILITIES（0x02）/ PHYSICAL_PREVIEW（0x13）/
+Wi-Fi 四消息族（0x06..0x09）/ ErrorCode 0..12 / WifiStatusPhase 0..9
+全部冻结；M7-G 不新增、不改、不删除任何 wire 字段（详见 AL.14）。
+
+### AL.2 章节清单（G1..G11）
+
+| 子项 | 内容 | 状态 / 章节 |
+|---|---|---|
+| G1 | 固件 provisioning 硬化 + TCP handoff + scan transaction（`81a464d`） | ✅ 代码完成；硬件实验证据待补 → AL.3 |
+| G2 | Wi-Fi 向导最终化：B1–B6 修复 + TCP handoff 观察器 + 错误码 20–23（`3fdc8c6`） | ✅ 完成 → AL.4 |
+| G3 | Display UI 最终化：capability 接线 + 错误反馈 + router 状态（`3c150c3`） | ✅ 完成 → AL.5 |
+| G4 | README 重写：英文用户入口 + docs 索引 + known limitations（`0870e86`） | ✅ 完成 → AL.6 |
+| G5 | 中文用户文档集（12 篇）（`ba2c4fd`） | ✅ 完成 → AL.7 |
+| G6 | 工具链 / profile 系统 / check_docs + G1 硬件 harness（`76ac77a`） | ✅ 完成 → AL.8 |
+| G7 | i18n 收尾 | ⏳ 待完成 → AL.9（完成后补一行） |
+| G8 | 开发者 + 贡献者文档（`e27b16c`） | ✅ 完成 → AL.10 |
+| G9 | 测试文档 + examples quick start（`cc09553`） | ✅ 完成 → AL.11 |
+| G10 | check_docs 检查器（G10 设计审计任务） | ⏳ 进行中 → AL.12 |
+| G11 | 验收 | ⏳ 待完成 → AL.13 |
+
+### AL.3 G1 硬件判别实验证据（待实验后填充）
+
+> **待实验后填充**：本节由主代理在 G1 硬件实验（`scripts/espview_g1_harness.py`
+> A/B/C/D 四模式 = OLED×RF 矩阵，任务书 §6）完成后补写。只记录 observed
+> behavior，遵循 AK.4 结论强度分级（Confirmed / High confidence /
+> Hypothesis / Unknown），不得写成「已证实电源不足」。
+> 待填小节：实验条件 / 各模式结果 / 判别结论 / 与 AK 证据对照。
+
+### AL.4 G2 向导最终化（2026-08-16，`3fdc8c6`）
+
+- B1：扫描中返回 → 扫描事务取消收敛（不得停在 SCANNING）。
+- B2：异步 Apply 链真取消（`cancelApplying()`：重置 kInit + 安全擦除全部
+  输入含密码；对话框清 Worker 待发队列 + WIFI_CLEAR 撤销已下发配置）。
+- B3：凭据红线纵深防御（AF.4）：WIFI_CONFIG 只经 UART bootstrap 下发；
+  Worker 队列中未发送的密码副本安全擦除。
+- B4：bootstrap 步看门狗（Step 1 = 30s UART 会话、Step 2 = 15s
+  CAPABILITIES）超时收敛，不再永久等待。
+- B5：WIFI_STATUS errorCode 细分 → 向导错误码 20–23（kAuthFailed=20 /
+  kApNotFound=21 / kDhcpTimeout=22 / kServerUnreachable=23），不再塌缩成
+  kWifiConnectFailed。
+- B6：SCAN_RESULT 仅在「等待扫描结果」态消费；迟到/未请求/重复一律忽略。
+- B7：PC 侧 TCP handoff 观察器（TcpHandoffObserver）：监听配置端口 →
+  TCP HELLO 握手 → 首帧 FULL commit 驱动 Step 10 真实验收；终态
+  （Done/Error）幂等停止。
+- Worker 快照（status + lastCapabilities）供 bootstrap 步自动前进。
+
+### AL.5 G3 Display UI 最终化（2026-08-16，`3c150c3`）
+
+- capability 接线：physical preview Controller 行优先取 wire 能力事实
+  （CAPABILITIES physController），遥测推断仅作 fallback（同源）。
+- 错误反馈：model 错误必须可见（显式红色 Error 文案），不再只藏于 tooltip。
+- router 状态：新增 `UiRouterState::kUnavailable=4`（原 0..3 不变），
+  状态面板显示 Unavailable；传输断开清理 preview 位图 + capability 复位
+  （跨会话不残留）。
+
+### AL.6 G4 README（2026-08-16，`0870e86`）
+
+- `README.md` 重写（+435/−122）：用户向英文入口、docs 索引、
+  known limitations、凭据纪律。
+
+### AL.7 G5 用户文档（2026-08-16，`ba2c4fd`）
+
+- 12 篇中文文档：architecture-overview / changelog / display-modes /
+  faq / getting-started / hardware / input / oled / security /
+  troubleshooting / uart / wifi。troubleshooting / wifi 的凭据与 IP
+  清理由主代理完成（本审计不越界修改 docs 其他文件）。
+
+### AL.8 G6 工具链 / profile 系统 / check_docs / G1 harness（2026-08-16，`76ac77a`）
+
+- `espview_profiles.py`：canonical profile 白名单 + 6 属性标签表（单一真源）；
+  `FORBIDDEN_KEY_PARTS`（SSID/PASSWORD/PSK/TOKEN/SECRET）硬防护，profile
+  永不触碰凭据 Kconfig 键。
+- `espview_profile_sdkconfig.py`：per-profile sdkconfig 隔离应用。
+- `espview_build.bat` / `espview_flash.bat` / `espview_build_flash.bat` /
+  `espview_verify.bat`：统一 build/flash/verify 入口。
+- `check_docs.py` / `check_docs.bat`：静态文档检查器（G10 维护）。
+- `espview_g1_harness.py`：G1 A/B/C/D 四模式硬件 harness（任务书 §6）。
+
+### AL.9 G7 i18n（完成后补一行）
+
+> **待完成后补写一行摘要**（i18n 收尾完成后由主代理补充）。
+
+### AL.10 G8 开发者 + 贡献者文档（2026-08-16，`e27b16c`）
+
+- `docs/development.md`（构建/测试/工具链）+ `docs/contributing.md`
+  （贡献流程 / 纪律）。
+
+### AL.11 G9 测试文档 + examples（2026-08-16，`cc09553`）
+
+- `docs/testing.md` + `examples/quickstart.md` +
+  `examples/sdkconfig.wifi-tcp.defaults.example`（示例凭据骨架，无真实密码）。
+
+### AL.12 G10 check_docs 检查器（本设计审计任务）
+
+- 本任务 = M7-G10 DESIGN 审计：凭据清理（已删除的独立整帧 FULL 消息类型禁用词、真实 IP 占位化）、编号
+  一致性（AJ 小节编号连续化：实测结果小节改为 AJ.8 并顺延后续小节）、
+  M 里程碑表补齐（M7-C..G）、修订记录（M7-F / M7-G）、术语统一审计
+  （Wi-Fi 相位族与 AF.2 对照）、AL 章节骨架。wire format 冻结，
+  未改任何字段。
+- 自检结果见本任务最终汇报（check_docs 对 DESIGN.md 的禁用词 /
+  16KiB / frameSeq / 凭据检查项）。
+
+### AL.13 G11 验收（待完成）
+
+> **待完成**：验收清单占位 —— check_docs 全库归零（含 docs 其他文件）、
+> M 里程碑表 M7-G 全绿、G1 硬件实验证据补写、G7 i18n 一行摘要、
+> 真实硬件 UART → Wi-Fi → TCP handoff 全链路复测。
+
+### AL.14 wire format 零改动声明
+
+- M7-G 全程零 wire 改动：Packet Header（固定 20B）/ CRC32 / 消息表既有
+  TYPE / Frame 语义 / CAPABILITIES / PHYSICAL_PREVIEW / Wi-Fi 四消息族 /
+  ErrorCode 0..12 / WifiStatusPhase 0..9 全部冻结（E 节 / AF.2）。
+- 向导错误码 20..23 为 **PC 侧 UI 枚举**（`WizardErrorCode`），不是 wire
+  错误码，不下发、不编码进任何协议字段。
+- TCP handoff 观察器 / Worker 快照（status、lastCapabilities）均为 PC
+  进程内状态，零协议新增。
