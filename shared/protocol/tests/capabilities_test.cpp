@@ -14,6 +14,7 @@
 // 纯 C++17，零平台依赖。
 
 #include <cstdint>
+#include <memory>
 #include <vector>
 
 #include "message.h"
