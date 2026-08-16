@@ -8,6 +8,7 @@
 | `espview_build.bat` | 一次构建 host（复用 `verify_host.bat`）+ Qt（复用 `verify_qt.bat`）+ ESP32（`idf.py -B build\<profile> build`） |
 | `espview_flash.bat` | 经 ESP-IDF 环境调用 `idf.py flash` 烧录指定固件 |
 | `espview_build_flash.bat` | 构建 + 烧录组合，参数透传 |
+| `espview_e_ab_harness.py` | M7-E A/B/C 硬件实验（OLED active/suspended/disabled + Wi-Fi scan，可重复、可 diff） |
 
 ## 快速上手
 
@@ -132,3 +133,43 @@ scripts\espview_build_flash.bat -esp32 -p COM4 --no-reset
 **想验证烧录流程但不想真烧**
 
 - `scripts\espview_flash.bat --dry-run`：参数解析 + COM 口 + bin 存在性校验全过但不动硬件。
+
+## A/B/C 硬件实验（M7-E，espview_e_ab_harness.py）
+
+对照同一块板子上 Wi-Fi 扫描期间 OLED 的三种行为，跑相同的空口扫描并输出
+结构化文本（可重复、可 diff）：
+
+| mode | 固件配置 | OLED 预期 |
+| --- | --- | --- |
+| A | `CONFIG_ESPVIEW_SCAN_SUSPEND_OLED=n`（+ OLED enable） | active（扫描中持续刷新/发 preview） |
+| B | `CONFIG_ESPVIEW_SCAN_SUSPEND_OLED=y`（默认，+ OLED enable） | suspended（扫描中挂起，preview 停发） |
+| C | `CONFIG_ESPVIEW_OLED_ENABLE=n` | disabled（无 oled 诊断行） |
+
+每个 mode 流程：构建 profile（`--build`，等价 idf.py 流程，`SDKCONFIG_DEFAULTS`
+= 仓库 `sdkconfig.defaults` + `%TEMP%` 白名单 override，只含上述两个 Kconfig 键）
+→ 烧录（`--flash`，复用 `espview_flash.bat -b <profile> --no-reset`）→ 打开
+COM4 @ 115200 → DTR/RTS 复位 → HELLO 握手（PC HELLO 含 nameLen 字段）→
+`WIFI_SCAN_REQ`（ACK_REQ，maxEntries=32）→ 记录。**默认不构建/不烧录**（假设
+固件已就绪，避免并行代理冲突）；测试结果默认只打印 stdout，`--result-file`
+可追加写入仓库外临时文件。
+
+记录字段（`# key=value` 汇总 + `[evt]` 事件流）：
+- 时间：`started_iso`、事件行 `t=+<相对秒>`、`hello_ms`/`ack_ms`/`scan_duration_ms`/`scan_esp_phase1_ms`
+- 扫描：`scan_req_tx`/`ack_rx`/`scan_result_rx`、`scan_count`、`scan_total`、`scan_truncated`、`scan_seq`、`wifi_status_phases`
+- RSSI/channel：`rssi_min/max/avg`、`channels`（每条记录另含 ssid/bssid/rssi/ch/auth）
+- OLED：`oled_lines`、`oled_err_first/last/delta`、`oled_ok_last`、`oled_config`、`oled_state_observed`、`preview_before/during/after`
+- UART/会话：`uart_disconnects`、`readfile_errors`、`write_errors`、`reopens`、`reboots_expected/unexpected`（`rst:` 横幅）、`session_transitions`、`peer_timeouts`、ACK 字段、`crc_errors`/`bad_magic`/`protocol_errors`
+
+用法与退出码：
+
+```bat
+py -3.10 scripts\espview_e_ab_harness.py                    :: A+B+C，不构建不烧录（假设已烧好）
+py -3.10 scripts\espview_e_ab_harness.py --build --flash     :: 全流程：构建+烧录+实验
+py -3.10 scripts\espview_e_ab_harness.py --modes A,B --iterations 3
+py -3.10 scripts\espview_e_ab_harness.py --strict --result-file %TEMP%\abc.txt
+py -3.10 scripts\espview_e_ab_harness.py --dry-run --build --flash   :: 只打印计划
+```
+
+退出码：`0` 全部 PASS / `1` 任一 mode FAIL / `2` 用法、环境或构建/烧录失败。
+安全：脚本从不读取 `esp32/sdkconfig`，只发 `WIFI_SCAN_REQ`（不配置网络、密码零参与）；
+SSID 为非秘密 metadata（同既有探针）。依赖 `pyserial`（`py -3.10 -m pip install pyserial`）。
