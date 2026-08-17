@@ -418,21 +418,28 @@ public:
 | TYPE | 方向 | 消息 | 载荷简述 | ACK | MVP |
 |------|------|------|----------|-----|-----|
 | 0x01 | ESP→PC | HELLO | 版本/分辨率/像素格式/模式掩码/设备名 | 由对端 HELLO 隐式确认 | ✔ |
-| 0x02 | 双向 | CAPABILITIES | 能力协商扩展（可并入 HELLO） | 可选 | 可选 |
-| 0x03 | PC→ESP | SET_MODE | mode（0=WINDOW,1=DEVICE,2=MIRROR） | 必须 ACK_REQ | ✔ |
+| 0x02 | 双向 | CAPABILITIES | 能力协商扩展（M7-D1 实现；每会话一次，Wi-Fi Wizard 依赖） | 必须（M7-D1 起） | ✔ |
+| 0x03 | PC→ESP | SET_MODE | mode（0=WINDOW,1=DEVICE,2=MIRROR,3=SPLIT；M7-C1 additive kSplit） | 必须 ACK_REQ | ✔ |
 | 0x04 | PC→ESP | SET_RESOLUTION | 运行时改分辨率 | 必须 | 未来 |
 | 0x05 | PC→ESP | SET_PIXEL_FORMAT | 运行时改像素格式 | 必须 | 未来 |
 | 0x10 | ESP→PC | FRAME_BEGIN | frameId/type/fmt/w/h/byteHint | 否 | ✔ |
+| 0x13 | ESP→PC | PHYSICAL_PREVIEW | OLED 物理预览 1032B（M7-D2 additive，2Hz 默认） | 否 | ✔ |
 | 0x11 | ESP→PC | FRAME_RECT | x/y/w/h + 像素（可跨包） | 否 | ✔ |
 | 0x12 | ESP→PC | FRAME_END | frameId/rectCount/byteCount/flags | 否 | ✔ |
 | 0x20 | PC→ESP | INPUT_KEY | HID usage + modifiers + down | 否 | ✔ |
 | 0x21 | PC→ESP | INPUT_MOUSE | buttons + x + y + wheel + flags | 否 | ✔ |
 | 0x22 | PC→ESP | INPUT_TOUCH | — | 否 | 未来 |
+| 0x06 | PC→ESP | WIFI_SCAN_REQ | 扫描请求（M7-D3 additive） | 以 RESULT 响应 | ✔ |
+| 0x07 | ESP→PC | WIFI_SCAN_RESULT | 扫描结果（M7-D3 additive） | 否 | ✔ |
+| 0x08 | PC→ESP | WIFI_CONFIG | SSID/password/TCP server 配置（M7-D3 additive，凭据仅 UART 下发） | 必须 ACK_REQ | ✔ |
+| 0x09 | 双向 | WIFI_STATUS | Wi-Fi 状态上报（M7-D3 additive） | 否 | ✔ |
 | 0x30 | 双向 | PING | timestampMs | 以 PONG 响应 | ✔ |
 | 0x31 | 双向 | PONG | timestampMs | 否 | ✔ |
 | 0x40 | 双向 | RESET | 保留类型号，v0.1 不实现 | 必须 | 未来 |
 | 0x50 | 双向 | ERROR | errorCode + 文本 | 否 | ✔ |
 | 0x51 | 双向 | ACK | ackSeq + status + errorCode | 仅响应，不再次 ACK | ✔ |
+
+注：0x06–0x09 / 0x13 为 M7-D 系列 **wire-additive** 扩展（详见 AD/AE/AF 章），既有消息的 wire format 与语义均未修改，仅新增类型号。
 
 ### 帧消息 Payload Layout
 
@@ -889,7 +896,7 @@ ESPView/
 - `StatusModel`：QAbstractListModel 或简单 struct，展示 COM 口、波特率、分辨率、像素格式、FPS、RX/TX 字节、延迟。
 - CMake 需 `find_package(Qt6 COMPONENTS Widgets SerialPort)`；本机用 MSYS2 MinGW Qt 6.11.1：`-DCMAKE_PREFIX_PATH=C:/msys64/mingw64`，运行时把 `C:\msys64\mingw64\bin` 加入 PATH。
 
-## M. MVP 开发阶段划分（当前进度，M8-A4 更新）
+## M. MVP 开发阶段划分（当前进度，M8-A6 更新）
 
 | 阶段 | 内容 | 状态 |
 |------|------|------|
@@ -928,7 +935,11 @@ ESPView/
 | M8-A2 | ProtocolEndpoint 并发硬化（仅 shared/protocol；wire format 零改动）：会话纪元 stale ACK/延迟控制识别、Deferred Control 两单槽、失败发送 seq 回退、原子转换 + failSession 幂等、8 个逐包计数器原子化、Callbacks 生命周期契约 + testHooks、确定性并发测试 R1-R6/CASE 1-10、死代码删除 | ✅ 完成（2026-08-16/17；host ≈387,17x checks / 0 failures；Gate lost-wakeup 根因已修复；bench alloc_count=0；MinGW trap-UBSAN / MSVC ASan 0 报告；详见 AN 章） |
 | M8-A3 | Transport 抽象层语义冻结（software contract；wire protocol 零改动）：唯一 canonical ITransport + SendStatus + capabilities {mtu,paced}；删除 legacy ITransport/IPcTransport/adapter 层；TransportManager adopt() + diagSnapshot；PC 4 类跨线程队列有界化；ESP32 TransportBase 骨架 + close join UAF 防护；PC send/close 句柄竞争修复 | ✅ 完成（2026-08-17；host 388,065 checks / 0 failures；bench guards 行不变；PC 全目标构建 + 97/126 checks；ESP32 改动需 CI/reviewer 复核；详见 AO 章） |
 | M8-A4 | Display/Input/OLED 抽象收敛（software-only；wire 零改动）：删除 DisplayManager/DisplayMode/HeartbeatView 死代码；mode 唯一转换；writeRectDetailed 背压接口化；320x240 与 128x64 几何单一来源；PHYSICAL_PREVIEW 单编码路径；PhysicalRenderer 紧凑 rect 索引 + crop 参数化；HID/坐标校验收敛；OLED 列序反转单一 helper；新增 espview_m8a4_bench（render alloc=0） | ✅ 完成（2026-08-17；host 388,9xx checks / 0 failures；详见 AP 章） |
-| M6(未来) | 真实 LCD (DEVICE/MIRROR)、触摸（INPUT_TOUCH）、TinyUSB、运行时 DisplayMode | 未开始 |
+| M8-A5 | 硬件验收记录（UART/TCP/OLED/S3 probe；AR.6/AR.8/AR.9） | ✅ 完成（2026-08-17；host 393,661+211 checks / 0 failures；详见 AR 章） |
+| M8-A6 | CI / benchmark / sanitizer / build matrix / docs tooling（fast/full/sanitizer/benchmark/esp32/docs-security 9 workflows + fresh-clone gate + 首跑修复） | ✅ 完成（2026-08-17；全绿；host 393,661+211 checks / 0 failures；详见 AR 章与 docs/ci.md） |
+| M6(未来) | 真实 LCD (DEVICE/MIRROR)、触摸（INPUT_TOUCH）、TinyUSB | 未开始（运行时 DisplayMode 已于 M7-C3 实现，SET_MODE 0..3） |
+
+注：表中各里程碑的 host checks 数字为该里程碑完成时的快照；当前最新全量基线见 AR.8（393,661 + 211 checks / 0 failures）。
 
 ### M2 前置架构冻结（M1-3D 检查）
 
@@ -992,7 +1003,7 @@ M2 不负责：LVGL、真实 LCD、Mirror、触摸、Wi-Fi、高 FPS、复杂 UI
 
 12. M8-A3（Transport 抽象层语义冻结，M8-A3；software contract，wire protocol 零改动）：`shared/transport/`（`transport.h` 唯一 canonical ITransport/SendStatus/TransportCapabilities{mtu,paced}/TxPolicy + `transport_manager.{h,cpp}` factory/open/close/switchTo/reopen/**adopt**/发送门/diagSnapshot + `transport_sink.{h,cpp}` paced 重试/unpaced 单次 + `bounded_queue.h` BoundedQueue/BoundedByteBuffer）+ `shared/protocol/protocol_endpoint.h`（`using SendStatus = transport::SendStatus`，删除本地枚举）+ ESP32 `esp32/components/espview/`（`transport_base.{hpp,cpp}` 共享骨架 + `uart_transport`/`tcp_transport` 直接实现 canonical；`transport.hpp`/`transport_manager.hpp` 适配层已删除；close join 超时泄漏防护 UAF）+ PC `pc/src/`（`serial_transport`/`host_tcp_transport` 直接实现 canonical；`pc_transport.h` 已删除；SerialWorker 经 TransportManager + TransportSink + 4 类有界队列 rxBuf 64KB/input 256/displayMode 8/wifi 4）+ host 单测（transport_manager_test 新增 adopt/reopen 用例、transport_sink_test 背压≠断线/kError 不重试、transport_pipeline_test 大帧流式发送期间 control trySend 背压、bounded_queue_test）+ `pc/src/tcp_transport_test.cpp` / `transport_config_test.cpp` / `com3_frame_test --selftest-queue` 回归。详见 AO 章。
 
-下一步（M6）：真实 LCD（DEVICE/MIRROR）、触摸（INPUT_TOUCH）、TinyUSB、运行时 DisplayMode；输入侧扩展项：GUI 层 MouseMove 节流/合并在发端调优、ESP32 输入防抖、输入宏/录制/回放、游戏手柄、修饰键在 LVGL 侧的合成（当前为 capability limitation，见 S.7）。ESP32 侧 `IDisplay` / `RemoteDisplay` 属于 M2/M5 范围，本设计已为其预留接口（D 节）。
+下一步（M6）：真实 LCD（DEVICE/MIRROR）、触摸（INPUT_TOUCH）、TinyUSB（运行时 DisplayMode 已于 M7-C3 实现，不再列入）；输入侧扩展项：GUI 层 MouseMove 节流/合并在发端调优、ESP32 输入防抖、输入宏/录制/回放、游戏手柄、修饰键在 LVGL 侧的合成（当前为 capability limitation，见 S.7）。ESP32 侧 `IDisplay` / `RemoteDisplay` 属于 M2/M5 范围，本设计已为其预留接口（D 节）。
 
 ---
 
@@ -2134,8 +2145,8 @@ Display state 可视化面板、transport-aware display configuration。wire for
 
 ### AB.8 QSettings 扩展（白名单统一管理）
 
-- persistedSettingsKeys() 9 键：transport/type, uart/port, uart/baud, tcp/port,
-  window/size, display/mode, ui/language, split/drawerVisible, split/drawerWidth。
+- persistedSettingsKeys() 10 键：transport/type, uart/port, uart/baud, tcp/port,
+  window/size, display/mode, ui/language, ui/previewEnabled, split/drawerVisible, split/drawerWidth。
 - 绝对禁止保存 Wi-Fi SSID/密码/PSK/凭据（结构性保证：白名单键名不含
   wifi/ssid/password/psk/credential；TransportConfig 无凭据字段）。
 
@@ -2331,7 +2342,7 @@ Packet Header/CRC/Frame 语义）。
     heap free 156.5–167.0 KB 振荡无持续下降、OLED err=0 ok=1 全程。
     已知：PC RX 11 分钟内 1 次瞬态 seq-gap（CH340 丢 1 包，会话自恢复，可接受）。
   - TCP：当前 uart_hw 基线固件 ESPVIEW_TRANSPORT_TCP=false，TCP 不可用
-    （如实记录；TCP 生产固件验证留待后续里程碑）。
+    （如实记录；TCP 生产固件验证已于 M6-A T.10 / M7-F 完成，见 T 章）。
 
 ### AC.14 边界声明
 
@@ -2630,7 +2641,7 @@ GOT_IP → TCP handoff。**凭据只经 UART bootstrap 下发，绝不经 TCP �
   策略；UART bootstrap → TCP handoff 的完整运行时切换（kTcpConnecting/
   kTcpConnected 相位、WifiSta 已初始化场景的 stop/set_config 冲突处理）留待
   D6 集成阶段验证；D4 向导（WifiWizardState + i18n + WifiWizardDialog）已接入，
-  见 AG 节（M7-D4）；UART→TCP 运行时切换仍留待 D6。
+  见 AG 节（M7-D4）；UART→TCP 运行时切换已由 D6 完成（W.6 20×20 验收），本条为历史记录。
 - 验证：host 384,104+ checks / 0 failures（新增 wifi_provisioning 套件：布局/
   校验/解析/端点分发/发送/ACK_REQ 分派）；Qt 构建通过；ESP32（UART 生产
   配置）构建通过。真实硬件扫描/配网验收见 D6。
@@ -3649,10 +3660,10 @@ G11 验收清单（本日全部执行，工作树含 M7-G 全部 13 个提交）
   小修（`-Wno-array-bounds` 加 GNU/Clang 判定）后 remote_display_test.cpp 在 MSVC
   下正常编译。
 - **TSAN**：Windows 不支持（无 runtime + 平台线程模型差异），本机不可行；文档化
-  保留，Linux CI 未来补充。
+  保留，Linux CI 已实现（sanitizer.yml TSan subset，见 AR.2）。
 - **CI 主路径建议**：Linux `gcc/clang -fsanitize=address,undefined
   -fno-omit-frame-pointer -O1 -g`（Layer 1 fast CI 扩展），Windows 用 MSVC ASan
-  按上述命令作为补充；TSAN 待 Linux runner 后补。
+  按上述命令作为补充；TSAN 已由 Linux CI（sanitizer.yml）覆盖，见 AR.2。
 
 #### AN.11 benchmark guard（M8-A2 对比 M8-A1 新鲜基线）
 

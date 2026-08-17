@@ -165,7 +165,7 @@ void runConfigTests() {
         CHECK(cfg == before);
     }
 
-    // ---- 13. persistedSettingsKeys：恰好 9 个白名单键；结构上无凭据键 ----
+    // ---- 13. persistedSettingsKeys：恰好 10 个白名单键；结构上无凭据键 ----
     {
         const std::vector<std::string> keys = persistedSettingsKeys();
         CHECK_EQ(keys.size(), 10u);  // M7-D2：+ui/previewEnabled（Physical Preview 使能）

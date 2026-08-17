@@ -15,7 +15,7 @@
 | ERROR 文本遥测 / 诊断 / RuntimeStats | **禁止** | 日志只可记 SSID 长度，绝不打印/上报密码 |
 | PNG dump / UI 文案 | **禁止** | 密码不可见 |
 
-## 2. QSettings 白名单（9 键，M7-C3 冻结）
+## 2. QSettings 白名单（10 键，M7-C3 冻结，M7-D2 增加 `ui/previewEnabled`）
 
 `persistedSettingsKeys()` 只允许保存：
 
@@ -26,6 +26,7 @@
 - `window/size`
 - `display/mode`
 - `ui/language`
+- `ui/previewEnabled`
 - `split/drawerVisible`
 - `split/drawerWidth`
 
