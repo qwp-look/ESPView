@@ -21,13 +21,13 @@ set "PATH=%MINGW64_BIN%;%PATH%"
 set "ROOT=%~dp0.."
 set "BUILD=%ROOT%\build\verify_host"
 
-echo [1/4] Configure + build shared/protocol host tests
+echo [1/5] Configure + build shared/protocol host tests
 cmake -S "%ROOT%\shared\protocol" -B "%BUILD%\protocol" -G "MinGW Makefiles" -DCMAKE_BUILD_TYPE=Release
 if errorlevel 1 goto :fail
 cmake --build "%BUILD%\protocol" --target espview_protocol_tests scan_transaction_test -j 8
 if errorlevel 1 goto :fail
 
-echo [2/4] ctest (host protocol suite)
+echo [2/5] ctest (host protocol suite)
 ctest --test-dir "%BUILD%\protocol" --output-on-failure
 if errorlevel 1 goto :fail
 

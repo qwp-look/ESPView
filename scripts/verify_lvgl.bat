@@ -10,11 +10,14 @@ REM         e.g. `set ESPVIEW_COM3=COM3`). Requires the LVGL firmware
 REM         to be flashed first (idf.py -p COM3 flash).
 REM
 REM ctest never requires COM3 / ESP32 / Qt GUI.
-REM Requires: MSYS2 MinGW64; ESP-IDF v6.0.2 PowerShell profile at
-REM   C:\Espressif\tools\Microsoft.v6.0.2.PowerShell_profile.ps1
+REM Requires: MSYS2 MinGW64; ESP-IDF v6.0.2 PowerShell profile
+REM   (default C:\Espressif\tools\Microsoft.v6.0.2.PowerShell_profile.ps1;
+REM    override with ESPIDF_PROFILE)
 REM Override the compiler bin dir with MINGW64_BIN if needed.
 REM ============================================================
 setlocal
+
+if "%ESPIDF_PROFILE%"=="" set "ESPIDF_PROFILE=C:\Espressif\tools\Microsoft.v6.0.2.PowerShell_profile.ps1"
 
 if "%MINGW64_BIN%"=="" set "MINGW64_BIN=C:\msys64\mingw64\bin"
 set "PATH=%MINGW64_BIN%;%PATH%"
@@ -35,7 +38,7 @@ ctest --test-dir "%BUILD%\protocol" --output-on-failure
 if errorlevel 1 goto :fail
 
 echo [2/3] ESP32 build (idf.py, LVGL app)
-powershell -NoProfile -ExecutionPolicy Bypass -Command "& {. 'C:\Espressif\tools\Microsoft.v6.0.2.PowerShell_profile.ps1'; Set-Location '%ROOT%\esp32'; idf.py build }"
+powershell -NoProfile -ExecutionPolicy Bypass -Command "& {. '%ESPIDF_PROFILE%'; Set-Location '%ROOT%\esp32'; idf.py build }"
 if errorlevel 1 goto :fail
 
 if "%ESPVIEW_COM3%"=="" goto :done
