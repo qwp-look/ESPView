@@ -105,16 +105,14 @@ void LvglInputAdapter::feedPointer(const InputEvent& e) {
 
 void LvglInputAdapter::feedKey(const InputEvent& e) {
     // 第二层校验（keycode 范围 InputManager 已保证；防御性重复校验）。
-    const bool keyOk =
-        (e.keycode >= kHidKeyboardFirst && e.keycode <= kHidKeyboardLast) ||
-        (e.keycode >= kHidModifierFirst && e.keycode <= kHidModifierLast);
-    if (!keyOk) {
+    if (!isValidHidUsage(e.keycode)) {
         ++stats_.invalidEvents;
         return;
     }
+    // LVGL 能力分层：HID 合法 ≠ LVGL 支持（修饰键/F 键/PageUp… 不映射）。
     uint32_t lvglKey = 0;
     if (!HidToLvglKeyMapper::mapKey(e.keycode, lvglKey)) {
-        ++stats_.unmappedKeys;  // 修饰键/F 键/PageUp…：不合成 LVGL 事件
+        ++stats_.unmappedKeys;
         return;
     }
     if (e.type == InputType::kKeyDown) {

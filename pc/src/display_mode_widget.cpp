@@ -253,8 +253,10 @@ void DisplayModeWidget::rebuildCards() {
     for (int mode = 0; mode <= 3; ++mode) {
         auto* card = new ModeCard(mode, this);
         card->onActivated = [this](int m) {
-            state_.setSelectedMode(static_cast<DisplayRouteMode>(m));
-            refresh();
+            if (const auto rm = display::fromWireMode(static_cast<uint8_t>(m))) {
+                state_.setSelectedMode(*rm);
+                refresh();
+            }
         };
         cards_.push_back(card);
     }
@@ -263,7 +265,8 @@ void DisplayModeWidget::rebuildCards() {
 void DisplayModeWidget::updateCards() {
     for (ModeCard* card : cards_) {
         const int mode = card->mode();
-        const auto routeMode = static_cast<DisplayRouteMode>(mode);
+        const auto routeMode = display::fromWireMode(static_cast<uint8_t>(mode)).value_or(
+            DisplayRouteMode::kVirtualOnly);
         const bool selected = (routeMode == state_.selectedMode);
         const bool unavailable =
             !state_.physicalAvailable && display::modeRequiresPhysical(routeMode);

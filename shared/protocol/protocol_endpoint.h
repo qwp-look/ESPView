@@ -157,7 +157,6 @@ struct SessionStats {
     // ---- M4 心跳可观察（spec §五/§六）----
     uint64_t lastPingTimeMs = 0;    // 最近一次 PING 发送时刻（本端时钟）
     uint64_t lastPongTimeMs = 0;    // 最近一次收到 PONG 的时刻（本端时钟）
-    uint64_t heartbeatTimeouts = 0; // 对端超时次数（== pingTimeouts）
     RttAggregate rtt;               // PING→PONG RTT：last/avg/min/max/samples
                                     // （nullopt = 无测量；断线/重连后重置）
 

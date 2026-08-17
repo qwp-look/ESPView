@@ -294,11 +294,11 @@ void delayed_pong() {
     CHECK_EQ(a.ep->stats().rxPong, 1u);
     CHECK(a.ep->stats().rtt.lastMs.has_value());
     CHECK_EQ(*a.ep->stats().rtt.lastMs, 2900u);
-    CHECK_EQ(a.ep->stats().heartbeatTimeouts, 0u);
+    CHECK_EQ(a.ep->stats().pingTimeouts, 0u);
     CHECK_EQ(a.ep->state(), SessionState::kConnected);
 }
 
-// ---- 7. Heartbeat：timeout（对端 5s 无响应 → 断开 + heartbeatTimeouts）----
+// ---- 7. Heartbeat：timeout（对端 5s 无响应 → 断开 + pingTimeouts）----
 void heartbeat_timeout() {
     std::printf("  heartbeat timeout\n");
     EndpointHarness a, b;
@@ -312,7 +312,7 @@ void heartbeat_timeout() {
     a.clock.now = 7000;  // 距握手 7s > 5s 对端超时
     a.ep->tick();
     CHECK_EQ(a.ep->stats().pingTimeouts, 1u);
-    CHECK_EQ(a.ep->stats().heartbeatTimeouts, 1u);
+    CHECK_EQ(a.ep->stats().pingTimeouts, 1u);
     CHECK(hasProtoError(a, SessionError::kPeerTimeout));
     CHECK_EQ(a.ep->state(), SessionState::kDisconnected);
     CHECK(!a.ep->stats().rtt.lastMs.has_value());  // 断线后 RTT 无测量

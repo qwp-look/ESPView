@@ -10,15 +10,18 @@
 #include <cstddef>
 #include <cstdint>
 
+#include "oled_geometry.h"  // M8-A4：几何唯一事实来源
+
 namespace espview {
 namespace oled {
 
 class OledFb {
 public:
-    static constexpr int kWidth = 128;
-    static constexpr int kHeight = 64;
-    static constexpr int kPageCount = 8;          // kHeight / 8
-    static constexpr size_t kSizeBytes = 1024;    // kPageCount * kWidth
+    // M8-A4：几何单一来源（shared/oled oled_geometry.h）。
+    static constexpr int kWidth = kDefaultOledGeometry.width;
+    static constexpr int kHeight = kDefaultOledGeometry.height;
+    static constexpr int kPageCount = kDefaultOledGeometry.pageCount;
+    static constexpr size_t kSizeBytes = kDefaultOledGeometry.sizeBytes;
 
     OledFb();
     void clear();
@@ -56,3 +59,4 @@ size_t glyphPixelCount(char c);
 
 }  // namespace oled
 }  // namespace espview
+

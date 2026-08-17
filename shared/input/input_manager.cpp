@@ -9,7 +9,10 @@ namespace espview {
 namespace input {
 
 InputManager::InputManager(uint16_t displayWidth, uint16_t displayHeight)
-    : width_(displayWidth), height_(displayHeight) {}
+    : width_(displayWidth), height_(displayHeight) {
+    // 预分配按下键集合（≤ 同时按下键数，HID 键量级 ≤ ~112）：运行期键事件零分配。
+    pressedKeys_.reserve(16);
+}
 
 void InputManager::registerListener(IInputListener* l) {
     listener_ = l;
@@ -24,16 +27,14 @@ bool InputManager::validate(const InputEvent& e) const {
     switch (e.type) {
         case InputType::kKeyDown:
         case InputType::kKeyUp: {
-            const bool keyOk =
-                (e.keycode >= kHidKeyboardFirst && e.keycode <= kHidKeyboardLast) ||
-                (e.keycode >= kHidModifierFirst && e.keycode <= kHidModifierLast);
-            return keyOk && (e.modifiers & ~kModifierMask) == 0;
+            return isValidHidUsage(e.keycode) && isValidModifierMask(e.modifiers);
         }
         case InputType::kMouseMove:
         case InputType::kMouseDown:
         case InputType::kMouseUp:
         case InputType::kMouseWheel:
-            return (e.buttons & ~kMouseButtonMask) == 0 && e.x < width_ && e.y < height_;
+            return isValidButtonMask(e.buttons) &&
+                   isPointInDisplayBounds(e.x, e.y, width_, height_);
         case InputType::kTouchDown:
         case InputType::kTouchMove:
         case InputType::kTouchUp:

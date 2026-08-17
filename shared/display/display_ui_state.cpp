@@ -7,7 +7,7 @@ namespace espview {
 namespace display {
 
 bool DisplayUiState::setSelectedMode(DisplayRouteMode mode) {
-    if (static_cast<uint8_t>(mode) > 3) {
+    if (mode > DisplayRouteMode::kSplit) {
         lastError = "invalid display mode";
         return false;
     }

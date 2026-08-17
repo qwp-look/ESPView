@@ -220,7 +220,7 @@ void SerialWorker::emitStats() {
         st.pingReceived = s.rxPing;
         st.pongSent = s.txPong;
         st.pongReceived = s.rxPong;
-        st.heartbeatTimeouts = s.heartbeatTimeouts;
+        st.pingTimeouts = s.pingTimeouts;
         st.lastPingTimeMs = s.lastPingTimeMs;
         st.lastPongTimeMs = s.lastPongTimeMs;
         st.rttValid = s.rtt.lastMs.has_value();
@@ -859,9 +859,14 @@ void SerialWorker::drainDisplayModeQueue() {
         }
         // payload 仍为 [0] mode（1 byte，冻结语义）；makeSetMode 自动置
         // ACK_REQ，sendMessage 自动登记 pending ACK（超时重试 2 次后
-        // onAckTimeout → displayModeAck(false)）。
-        const proto::Message msg =
-            proto::makeSetMode(static_cast<proto::DisplayMode>(mode));
+        // onAckTimeout → displayModeAck(false)）。mode 为 wire byte；
+        // 经 shared/display 唯一转换点映射（M8-A4，禁止散落 static_cast）。
+        const auto rm = display::fromWireMode(mode);
+        if (!rm) {
+            ++modeDropped_;
+            continue;
+        }
+        const proto::Message msg = proto::makeSetMode(display::toProtoMode(*rm));
         if (ep_->sendMessage(msg) == proto::SendResult::kOk) {
             ++modeSent_;
         } else {

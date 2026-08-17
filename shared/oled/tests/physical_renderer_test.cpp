@@ -55,6 +55,24 @@ void putPixel(std::vector<uint8_t>& f, int x, int y, uint16_t v) {
     f[off + 1] = static_cast<uint8_t>(v >> 8);
 }
 
+// M8-A4 紧凑缓冲契约：rgb565 = srcRect.w x srcRect.h 行主序（行步长 rect.w）。
+// 从整帧抽取 rect 区域构造紧凑缓冲（与 LVGL flush_cb 的 band 缓冲同构）。
+std::vector<uint8_t> makeRectBuffer(const std::vector<uint8_t>& frame,
+                                    const espview::oled::RenderRect& r) {
+    std::vector<uint8_t> buf(static_cast<size_t>(r.w) * static_cast<size_t>(r.h) * 2u, 0);
+    for (int dy = 0; dy < r.h; ++dy) {
+        for (int dx = 0; dx < r.w; ++dx) {
+            const int sx = r.x + dx;
+            const int sy = r.y + dy;
+            const size_t srcOff = (static_cast<size_t>(sy) * kSrcW + static_cast<size_t>(sx)) * 2u;
+            const size_t dstOff = (static_cast<size_t>(dy) * static_cast<size_t>(r.w) + static_cast<size_t>(dx)) * 2u;
+            buf[dstOff] = frame[srcOff];
+            buf[dstOff + 1] = frame[srcOff + 1];
+        }
+    }
+    return buf;
+}
+
 size_t countSetBits(const OledFb& fb) {
     size_t n = 0;
     for (size_t i = 0; i < OledFb::kSizeBytes; ++i) {
@@ -343,7 +361,8 @@ void renderAndCheckSinglePixel(PhysicalRenderer& r, std::vector<uint8_t>& frame,
                                int sx, int sy) {
     putPixel(frame, sx, sy, kWhite);
     OledFb fb;
-    r.renderFrame(fb, kSrcW, kSrcH, frame.data(), RenderRect{sx, sy, 1, 1});
+    const std::vector<uint8_t> one = makeRectBuffer(frame, RenderRect{sx, sy, 1, 1});
+    r.renderFrame(fb, kSrcW, kSrcH, one.data(), RenderRect{sx, sy, 1, 1});
     putPixel(frame, sx, sy, kBlack);
     CHECK_EQ(countSetBits(fb), size_t(1));
     CHECK(fb.getPixel(mapX(sx), mapY(sy)));
@@ -374,7 +393,8 @@ void boundaryPixels() {
     putPixel(frame, 319, 199, kWhite);
     {
         OledFb fb;
-        r.renderFrame(fb, kSrcW, kSrcH, frame.data(), RenderRect{319, 199, 1, 1});
+        const std::vector<uint8_t> one = makeRectBuffer(frame, RenderRect{319, 199, 1, 1});
+        r.renderFrame(fb, kSrcW, kSrcH, one.data(), RenderRect{319, 199, 1, 1});
         CHECK_EQ(countSetBits(fb), size_t(1));
         CHECK(fb.getPixel(127, 63));
     }
@@ -387,7 +407,8 @@ void boundaryPixels() {
     for (const auto& c : corners) {
         putPixel(frame, c.sx, c.sy, kWhite);
         OledFb fb;
-        r.renderFrame(fb, kSrcW, kSrcH, frame.data(), RenderRect{c.sx, c.sy, 1, 1});
+        const std::vector<uint8_t> one = makeRectBuffer(frame, RenderRect{c.sx, c.sy, 1, 1});
+        r.renderFrame(fb, kSrcW, kSrcH, one.data(), RenderRect{c.sx, c.sy, 1, 1});
         putPixel(frame, c.sx, c.sy, kBlack);
         CHECK_EQ(countSetBits(fb), size_t(1));
         CHECK(fb.getPixel(c.ox, c.oy));
@@ -407,7 +428,8 @@ void boundaryPixels() {
     {
         putPixel(frame, 319, 199, kWhite);
         OledFb fb;
-        r.renderFrame(fb, kSrcW, kSrcH, frame.data(), RenderRect{319, 199, 2, 2});
+        const std::vector<uint8_t> two = makeRectBuffer(frame, RenderRect{319, 199, 2, 2});
+        r.renderFrame(fb, kSrcW, kSrcH, two.data(), RenderRect{319, 199, 2, 2});
         putPixel(frame, 319, 199, kBlack);
         CHECK_EQ(countSetBits(fb), size_t(1));
         CHECK(fb.getPixel(127, 63));
@@ -422,7 +444,8 @@ void boundaryPixels() {
             }
         }
         OledFb fb;
-        r.renderFrame(fb, kSrcW, kSrcH, whiteFrame.data(), RenderRect{-5, 40, 10, 10});
+        const std::vector<uint8_t> ten = makeRectBuffer(whiteFrame, RenderRect{-5, 40, 10, 10});
+        r.renderFrame(fb, kSrcW, kSrcH, ten.data(), RenderRect{-5, 40, 10, 10});
         CHECK_EQ(countSetBits(fb), size_t(8));
         for (int ox = 0; ox <= 1; ++ox) {
             for (int oy = 0; oy <= 3; ++oy) {
@@ -481,7 +504,8 @@ void rectIncremental() {
         OledFb fb;
         fb.fill(true);
         const std::vector<uint8_t> black = makeFrame(kBlack);
-        r.renderFrame(fb, kSrcW, kSrcH, black.data(), RenderRect{0, 40, 160, 160});
+        const std::vector<uint8_t> blackRect = makeRectBuffer(black, RenderRect{0, 40, 160, 160});
+        r.renderFrame(fb, kSrcW, kSrcH, blackRect.data(), RenderRect{0, 40, 160, 160});
         for (int page = 0; page < OledFb::kPageCount; ++page) {
             for (int x = 0; x < 64; ++x) {
                 CHECK_EQ(fb.byteAt(page, x), uint8_t(0x00));
@@ -500,7 +524,8 @@ void rectIncremental() {
         uint8_t snapshot[OledFb::kSizeBytes];
         std::memcpy(snapshot, fb.data(), OledFb::kSizeBytes);
         const std::vector<uint8_t> black = makeFrame(kBlack);
-        r.renderFrame(fb, kSrcW, kSrcH, black.data(), RenderRect{0, 40, 160, 160});
+        const std::vector<uint8_t> blackRect = makeRectBuffer(black, RenderRect{0, 40, 160, 160});
+        r.renderFrame(fb, kSrcW, kSrcH, blackRect.data(), RenderRect{0, 40, 160, 160});
         for (int page = 0; page < OledFb::kPageCount; ++page) {
             for (int x = 0; x < 64; ++x) {
                 CHECK_EQ(fb.byteAt(page, x), uint8_t(0x00));
@@ -520,7 +545,8 @@ void rectIncremental() {
                 putPixel(white, 0 + dx, 40 + dy, kWhite);
             }
         }
-        r.renderFrame(fb, kSrcW, kSrcH, white.data(), RenderRect{0, 40, 3, 3});
+        const std::vector<uint8_t> w0 = makeRectBuffer(white, RenderRect{0, 40, 3, 3});
+        r.renderFrame(fb, kSrcW, kSrcH, w0.data(), RenderRect{0, 40, 3, 3});
         CHECK_EQ(countSetBits(fb), size_t(1));
         CHECK(fb.getPixel(0, 0));
         // 第二块 {3,43,3,3}：sx 3/4/5 -> ox 1/1/2，sy 43/44/45 -> oy 1/1/2
@@ -530,7 +556,8 @@ void rectIncremental() {
                 putPixel(white, 3 + dx, 43 + dy, kWhite);
             }
         }
-        r.renderFrame(fb, kSrcW, kSrcH, white.data(), RenderRect{3, 43, 3, 3});
+        const std::vector<uint8_t> w1 = makeRectBuffer(white, RenderRect{3, 43, 3, 3});
+        r.renderFrame(fb, kSrcW, kSrcH, w1.data(), RenderRect{3, 43, 3, 3});
         CHECK(fb.getPixel(1, 1));
         CHECK(fb.getPixel(1, 2));
         CHECK(fb.getPixel(2, 1));
@@ -538,13 +565,80 @@ void rectIncremental() {
         CHECK(fb.getPixel(0, 0));
         CHECK_EQ(countSetBits(fb), size_t(5));
         // 黑矩形覆盖 {0,40,3,3}：只清除 (0,0)，其余不变。
-        r.renderFrame(fb, kSrcW, kSrcH, makeFrame(kBlack).data(), RenderRect{0, 40, 3, 3});
+        const std::vector<uint8_t> black3 =
+            makeRectBuffer(makeFrame(kBlack), RenderRect{0, 40, 3, 3});
+        r.renderFrame(fb, kSrcW, kSrcH, black3.data(), RenderRect{0, 40, 3, 3});
         CHECK(!fb.getPixel(0, 0));
         CHECK(fb.getPixel(1, 1));
         CHECK(fb.getPixel(1, 2));
         CHECK(fb.getPixel(2, 1));
         CHECK(fb.getPixel(2, 2));
         CHECK_EQ(countSetBits(fb), size_t(4));
+    }
+}
+
+// ---- M8-A4 回归：LVGL band 紧凑缓冲（OOB 越界读修复验证）----
+// LVGL flush_cb 只持有 band 相对缓冲（320x24），rect.y > 0。旧实现按整帧绝对
+// 坐标索引（sy*srcW + sx）会越界读（可达 ~138KB）；新契约按 rect 相对索引
+// ((sy-rect.y)*rect.w + (sx-rect.x))。本测试喂 320x24 紧凑 band（y=24..47），
+// 期望只读 band 内像素；可见区（sy>=40 -> oy>=0）映射正确。
+void bandBufferCompactContract() {
+    PhysicalRenderer r;
+    constexpr int kBandW = 320;
+    constexpr int kBandH = 24;
+    // band = 全黑 320x24；在可见行（sy=40..47）置白（对应 oled oy=0..3）。
+    std::vector<uint8_t> band(static_cast<size_t>(kBandW) * kBandH * 2u, 0);
+    const auto putBand = [&](int lx, int ly, uint16_t v) {
+        const size_t off = static_cast<size_t>(ly) * kBandW * 2u + static_cast<size_t>(lx) * 2u;
+        band[off] = static_cast<uint8_t>(v & 0xFFu);
+        band[off + 1] = static_cast<uint8_t>(v >> 8);
+    };
+    for (int ly = 40 - 24; ly < 48 - 24; ++ly) {  // band 局部行 0..23
+        for (int lx = 0; lx < kBandW; ++lx) {
+            putBand(lx, ly, kWhite);
+        }
+    }
+    OledFb fb;
+    // rect = 全帧逻辑坐标 {0, 24, 320, 24}；rgb565 为该 band 的紧凑缓冲。
+    r.renderFrame(fb, kSrcW, kSrcH, band.data(), RenderRect{0, 24, kBandW, kBandH});
+    // 可见源行 sy=40..47 -> oy=0..2（floor(sy*0.4)-16）全白；sy=24..39 -> oy<0 被跳过。
+    CHECK_EQ(countSetBits(fb), size_t(128 * 3));
+    for (int oy = 0; oy <= 2; ++oy) {
+        for (int ox = 0; ox < 128; ++ox) {
+            CHECK(fb.getPixel(ox, oy));
+        }
+    }
+    for (int oy = 3; oy < 64; ++oy) {
+        for (int ox = 0; ox < 128; ++ox) {
+            CHECK(!fb.getPixel(ox, oy));
+        }
+    }
+
+    // band 中部 band（y=96..119，含可见行 96..119 -> oy 16..31）：全白。
+    OledFb fb2;
+    std::vector<uint8_t> band2(static_cast<size_t>(kBandW) * kBandH * 2u, 0);
+    const auto putBand2 = [&](int lx, int ly, uint16_t v) {
+        const size_t off = static_cast<size_t>(ly) * kBandW * 2u + static_cast<size_t>(lx) * 2u;
+        band2[off] = static_cast<uint8_t>(v & 0xFFu);
+        band2[off + 1] = static_cast<uint8_t>(v >> 8);
+    };
+    for (int ly = 0; ly < kBandH; ++ly) {
+        for (int lx = 0; lx < kBandW; ++lx) {
+            putBand2(lx, ly, kWhite);
+        }
+    }
+    r.renderFrame(fb2, kSrcW, kSrcH, band2.data(), RenderRect{0, 96, kBandW, kBandH});
+    // sy=96..119 -> oy = floor(sy*0.4)-16 = 22..31（10 行）。
+    CHECK_EQ(countSetBits(fb2), size_t(128 * 10));
+    for (int oy = 22; oy <= 31; ++oy) {
+        for (int ox = 0; ox < 128; ++ox) {
+            CHECK(fb2.getPixel(ox, oy));
+        }
+    }
+    for (int oy = 0; oy < 22; ++oy) {
+        for (int ox = 0; ox < 128; ++ox) {
+            CHECK(!fb2.getPixel(ox, oy));
+        }
     }
 }
 
@@ -574,8 +668,9 @@ void determinism() {
 
     // 部分矩形渲染的确定性。
     OledFb d, e;
-    r.renderFrame(d, kSrcW, kSrcH, frame.data(), RenderRect{37, 61, 200, 150});
-    r.renderFrame(e, kSrcW, kSrcH, frame.data(), RenderRect{37, 61, 200, 150});
+    const std::vector<uint8_t> part = makeRectBuffer(frame, RenderRect{37, 61, 200, 150});
+    r.renderFrame(d, kSrcW, kSrcH, part.data(), RenderRect{37, 61, 200, 150});
+    r.renderFrame(e, kSrcW, kSrcH, part.data(), RenderRect{37, 61, 200, 150});
     CHECK(std::memcmp(d.data(), e.data(), OledFb::kSizeBytes) == 0);
 
     // 两个参数相同的实例输出一致。
@@ -656,6 +751,7 @@ void runPhysicalRendererTests() {
     boundaryPixels();
     emptyAndInvalidRects();
     rectIncremental();
+    bandBufferCompactContract();
     determinism();
     goldenCheckerboard();
     goldenWhiteBlack();

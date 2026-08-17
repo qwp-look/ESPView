@@ -1,6 +1,6 @@
 // ESPView — Display 抽象层（M5-A）
 //
-// 规范来源：docs/DESIGN.md D 节（IDisplay / DisplayManager）+ M5-A 任务书。
+// 规范来源：docs/DESIGN.md D 节（IDisplay）+ M5-A 任务书。
 // 纯 C++17，零平台依赖（无 ESP-IDF / Qt / LVGL / Windows API）。
 //
 // 与 DESIGN.md D.1 的差异（M5-A 实现语义，详见 docs/DESIGN.md §31）：
@@ -15,20 +15,11 @@
 
 #include <cstdint>
 
-#include "protocol.h"  // proto::PixelFormat / proto::FrameType
+#include "display_geometry.h"
+#include "protocol.h"  // proto::PixelFormat
 
 namespace espview {
 namespace display {
-
-// 显示后端模式（DESIGN.md D.2）。v0.1 只实现编译期 WINDOW 模式；
-// DEVICE / MIRROR 仅保留接口（M5-A 不做 runtime DisplayMode）。
-enum class DisplayMode : uint8_t {
-    kWindow = 0,  // RemoteDisplay（M5-A）
-    kDevice = 1,  // HardwareDisplay（未来，stub）
-    kMirror = 2,  // MirrorDisplay（未来，stub）
-    kSplit = 3,   // M7-C：additive wire 扩展（SET_MODE.mode=3）；0/1/2 值不变。
-};
-
 // 平台无关状态码。0 = OK（与 esp_err_t 的 ESP_OK==0 约定一致）；负值 = 错误。
 enum class DisplayStatus : int32_t {
     kOk = 0,
@@ -45,8 +36,8 @@ enum class DisplayStatus : int32_t {
 
 // 显示配置（DESIGN.md D.1 DisplayConfig；协议只约束 width/height 1..4096）。
 struct DisplayConfig {
-    int width = 320;
-    int height = 240;
+    int width = kVirtualDisplayGeometry.width;   // 320x240（M8-A4：单一来源）
+    int height = kVirtualDisplayGeometry.height;
     proto::PixelFormat format = proto::PixelFormat::kRgb565;
 };
 
@@ -59,7 +50,8 @@ struct DisplayInfo {
 };
 
 // 统一显示后端抽象（DESIGN.md D.1）。Application 只面向本接口，
-// 不出现 if (pc_mode) / if (lcd_mode) 分支；具体后端经 DisplayManager 注入。
+// 不出现 if (pc_mode) / if (lcd_mode) 分支；具体后端经 DisplayRouter 注入
+//（M8-A4：DisplayManager 已删除，路由语义唯一来源见 display_router.h）。
 class IDisplay {
 public:
     virtual ~IDisplay() = default;
@@ -76,3 +68,4 @@ public:
 
 }  // namespace display
 }  // namespace espview
+

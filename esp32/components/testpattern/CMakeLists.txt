@@ -3,7 +3,7 @@
 idf_component_register(
     SRCS "src/test_pattern.cpp"
     INCLUDE_DIRS "include"
-    REQUIRES protocol freertos heap esp_timer
+    REQUIRES display protocol freertos heap esp_timer
 )
 
 target_compile_features(${COMPONENT_LIB} PUBLIC cxx_std_17)

@@ -18,7 +18,7 @@ bool executeInitSequence(OledI2c& i2c, ControllerType ctrl, size_t maxSegmentByt
     const auto cmdSegs = segmentCommands(cmds, maxSegmentBytes);
     for (const auto& seg : cmdSegs) {
         // M7-B：每段 transmit 前检查停止谓词 —— stop() 后不再发送下一段。
-        if (stopRequested()) {
+        if (stopRequested && stopRequested()) {
             return false;
         }
         const esp_err_t err = i2c.transmit(seg.data(), seg.size());
@@ -34,7 +34,7 @@ bool executeInitSequence(OledI2c& i2c, ControllerType ctrl, size_t maxSegmentByt
     const auto dataSegs = segmentFrameUpload(clearFb, ctrl, maxSegmentBytes);
     for (const auto& seg : dataSegs) {
         // M7-B：清屏段同样逐段检查停止谓词。
-        if (stopRequested()) {
+        if (stopRequested && stopRequested()) {
             return false;
         }
         const esp_err_t err = i2c.transmit(seg.data(), seg.size());

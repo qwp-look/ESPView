@@ -271,7 +271,7 @@ void statusRenderLines() {
     s.rssi = -55;
     s.channel = 6;
     s.frameCount = 123456;
-    s.errorCount = 7;
+    s.sessionErrors = 7;
     s.uptimeMs = 3661000;             // 1h 01m 01s
     s.freeHeap = 123456;
 
@@ -305,7 +305,7 @@ void statusRenderLines() {
     f.sessionState = 9;               // 越界 → '?'
     f.apInfoValid = false;
     f.frameCount = 12345678;
-    f.errorCount = 0;
+    f.sessionErrors = 0;
     f.freeHeap = 123456789;
     f.uptimeMs = 0;
     renderStatus(fb, f);

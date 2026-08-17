@@ -79,12 +79,5 @@ struct RttAggregate {
     void reset();                    // 会话重置：全部清空（无测量）
 };
 
-// 会话心跳可观察字段（挂到 SessionStats 上；计数与 RTT 分开维护）。
-struct HeartbeatView {
-    uint64_t lastPingTimeMs = 0;  // 最近一次 PING 发送时刻（本端时钟）
-    uint64_t lastPongTimeMs = 0;  // 最近一次收到 PONG 的时刻（本端时钟）
-    uint64_t heartbeatTimeouts = 0;  // 对端超时次数（== SessionStats::pingTimeouts 别名）
-};
-
 }  // namespace proto
 }  // namespace espview

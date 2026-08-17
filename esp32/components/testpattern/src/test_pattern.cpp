@@ -11,6 +11,8 @@
 #include "esp_heap_caps.h"
 #include "esp_timer.h"
 
+#include "display_geometry.h"  // kVirtualDisplayGeometry（M8-A4：几何单一来源）
+
 namespace espview {
 
 namespace {
@@ -18,8 +20,11 @@ namespace {
 constexpr size_t kTaskStackWords = 4096;
 constexpr UBaseType_t kTaskPriority = 4;
 constexpr TickType_t kSignalWaitTicks = pdMS_TO_TICKS(200);
-constexpr uint16_t kDisplayWidth = 320;
-constexpr uint16_t kDisplayHeight = 240;
+// M8-A4：虚拟屏几何单一来源（320x240）。
+constexpr uint16_t kDisplayWidth =
+    static_cast<uint16_t>(display::kVirtualDisplayGeometry.width);
+constexpr uint16_t kDisplayHeight =
+    static_cast<uint16_t>(display::kVirtualDisplayGeometry.height);
 // 320x240 RGB565 单 RECT 完整 Message payload = 8B 矩形头 + 153600B 像素。
 constexpr uint32_t kLargeRectPayloadBytes = 8u + 153600u;
 

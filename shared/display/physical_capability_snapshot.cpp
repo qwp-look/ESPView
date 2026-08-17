@@ -3,6 +3,8 @@
 
 #include "physical_capability_snapshot.h"
 
+#include "oled_geometry.h"  // M8-A4：OLED 几何唯一事实来源（header-only 依赖，不链 espview_oled）
+
 namespace espview {
 namespace display {
 
@@ -10,13 +12,13 @@ namespace {
 
 // OLED 控制器 → 逻辑分辨率推断（与 ESP32 侧 PhysicalDisplaySink::init 的
 // 落定值一致：SSD1306/SH1106 均为 128x64，1-bit 单色，不可回读）。
-// 未知控制器 → 0x0（不伪造分辨率）。
+// 几何数值来自 shared/oled oled_geometry.h（M8-A4 单一来源）；未知控制器 → 0x0。
 void inferGeometry(const PhysicalStatus& status, int& w, int& h) {
     switch (status.oledController) {
         case OledControllerCode::kSsd1306:
         case OledControllerCode::kSh1106:
-            w = 128;
-            h = 64;
+            w = espview::oled::kDefaultOledGeometry.width;
+            h = espview::oled::kDefaultOledGeometry.height;
             return;
         default:
             w = 0;

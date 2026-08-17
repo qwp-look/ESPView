@@ -735,7 +735,6 @@ void ProtocolEndpoint::tick() {
         {
             std::lock_guard<std::mutex> lock(sessionMutex_);
             ++stats_.pingTimeouts;
-            ++stats_.heartbeatTimeouts;  // M4 别名：GUI 显示 heartbeat timeouts
         }
         // M8-A2 test hook（锁外；禁止重入 endpoint）。
         if (cfg_.testHooks.onTickBeforeFail) {

@@ -22,14 +22,6 @@ bool isKeyDown(uint8_t v) {
     return v == 0 || v == 1;
 }
 
-// USB HID 键盘 usage 合法性（DESIGN.md INPUT_KEY.keycode 范围）。
-bool isKeycodeValid(uint32_t k) {
-    if (k >= kHidKeyboardFirst && k <= kHidKeyboardLast) {
-        return true;
-    }
-    return k >= kHidModifierFirst && k <= kHidModifierLast;
-}
-
 }  // namespace
 
 std::optional<proto::Message> encodeInputEvent(const InputEvent& e, uint16_t maxX,
@@ -37,10 +29,10 @@ std::optional<proto::Message> encodeInputEvent(const InputEvent& e, uint16_t max
     switch (e.type) {
         case InputType::kKeyDown:
         case InputType::kKeyUp: {
-            if (!isKeycodeValid(e.keycode)) {
+            if (!isValidHidUsage(e.keycode)) {
                 return std::nullopt;
             }
-            if ((e.modifiers & ~kModifierMask) != 0) {
+            if (!isValidModifierMask(e.modifiers)) {
                 return std::nullopt;
             }
             return proto::makeInputKey(e.keycode, e.modifiers, e.type == InputType::kKeyDown);
@@ -49,10 +41,10 @@ std::optional<proto::Message> encodeInputEvent(const InputEvent& e, uint16_t max
         case InputType::kMouseDown:
         case InputType::kMouseUp:
         case InputType::kMouseWheel: {
-            if ((e.buttons & ~kMouseButtonMask) != 0) {
+            if (!isValidButtonMask(e.buttons)) {
                 return std::nullopt;
             }
-            if (e.x > maxX || e.y > maxY) {
+            if (!isPointInDisplayBounds(e.x, e.y, static_cast<uint16_t>(maxX + 1u), static_cast<uint16_t>(maxY + 1u))) {
                 return std::nullopt;
             }
             // 所有鼠标事件在 wire 上都是同一「指针状态」布局（见 input_codec.h）。
@@ -78,10 +70,10 @@ std::optional<InputEvent> decodeInputMessage(const proto::Message& msg, uint16_t
         const uint16_t modifiers = leU16(p + 4);
         const uint8_t down = p[6];
         const uint8_t rsvd = p[7];
-        if (!isKeycodeValid(keycode)) {
+        if (!isValidHidUsage(keycode)) {
             return std::nullopt;
         }
-        if ((modifiers & ~kModifierMask) != 0) {
+        if (!isValidModifierMask(modifiers)) {
             return std::nullopt;
         }
         if (!isKeyDown(down)) {
@@ -109,10 +101,10 @@ std::optional<InputEvent> decodeInputMessage(const proto::Message& msg, uint16_t
         const int8_t wheel = static_cast<int8_t>(p[5]);
         const uint8_t flags = p[6];
         const uint8_t rsvd = p[7];
-        if ((buttons & ~kMouseButtonMask) != 0) {
+        if (!isValidButtonMask(buttons)) {
             return std::nullopt;
         }
-        if (x > maxX || y > maxY) {
+        if (!isPointInDisplayBounds(x, y, static_cast<uint16_t>(maxX + 1u), static_cast<uint16_t>(maxY + 1u))) {
             return std::nullopt;
         }
         if (flags != kMouseFlagAbs) {

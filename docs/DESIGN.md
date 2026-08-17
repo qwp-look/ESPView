@@ -102,6 +102,23 @@
 > K 补 adopt 失败 / len>mtu / attach-open 幂等 / capacity=0 测试；L T.3/T.4/L/X
 > 历史注解 + 修订记录措辞修正。host 388,088 checks / 0 failures；ctest 2/2；
 > bench guards 行不变；PC 全目标构建 + 97/140 checks；wire 红线 0 diff。
+>
+> **修订记录（M8-A4, 2026-08-17）**：Display/Input/OLED 抽象收敛 + 公共值类型
+> 收敛 + 死代码清理 + 显示背压接口化（software-only；wire protocol 零改动：
+> `protocol.h`/`crc32.*`/`packet.h`/`message.h` 相对 3b51b60 为 0 diff）。
+> 收敛内容：删除 DisplayManager / display::DisplayMode / HeartbeatView 死代码；
+> DisplayRouteMode ↔ wire byte 唯一转换（toWireMode/fromWireMode/toProtoMode）；
+> 新增 DisplayRouter::writeRectDetailed（逐路径 present 结果，lvgl flush_cb 背压
+> 识别不再 static_cast VirtualSink）；RemoteDisplay END 发送失败 → needFull_ +
+> 不虚增帧统计；逻辑虚拟屏几何 kVirtualDisplayGeometry（320x240）与 OLED 几何
+> kDefaultOledGeometry（128x64/8 pages/1024B）单一来源（display_geometry.h /
+> oled_geometry.h）；PHYSICAL_PREVIEW 单编码路径（OledPreviewSlot 不再自编码 AE.2，
+> 消除 encode→parse→re-encode 往返）；PhysicalRenderer 紧凑 rect 缓冲索引
+> （修复 LVGL band OOB 读）+ crop 按调用期 srcH 计算；HID/按钮/修饰/坐标校验
+> 收敛为 input_event.h 四个谓词 + isSupportedLvglKey 分层；OLED 页内列序反转
+> 收敛为单一 writeReversedPage；store/reset 双写者互斥；新增
+> espview_m8a4_bench（physical_render_full alloc_count=0）。host 388,9xx checks /
+> 0 failures；详见 AP 章。
 
 ---
 
@@ -872,7 +889,7 @@ ESPView/
 - `StatusModel`：QAbstractListModel 或简单 struct，展示 COM 口、波特率、分辨率、像素格式、FPS、RX/TX 字节、延迟。
 - CMake 需 `find_package(Qt6 COMPONENTS Widgets SerialPort)`；本机用 MSYS2 MinGW Qt 6.11.1：`-DCMAKE_PREFIX_PATH=C:/msys64/mingw64`，运行时把 `C:\msys64\mingw64\bin` 加入 PATH。
 
-## M. MVP 开发阶段划分（当前进度，M7-G 更新）
+## M. MVP 开发阶段划分（当前进度，M8-A4 更新）
 
 | 阶段 | 内容 | 状态 |
 |------|------|------|
@@ -910,6 +927,7 @@ ESPView/
 | M8-A1 | 共享协议实现硬化（仅 shared/protocol；wire format 冻结零改动）：T1 LE 字节序助手合并 / T2 流式 Encoder 1MiB 上限 + 零堆分配热路径 / T3 半包超时改 tick() 驱动 / T4 会话并发最小加固 + 非阻塞 tryTransmit / T5 ACK_REQ 白名单 / T6 测试扩展 / T7 协议基准 | ✅ 完成（2026-08-16；host 386,307+ checks / 0 failures；详见 I/E/J 节 + 修订记录） |
 | M8-A2 | ProtocolEndpoint 并发硬化（仅 shared/protocol；wire format 零改动）：会话纪元 stale ACK/延迟控制识别、Deferred Control 两单槽、失败发送 seq 回退、原子转换 + failSession 幂等、8 个逐包计数器原子化、Callbacks 生命周期契约 + testHooks、确定性并发测试 R1-R6/CASE 1-10、死代码删除 | ✅ 完成（2026-08-16/17；host ≈387,17x checks / 0 failures；Gate lost-wakeup 根因已修复；bench alloc_count=0；MinGW trap-UBSAN / MSVC ASan 0 报告；详见 AN 章） |
 | M8-A3 | Transport 抽象层语义冻结（software contract；wire protocol 零改动）：唯一 canonical ITransport + SendStatus + capabilities {mtu,paced}；删除 legacy ITransport/IPcTransport/adapter 层；TransportManager adopt() + diagSnapshot；PC 4 类跨线程队列有界化；ESP32 TransportBase 骨架 + close join UAF 防护；PC send/close 句柄竞争修复 | ✅ 完成（2026-08-17；host 388,065 checks / 0 failures；bench guards 行不变；PC 全目标构建 + 97/126 checks；ESP32 改动需 CI/reviewer 复核；详见 AO 章） |
+| M8-A4 | Display/Input/OLED 抽象收敛（software-only；wire 零改动）：删除 DisplayManager/DisplayMode/HeartbeatView 死代码；mode 唯一转换；writeRectDetailed 背压接口化；320x240 与 128x64 几何单一来源；PHYSICAL_PREVIEW 单编码路径；PhysicalRenderer 紧凑 rect 索引 + crop 参数化；HID/坐标校验收敛；OLED 列序反转单一 helper；新增 espview_m8a4_bench（render alloc=0） | ✅ 完成（2026-08-17；host 388,9xx checks / 0 failures；详见 AP 章） |
 | M6(未来) | 真实 LCD (DEVICE/MIRROR)、触摸（INPUT_TOUCH）、TinyUSB、运行时 DisplayMode | 未开始 |
 
 ### M2 前置架构冻结（M1-3D 检查）
@@ -3804,3 +3822,183 @@ G11 验收清单（本日全部执行，工作树含 M7-G 全部 13 个提交）
   只扩展 shared/transport 的枚举与 factory，不改协议。
 - PC 侧：USB CDC（CH340/CP210x/S3 原生 CDC）在 OS 层呈现为 COM 端口 —— PC 侧
   无需新 Transport，复用 `HostUartTransport`（COM 字节管道语义不变；M8-A3）。
+
+## AP. M8-A4 Display/Input/OLED consolidation semantics（2026-08-17 冻结）
+
+> 本阶段只改变软件结构，不改变 wire format。`shared/protocol/protocol.h` /
+> `crc32.*` / `packet.h` / `message.h` 相对 M8-A3（3b51b60）为 0 diff；
+> CAPABILITIES（AD 章）、PHYSICAL_PREVIEW（AE 章）、WIFI provisioning（AF 章）、
+> INPUT_KEY / INPUT_MOUSE（S 节）布局全部不变。
+
+### AP.1 目标与边界
+
+- 目标：把 M0–M7 演化出的平行实现收敛成真正的 Shared Core，使未来
+  ESP32-S3 / USB Display transport / 新 OLED controller / 新 HardwareDisplay /
+  新输入设备的接入以复用 shared 类型与 helper 为主，不复制代码。
+- 绝对不变量：wire format 冻结（见本段头部）；禁止新增 wire message；
+  M8-A4 不实现 S3，只确保 shared/display、shared/input、shared/oled 零平台泄漏
+  （无 `#ifdef ESP32`、无硬编码 GPIO/Flash/UART0、无 ESP-IDF/Qt/LVGL 依赖）。
+- 本阶段禁止范围（属 M8-A5）：UART reopen 架构、Wi-Fi retry overhaul、
+  TCP fd lifecycle overhaul、esp_netif 提取、PM parameterization、transport
+  日志变更。
+
+### AP.2 canonical Display types
+
+唯一事实来源（纯 C++17，`shared/display/`）：
+
+| 类型 | 文件 | 说明 |
+|---|---|---|
+| `display::DisplayRouter` | display_router.h | 路由唯一实现（VirtualOnly/PhysicalOnly/Mirror/Split） |
+| `display::DisplayRouteMode` | display_router.h | 路由模式枚举 0..3（值对齐 wire SET_MODE.mode） |
+| `display::PhysicalScene` | display_router.h | Split 下物理侧独立场景（Diagnostics/Application） |
+| `display::IDisplaySink` | display_sink.h | 消费侧接口（init/present/flush/setEnabled/isAvailable/status） |
+| `display::Rect` | display_sink.h | 逻辑矩形（int x/y/w/h；生产者保证不越界） |
+| `display::DisplayCapabilities` | display_capabilities.h | sink 能力快照（width/height/format/color/mono/canReadback/sinkKind） |
+| `display::DisplayStatus` | display.h | 平台无关状态码（kOk=0，负值错误） |
+| `display::DisplayConfig` / `DisplayInfo` / `IDisplay` | display.h | RemoteDisplay 后端抽象（Application 面向） |
+| `display::kVirtualDisplayGeometry` | display_geometry.h | 逻辑虚拟屏几何 320x240 单一来源 |
+
+- **已删除**（M8-A4 死代码清理）：`DisplayManager`（display_manager.{h,cpp}，
+  生产零读取路径）、`display::DisplayMode` 枚举（与 `DisplayRouteMode` 值语义
+  重复的僵尸概念）、`HeartbeatView`（runtime_stats.h，字段在 SessionStats 已有
+  单一事实源）。
+- 三层边界：Display Core（shared/display）、Qt UI model（pc/src）、Protocol
+  wire model（shared/protocol）互不直接复用内部结构；wire 枚举（
+  `proto::DisplayMode` / `proto::PixelFormat`）只经显式转换 helper 进入
+  Display Core。
+
+### AP.3 mode conversion（唯一转换点）
+
+- `DisplayRouteMode ↔ wire byte 0..3` 唯一转换：`display::toWireMode(mode)` /
+  `display::fromWireMode(byte)`（display_router.h）。非法 wire 值（>3）→
+  `nullopt`，调用方拒绝；禁止散落 `static_cast<uint8_t>` / `switch int`。
+- `DisplayRouteMode → proto::DisplayMode`：`display::toProtoMode(mode)`（
+  SET_MODE 编码唯一入口，PC serial_worker / ESP32 applyDisplayMode 共用）。
+- 场景映射（M7-C2 定稿，不变）：Mirror/PhysicalOnly → Application；
+  VirtualOnly/Split → Diagnostics。
+- Mirror/Split 语义冻结（M7-C2/C4 已验证）：VirtualOnly=Virtual 收应用帧；
+  PhysicalOnly=Physical 收应用帧；Mirror=双 sink 同帧扇出；Split=Virtual 收
+  应用帧、Physical 经 presentScene 收独立场景帧（绝不等于“两个 Application”）。
+
+### AP.4 Rect / Geometry / PixelFormat
+
+- `display::Rect`：逻辑坐标（x/y 左上角，w/h ≥ 1）；生产者（LVGL flush_cb /
+  RemoteDisplay writeRect）保证不越界；sink 实现同步完成 staging，不得持有
+  pixels 指针；越界矩形由 RemoteDisplay::writeRect 校验（负值/零/越界 →
+  kInvalidParam）。
+- 几何单一来源：逻辑虚拟屏 = `display::kVirtualDisplayGeometry`（320x240）；
+  OLED 物理几何 = `oled::kDefaultOledGeometry`（128x64/8 pages/1024B，
+  shared/oled/oled_geometry.h），`OledFb` / `OledPreviewSlot` /
+  `PhysicalCapabilitySnapshot` 一律引用，禁止字面量 128/64/8/1024 散落。
+- PixelFormat：wire 侧唯一 `proto::PixelFormat`（kRgb565=0，冻结）；
+  Display Core 值类型直接引用该枚举（受控边界转换，非 reinterpret_cast）；
+  OLED mono1 属物理域（`PhysicalPixelFormat::kMono1`，wire AE.2 冻结），不并入
+  generic DisplayInfo。
+
+### AP.5 capability snapshot
+
+- sink 侧：`display::DisplayCapabilities`（init 后落定，Router 只读）。
+- PC 侧：`display::PhysicalCapabilitySnapshot`（provenance 模型：kOledTelemetry
+  学习 + capabilityKnown 只置不清；控制器→几何推断引用 oled_geometry.h，不
+  伪造分辨率）。UI 只消费 snapshot，不自猜 128x64/OLED present/RGB565。
+- wire CAPABILITIES（TYPE 0x02，32B LE，每会话一次）布局冻结（AD 章），
+  本阶段不改。
+
+### AP.6 sink contract 与 present result
+
+- `IDisplaySink` 契约（display_sink.h）：init 先于 attach；isAvailable（路由
+  可用性）与 setEnabled（路由开关）正交；status() = 最近一次操作状态（
+  VirtualSink 返回 lastPresent_，与 PhysicalDisplaySink 一致，M8-A4 修正）。
+- Router 聚合规则不变：任一启用且可用的 sink 成功 → overall kOk；全失败 →
+  传播首错。
+- **M8-A4 新增 `DisplayRouter::writeRectDetailed`**：返回
+  `RouteWriteResult{overall, virtualInPath, virtualStatus, physicalStatus}`，
+  逐路径报告实际被调用的 sink 状态。lvgl flush_cb 以 Virtual 路径状态识别
+  背压（Mirror/Split 下物理侧 kOk 不再掩盖 Virtual kQueueFull/kFrameBusy），
+  删除对 VirtualSink 的 `static_cast` 与 `lastPresentStatus()` 旁路通道。
+- RemoteDisplay::pump 的 END/ABORTED END 发送结果不再被吞：非 kOk →
+  `needFull_=true` 且不虚增帧统计（PC 保持开放帧，下一帧 FULL resync）。
+
+### AP.7 physical geometry 与 OLED framebuffer
+
+- `oled::OledFb`（shared/oled/oled_fb.h）是唯一 1KB 页式 framebuffer
+  primitive（128x64 1bpp，8 pages × 128B；bit0=页顶行）。Renderer/status/
+  controller 不维护第二份 fb 实现。
+- `oled::PhysicalRenderer`（M8-A4 几何参数化）：
+  - 输入为「紧凑矩形缓冲」（srcRect.w × srcRect.h 行主序，行步长 rect.w），
+    索引一律 rect 相对（`px = ((sy-srcRect.y)*srcRect.w + (sx-srcRect.x))*2`）；
+    修复此前按整帧绝对坐标索引 LVGL band 缓冲（320x24）的 OOB 读（可达
+    ~138KB）。
+  - center crop 按调用期 srcH 计算（`cropY = max(0, (srcH*2/5 - fbH)/2)`），
+    不再假设源高 240；scale = 2/5（kScaleNum/kScaleDen）与 threshold 仍为
+    编译期/构造参数。
+  - 无堆分配（bench 实证 alloc_count=0）、无 float、整数运算；OLED 侧最多
+    3×1KB（staging fb + app fb + preview slot），无整屏 framebuffer。
+- 控制器分层：OledFb → oled_cmd（命令/分段生成，不触碰 I2C）→ ESP32
+  oled_i2c（唯一 I2C/任务/恢复边界）；SSD1306/SH1106 页内列序反转收敛为
+  单一 helper `writeReversedPage`（oled_cmd.cpp）。
+
+### AP.8 preview frame（PHYSICAL_PREVIEW）
+
+- `oled::OledPreviewSlot`：1KB 稳定帧快照槽 + frameId 计数器 + 有效标志；
+  M8-A4 起 store/reset 双写者经 writeMutex_ 串行化，读者 snapshot() 保持
+  seqlock 无锁。
+- **单编码路径**：AE.2 1032B payload（8B 头 LE + 1024B 像素）唯一编码器 =
+  `proto::makePhysicalPreview`（shared/protocol）；slot 不再自编码
+  （`makePhysicalPreviewPayload` 已删），ESP32 发送路径消除
+  encode→parse→re-encode 往返（main.cpp sendPhysicalPreviewMessage）。
+- wire 布局冻结（AE 章）：frameId u16 LE / width u16 LE / height u16 LE /
+  pixelFormat u8 / flags u8 + 1024B 像素；frameId 0..65535 回绕；默认 2Hz
+  上行，挂起零流量。
+
+### AP.9 Input canonical types
+
+唯一事实来源（纯 C++17，`shared/input/`）：
+
+| 类型 | 文件 |
+|---|---|
+| `input::InputType` / `InputEvent` / 按钮/修饰掩码 / HID usage 范围 | input_event.h |
+| `isValidHidUsage` / `isValidButtonMask` / `isValidModifierMask` / `isPointInDisplayBounds` | input_event.h |
+| `encodeInputEvent` / `decodeInputMessage`（wire ↔ InputEvent 唯一转换） | input_codec.h/.cpp |
+| `InputManager`（ESP32 RX 域：校验/按下状态/统计/resetState） | input_manager.h |
+| `CoordinateMapper`（widget→逻辑坐标，唯一） | coordinate_mapper.h |
+| `HidToLvglKeyMapper` + `isSupportedLvglKey` | hid_lvgl_keymap.h |
+| `LvglInputAdapter`（消费层，LVGL 无关） | lvgl_adapter.h |
+
+- 校验分层：HID 合法范围（`isValidHidUsage`：0x04..0x65 ∪ 0xE0..0xE7）≠ LVGL
+  支持范围（`isSupportedLvglKey`：mapKey 成功才合成 LVGL 事件；修饰键/F 键/
+  PageUp 等不映射）。三层语义保留：Qt 先 widget 映射 → 逻辑坐标；ESP32
+  InputManager 做协议级验证；LVGL adapter 做能力验证。
+- wheel：唯一归一化在 `input_policy.h normalizeWheelDelta`（Qt delta ÷120 →
+  int8 steps），InputManager/LVGL 不再除；LVGL 只做 int8→int16 分块累积。
+- 鼠标按钮/修饰键位定义唯一（input_event.h）；InputController（Qt 状态）、
+  InputManager（按下状态）、LvglInputAdapter（消费状态）不强行合并为一个
+  state machine。
+
+### AP.10 RuntimeStats ownership
+
+- 事实只保存一次，UI 只读 snapshot：`SessionStats`/`FrameStats`（含
+  discardByReason）归 ProtocolEndpoint；`InputStats` 归 InputManager；
+  `LvglAdapterStats` 归 LvglInputAdapter；`WorkerStats` 归 PC SerialWorker；
+  `DiagnosticsRing`/`RttAggregate` 归 proto::runtime_stats。
+- 已删除重复事实源：`HeartbeatView`（heartbeatTimeouts 别名），PC/GUI 统一读
+  `SessionStats.pingTimeouts`。
+
+### AP.11 S3 portability boundaries
+
+- shared 三层零平台泄漏（Agent Q 复核：无 `#ifdef ESP32`、无 ESP-IDF API）。
+- 已知边界（接 S3 时必改点，M8-A4 不处理）：PhysicalRenderer 的 scale=2/5 与
+  crop 数学对 320x240 假设（换源分辨率需参数化）；ESP32 侧 UART0/GPIO 默认值
+  簇（Kconfig 驱动，classic-only range）；OLED Kconfig GPIO range；
+  `TransportType::kUsb=2` 为 S3 USB CDC 预留（AO.13，仅架构预留）。
+- shared/oled 的 128x64/1KB 几何已收敛为单一来源（AP.4），换面板分辨率属
+  协议级变更（AE.2 定长 1032B），需知悉。
+
+### AP.12 被 supersede 的过时段落
+
+本阶段不改写以下历史段落（保留演进记录），阅读时以 AP 章 + 代码为准：
+
+- D 节 D.1/D.2（DisplayManager/DisplayMode 时代接口）、F 节（早期 Display
+  pipeline 图）、K 节（早期 OLED 设计）、B.2（早期模式描述）、M 表标题
+  “M7-G 更新”应理解为“M8-A4 更新”；P.11 status_ui、Y/Z 节相关历史描述以
+  shared/oled 现状为准；display.h 头部“§31”引用以 AP 章为准。

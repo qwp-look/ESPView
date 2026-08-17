@@ -4,8 +4,7 @@
 cmake_minimum_required(VERSION 3.16)
 
 add_library(espview_display STATIC
-    display_manager.cpp
-    remote_display.cpp
+        remote_display.cpp
     display_router.cpp
     display_ui_state.cpp
     physical_status.cpp
@@ -16,9 +15,13 @@ target_include_directories(espview_display PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}
     ${CMAKE_CURRENT_SOURCE_DIR}/../protocol  # remote_display 依赖 message/encoder/endpoint 头
     ${CMAKE_CURRENT_SOURCE_DIR}/../transport # M8-A3：protocol_endpoint.h 引用 transport::SendStatus
+    ${CMAKE_CURRENT_SOURCE_DIR}/../oled     # M8-A4：physical_capability_snapshot 引用 oled_geometry.h（header-only，不链库）
 )
 target_compile_features(espview_display PUBLIC cxx_std_17)
 
 if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
     target_compile_options(espview_display PRIVATE -Wall -Wextra -Wpedantic)
 endif()
+
+
+

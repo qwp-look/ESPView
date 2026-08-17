@@ -36,7 +36,6 @@
 #include "freertos/task.h"
 #include "lvgl.h"
 
-#include "display_manager.h"
 #include "display_router.h"     // M7-C2：DisplayRouter（flush_cb 路由 / VirtualSink 接入）
 #include "lvgl_adapter.h"
 #include "remote_display.h"
@@ -100,8 +99,9 @@ public:
 
     // ---- 内存模型常量（公共：静态 draw buffer 与报告使用）----
 public:
-    static constexpr uint16_t kWidth = 320;
-    static constexpr uint16_t kHeight = 240;
+    // M8-A4：几何单一来源（shared/display display_geometry.h，经 display.h 引入）。
+    static constexpr uint16_t kWidth = static_cast<uint16_t>(espview::display::kVirtualDisplayGeometry.width);
+    static constexpr uint16_t kHeight = static_cast<uint16_t>(espview::display::kVirtualDisplayGeometry.height);
     static constexpr size_t kDrawBufPixels = kWidth * 24u;         // 1/10 屏
     static constexpr size_t kDrawBufferBytes = kDrawBufPixels * 2u;
     static constexpr size_t kQueueSlots = 2;
@@ -126,7 +126,7 @@ private:
     // EndpointSink 必须保持存活：RemoteDisplay 保存对它的引用（
     // 构造函数局部 shared_ptr 会被销毁→ dangling reference）
     std::shared_ptr<display::IFrameSink> sink_;
-    std::unique_ptr<display::DisplayManager> displayMgr_;
+
     std::shared_ptr<display::RemoteDisplay> remote_;
     // M7-C2：DisplayRouter（main 组装并 attach physical sink；本类 attach virtual）。
     std::shared_ptr<display::DisplayRouter> router_;

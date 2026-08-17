@@ -55,8 +55,8 @@ private:
 // M7-C2：VirtualSink —— IDisplaySink 适配 RemoteDisplay（LVGL flush_cb →
 // DisplayRouter → VirtualSink → RemoteDisplay，保持既有 writeRect/flush 契约
 // 不变）。isAvailable → RemoteDisplay connected（transport 会话）；status →
-// debugState 派生。lastPresentStatus() 供 flush_cb 在 Mirror/Split 下识别
-// Virtual 路径背压（Router 聚合结果可能被物理侧接受掩盖，见 flushCb）。
+// 最近一次操作状态（M8-A4：lastPresent_ 单一来源；Virtual 背压识别改由
+// Router::writeRectDetailed 提供，不再依赖本类扩展接口）。
 class VirtualSink : public display::IDisplaySink {
 public:
     explicit VirtualSink(std::shared_ptr<display::RemoteDisplay> remote)
@@ -94,12 +94,8 @@ public:
     }
     bool isAvailable() const override { return remote_->debugState().connected; }
     display::DisplayStatus status() const override {
-        return remote_->debugState().connected ? display::DisplayStatus::kOk
-                                               : display::DisplayStatus::kNotConnected;
+        return lastPresent_;
     }
-
-    // flush_cb 专用：最近一次 present() 的 Virtual 路径结果（初始 kOk）。
-    display::DisplayStatus lastPresentStatus() const { return lastPresent_; }
 
 private:
     std::shared_ptr<display::RemoteDisplay> remote_;
@@ -114,7 +110,7 @@ LvglPort::LvglPort(Sender sender, StreamingSender streamingSender,
     : sender_(std::move(sender)),
       streamingSender_(std::move(streamingSender)),
       router_(std::move(router)) {
-    // RemoteDisplay + DisplayManager（编译期 WINDOW 模式）。
+    // RemoteDisplay（M5-A：writeRect/dirty-rect 汇入后端）。
     sink_ = std::make_shared<EndpointSink>(sender_, streamingSender_);
     display::RemoteDisplay::Config cfg;
     cfg.width = kWidth;
@@ -126,9 +122,6 @@ LvglPort::LvglPort(Sender sender, StreamingSender streamingSender,
     remote_->setClock([]() -> uint64_t {
         return static_cast<uint64_t>(esp_timer_get_time() / 1000);
     });
-    displayMgr_ = std::make_unique<display::DisplayManager>();
-    displayMgr_->addBackend(remote_);
-
     // M7-C2：VirtualSink 适配 RemoteDisplay 并接入 DisplayRouter（main 组装
     // physical sink 后 setMode；VirtualOnly 纯透传零回归）。init 在 attach 前
     // 完成（display_sink.h 约定）。
@@ -240,21 +233,17 @@ void LvglPort::flushCb(lv_disp_drv_t* drv, const lv_area_t* area, lv_color_t* co
     //    VirtualOnly 纯透传零回归）。物理侧只做同步渲染（I2C 上传在 OLED 任务），
     //    flush_cb 不被物理侧阻塞 —— kQueueFull/kFrameBusy 等待只源于 Virtual 路径。
     display::DisplayStatus st;
+    display::DisplayRouter::RouteWriteResult routeResult;
     if (self->router_) {
-        st = self->router_->writeRect(display::Rect{x, y, w, h}, px);
-        // Mirror/Split 下 Router 聚合结果可能被物理侧接受掩盖 Virtual 背压：
-        // 若 Virtual 路径本轮确实背压，恢复既有等待/丢弃契约（VirtualOnly 时
-        // 两者等价；PhysicalOnly 时 Virtual 不在路径内，保持 kOk）。
-        if (self->router_->mode() != display::DisplayRouteMode::kPhysicalOnly) {
-            auto* vs = static_cast<VirtualSink*>(self->virtualSink_.get());
-            if (vs != nullptr) {
-                const display::DisplayStatus vsSt = vs->lastPresentStatus();
-                if ((vsSt == display::DisplayStatus::kQueueFull ||
-                     vsSt == display::DisplayStatus::kFrameBusy) &&
-                    st == display::DisplayStatus::kOk) {
-                    st = vsSt;
-                }
-            }
+        routeResult = self->router_->writeRectDetailed(display::Rect{x, y, w, h}, px);
+        st = routeResult.overall;
+        // M8-A4：Mirror/Split 下 Router 聚合结果可能被物理侧接受掩盖 Virtual
+        // 背压 —— 背压判断以 Virtual 路径状态为准（writeRectDetailed 逐路径
+        // 结果；PhysicalOnly 时 virtualInPath=false，无 Virtual 背压概念）。
+        if (routeResult.virtualInPath && routeResult.virtualStatus &&
+            (*routeResult.virtualStatus == display::DisplayStatus::kQueueFull ||
+             *routeResult.virtualStatus == display::DisplayStatus::kFrameBusy)) {
+            st = *routeResult.virtualStatus;
         }
     } else {
         st = self->remote_->writeRect(x, y, w, h, px);
@@ -272,7 +261,13 @@ void LvglPort::flushCb(lv_disp_drv_t* drv, const lv_area_t* area, lv_color_t* co
                 xSemaphoreTake(self->slotFreeSem_, pdMS_TO_TICKS(10));
             }
             if (self->router_) {
-                st = self->router_->writeRect(display::Rect{x, y, w, h}, px);
+                routeResult = self->router_->writeRectDetailed(display::Rect{x, y, w, h}, px);
+                st = routeResult.overall;
+                if (routeResult.virtualInPath && routeResult.virtualStatus &&
+                    (*routeResult.virtualStatus == display::DisplayStatus::kQueueFull ||
+                     *routeResult.virtualStatus == display::DisplayStatus::kFrameBusy)) {
+                    st = *routeResult.virtualStatus;
+                }
             } else {
                 st = self->remote_->writeRect(x, y, w, h, px);
             }

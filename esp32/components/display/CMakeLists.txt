@@ -4,7 +4,6 @@
 # 保证两端契约一致（同 protocol / input 组件模式）。
 idf_component_register(
     SRCS
-        "${CMAKE_CURRENT_LIST_DIR}/../../../shared/display/display_manager.cpp"
         "${CMAKE_CURRENT_LIST_DIR}/../../../shared/display/remote_display.cpp"
         "${CMAKE_CURRENT_LIST_DIR}/../../../shared/display/display_router.cpp"
     INCLUDE_DIRS

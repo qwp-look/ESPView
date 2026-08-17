@@ -162,11 +162,12 @@ espview::transport::TransportManager g_mgr(
     espview::transport::TransportType::kUart
 #endif
 );
-DisplayMode g_currentMode = DisplayMode::kWindow;
+display::DisplayRouteMode g_currentMode = display::DisplayRouteMode::kVirtualOnly;
 // M6-E §22：最近一次 Transport 状态快照（onTransportState 更新；供 statsLoop 诊断行）。
 std::atomic<uint8_t> g_transportState{0};  // ITransport::State::kDisconnected == 0
 // M3：ESP32 侧输入汇聚（RX 任务 feed / 会话任务 resetState，内部互斥）。
-espview::input::InputManager g_inputManager(320, 240);
+espview::input::InputManager g_inputManager(display::kVirtualDisplayGeometry.width,
+                           display::kVirtualDisplayGeometry.height);
 
 // M6-C/M6-D test-only：F12（HID 0x45）按下 → 请求运行时 Transport 切换（UART/TCP）
 // 的验收钩子（CONFIG_ESPVIEW_TEST_TRANSPORT_SWITCH，生产固件置 n）。
@@ -224,7 +225,7 @@ espview::oled::StatusSnapshot oledStatusSnapshot() {
     const SessionStats& st = g_endpoint.stats();
     snap.sessionState = static_cast<uint8_t>(g_endpoint.state());
     snap.frameCount = g_endpoint.frameStats().commits();
-    snap.errorCount = st.errors;
+    snap.sessionErrors = st.errors;
     snap.uptimeMs = monotonicMs();
     snap.freeHeap = esp_get_free_heap_size();
     snap.minFreeHeap = esp_get_minimum_free_heap_size();
@@ -363,18 +364,21 @@ void sendPhysicalPreviewMessage() {
     if (g_oled->isSuspendedForWifiScan()) {
         return;
     }
-    const auto payload = g_oled->previewSlot().makePhysicalPreviewPayload();
-    if (payload.empty()) {
+    // M8-A4 单编码路径：槽只提供稳定像素快照 + frameId（不重复编码 AE.2），
+    // info 由本层直接组装，经 protocol makePhysicalPreview 编码一次发送
+    // （消除 encode→parse→re-encode 往返与双编码器漂移，Agent E/L）。
+    uint8_t previewPixels[espview::oled::OledPreviewSlot::kSizeBytes];
+    uint16_t previewFrameId = 0;
+    if (!g_oled->previewSlot().snapshot(previewPixels, previewFrameId)) {
         return;  // 槽无效（未开始刷新/已 reset）
     }
-    // slot 载荷即 AE.2 1032B 布局：复用 parse 提取 info，再经 endpoint 发送。
     espview::proto::PhysicalPreviewInfo info;
-    if (!espview::proto::parsePhysicalPreview(
-            espview::proto::BytesView(payload.data(), payload.size()), info)) {
-        return;
-    }
-    const auto r = g_endpoint.sendPhysicalPreview(
-        info, payload.data() + espview::proto::kPhysicalPreviewPixelOffset);
+    info.frameId = previewFrameId;
+    info.width = espview::oled::OledPreviewSlot::kWidth;
+    info.height = espview::oled::OledPreviewSlot::kHeight;
+    info.pixelFormat = espview::proto::PhysicalPixelFormat::kMono1;
+    info.flags = 0;
+    const auto r = g_endpoint.sendPhysicalPreview(info, previewPixels);
     ESP_LOGD(kTag, "PREVIEW sent r=%d id=%u", static_cast<int>(r),
              static_cast<unsigned>(info.frameId));
 }
@@ -434,34 +438,33 @@ void onHello(const HelloInfo& hello) {
 }
 
 // ---- M7-C2：DisplayRouteMode 映射与模式应用（SET_MODE 与 test-only 钩子共用）----
-// SET_MODE（0..3）→ DisplayRouteMode 显式映射（值对齐 wire：0/1/2/3）。
-display::DisplayRouteMode routeModeOf(uint8_t mode) {
-    switch (mode) {
-        case 0: return display::DisplayRouteMode::kVirtualOnly;
-        case 1: return display::DisplayRouteMode::kPhysicalOnly;
-        case 2: return display::DisplayRouteMode::kMirror;
-        case 3: return display::DisplayRouteMode::kSplit;
-    }
-    return display::DisplayRouteMode::kVirtualOnly;  // 不可达（调用方已校验 0..3）
-}
+// wire byte → DisplayRouteMode 显式映射统一走 display::fromWireMode/toWireMode
+//（M8-A4 唯一转换点；禁止在本文件散落 switch int / static_cast）。
 
 // 模式 → PhysicalScene（M7-C2 定稿映射）：
 //   Mirror/PhysicalOnly → Application（OLED 显示 LVGL 应用缩略帧）；
 //   Split → Diagnostics；VirtualOnly → Diagnostics（应用帧禁用，诊断页继续）。
 // 仅 OLED_ENABLE 时使用（applyDisplayMode 内 PhysicalScene 仅存在于物理 sink 路径）。
 #if CONFIG_ESPVIEW_OLED_ENABLE
-display::PhysicalScene sceneOf(uint8_t mode) {
-    return (mode == 1 || mode == 2) ? display::PhysicalScene::kApplication
-                                    : display::PhysicalScene::kDiagnostics;
+display::PhysicalScene sceneOf(display::DisplayRouteMode rm) {
+    return (rm == display::DisplayRouteMode::kPhysicalOnly ||
+            rm == display::DisplayRouteMode::kMirror)
+               ? display::PhysicalScene::kApplication
+               : display::PhysicalScene::kDiagnostics;
 }
 #endif
 
 // 应用模式：白名单已由调用方校验（0..3）；Router 缺 physical sink 时
 // setMode 返回 kInvalidParam 且不崩溃（C1 语义；OLED=n 时 1/2/3 走此降级）。
 void applyDisplayMode(uint8_t mode) {
-    g_currentMode = static_cast<DisplayMode>(mode);
+    const auto rm = display::fromWireMode(mode);
+    if (!rm) {
+        ESP_LOGW(kTag, "applyDisplayMode invalid mode=%u", static_cast<unsigned>(mode));
+        return;
+    }
+    g_currentMode = *rm;
     if (g_router) {
-        const display::DisplayStatus rs = g_router->setMode(routeModeOf(mode));
+        const display::DisplayStatus rs = g_router->setMode(*rm);
         ESP_LOGI(kTag, "applyDisplayMode mode=%u router=%s state=%d", static_cast<unsigned>(mode),
                  rs == display::DisplayStatus::kOk ? "ok" : "err",
                  static_cast<int>(g_router->state()));
@@ -470,7 +473,7 @@ void applyDisplayMode(uint8_t mode) {
     }
 #if CONFIG_ESPVIEW_OLED_ENABLE
     if (g_physicalSink) {
-        g_physicalSink->setScene(sceneOf(mode));
+        g_physicalSink->setScene(sceneOf(*rm));
     }
 #endif
 }
@@ -925,8 +928,8 @@ void debugTransportSwitch() {
 // 0..3（0→1→2→3→0），与 SET_MODE 同一 applyDisplayMode 路径（白名单 + Router
 // setMode + PhysicalScene 映射）。状态经 ERROR 文本通道上报（非 wire 格式）。
 void debugModeSwitch() {
-    const uint8_t next = static_cast<uint8_t>(
-        (static_cast<uint8_t>(g_currentMode) + 1u) % 4u);
+    const uint8_t next =
+        static_cast<uint8_t>((display::toWireMode(g_currentMode) + 1u) % 4u);
     applyDisplayMode(next);
     char buf[64];
     std::snprintf(buf, sizeof(buf), "mod sw=%u st=%d scene=%d",

@@ -7,7 +7,7 @@
 //   y=16  "IP <ip|-->"            （仅 TCP 且 ip 非空显示 ip，否则 "--"）
 //   y=24  "RSSI <r> CH <c>"       （TCP + apInfoValid 才显示数值）
 //   y=32  "FRM <frameCount>"      （6 位 clamp）
-//   y=40  "ERR <errorCount>"      （6 位 clamp）
+//   y=40  "ERR <sessionErrors>"   （6 位 clamp）
 //   y=48  "HEAP <freeHeap>"       （8 位 clamp）
 //   y=56  "UP <HH:MM:SS>"         （小时 clamp 99）
 #pragma once
@@ -29,7 +29,7 @@ struct StatusSnapshot {
     int8_t rssi = -128;
     uint8_t channel = 0;
     uint64_t frameCount = 0;
-    uint64_t errorCount = 0;
+    uint64_t sessionErrors = 0;  // 会话/协议错误数（非 OLED I2C 错误；见 OledStatus.errorCount）
     uint64_t uptimeMs = 0;
     uint32_t freeHeap = 0;
     uint32_t minFreeHeap = 0;

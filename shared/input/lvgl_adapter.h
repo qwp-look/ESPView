@@ -78,7 +78,7 @@ public:
     // 再释放。必须 ≥1，保证 LVGL ~30ms 轮询至少观察到一次 PRESSED。
     static constexpr uint8_t kPointerClickHoldReads = 2;
 
-    explicit LvglInputAdapter(uint16_t displayWidth = 320, uint16_t displayHeight = 240);
+    explicit LvglInputAdapter(uint16_t displayWidth, uint16_t displayHeight);
 
     // 显示分辨率（与 InputManager::setDisplaySize 同步；坐标校验上界）。
     void setDisplaySize(uint16_t width, uint16_t height);

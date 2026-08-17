@@ -48,4 +48,22 @@ if(ESPVIEW_BUILD_TESTS)
     # M7-E: ScanTransaction host tests (shared/wifi).
     add_subdirectory(../wifi wifi_build)
     add_subdirectory(tests)
+
+    # M8-A4：Display/Input/OLED 收敛基准（任务书 §三十三）。依赖 display/input/
+    # oled 库（tests 块创建），故置于此；与 espview_protocol_bench 独立。
+    if(ESPVIEW_BUILD_BENCH)
+        add_executable(espview_m8a4_bench
+            ../bench/m8a4_bench.cpp
+            bench/counting_allocator.cpp
+        )
+        target_include_directories(espview_m8a4_bench PRIVATE
+            ${CMAKE_CURRENT_SOURCE_DIR}/bench
+        )
+        target_link_libraries(espview_m8a4_bench PRIVATE
+            espview_display espview_input espview_oled espview_protocol
+        )
+        if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+            target_compile_options(espview_m8a4_bench PRIVATE -Wall -Wextra -Wpedantic)
+        endif()
+    endif()
 endif()

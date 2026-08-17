@@ -24,7 +24,6 @@
 
 #include "decoder.h"
 #include "display.h"
-#include "display_manager.h"
 #include "encoder.h"
 #include "frame_assembler.h"
 #include "message.h"
@@ -38,7 +37,6 @@ namespace {
 
 using espview::display::DisplayConfig;
 using espview::display::DisplayInfo;
-using espview::display::DisplayManager;
 using espview::display::DisplayStatus;
 using espview::display::IFrameSink;
 using espview::display::RemoteDisplay;
@@ -569,25 +567,6 @@ void testPipelineCommit() {
     CHECK(sawAborted);
 }
 
-// DisplayManager：编译期 WINDOW 模式
-void testDisplayManager() {
-    auto sink = std::make_shared<RecordingSink>();
-    auto rd = std::make_shared<RemoteDisplay>(*sink, makeCfg());
-    DisplayManager mgr;
-    mgr.addBackend(rd);
-    CHECK(mgr.hasActive());
-    // active() 转发到 RemoteDisplay（Application 只见 DisplayManager）
-    const auto& info = mgr.active().info();
-    CHECK_EQ(info.width, 320);
-    CHECK_EQ(info.height, 240);
-    CHECK_EQ(static_cast<int>(mgr.setMode(espview::display::DisplayMode::kWindow)),
-             static_cast<int>(DisplayStatus::kOk));
-    CHECK_EQ(static_cast<int>(mgr.setMode(espview::display::DisplayMode::kDevice)),
-             static_cast<int>(DisplayStatus::kNotSupported));
-    CHECK_EQ(static_cast<int>(mgr.setMode(espview::display::DisplayMode::kMirror)),
-             static_cast<int>(DisplayStatus::kNotSupported));
-}
-
 // frameId 回绕（65535 → 0）
 void testFrameIdWrap() {
     RecordingSink sink;
@@ -628,6 +607,5 @@ void runRemoteDisplayTests() {
     testFlushLifecycle();
     testStatsDirtyRatio();
     testPipelineCommit();
-    testDisplayManager();
     testFrameIdWrap();
 }

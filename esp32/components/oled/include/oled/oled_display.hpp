@@ -122,7 +122,7 @@ public:
 
     // ---- M7-D2：Physical Preview 预览槽 ----
     // 内容确定点（taskLoop 上传 fb_ 后）写入；发送任务经
-    // makePhysicalPreviewPayload() 取 1032B PHYSICAL_PREVIEW 载荷并递增 frameId；
+    // snapshot() 取 1024B 稳定像素快照并递增 frameId（AE.2 编码归 protocol 层，M8-A4）；
     // reset() 由会话侧在握手/断线时调用（AE.3）。OLED 任务只 store，不触碰
     // transport；槽为无锁 seqlock，写者零自旋。
     OledPreviewSlot& previewSlot() { return previewSlot_; }

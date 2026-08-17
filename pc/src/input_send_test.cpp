@@ -955,7 +955,7 @@ int main(int argc, char** argv) {
                 static_cast<unsigned long long>(s.rxPing),
                 static_cast<unsigned long long>(s.txPong),
                 static_cast<unsigned long long>(s.rxPong),
-                static_cast<unsigned long long>(s.heartbeatTimeouts),
+                static_cast<unsigned long long>(s.pingTimeouts),
                 s.rtt.lastMs.has_value() ? 1 : 0,
                 static_cast<unsigned>(s.rtt.lastMs.value_or(0)),
                 static_cast<unsigned>(s.rtt.minMs), static_cast<unsigned>(s.rtt.avgMs),

@@ -51,16 +51,22 @@ inline constexpr uint32_t kHidKeyboardFirst = 0x04;  // A
 inline constexpr uint32_t kHidKeyboardLast = 0x65;   // Keypad =
 inline constexpr uint32_t kHidModifierFirst = 0xE0;  // Left Ctrl
 inline constexpr uint32_t kHidModifierLast = 0xE7;   // Right GUI
-inline constexpr uint32_t kHidUsageMax = 0xFFFF;
 
-inline constexpr uint16_t kHidUsageLeftCtrl = 0xE0;
-inline constexpr uint16_t kHidUsageLeftShift = 0xE1;
-inline constexpr uint16_t kHidUsageLeftAlt = 0xE2;
-inline constexpr uint16_t kHidUsageLeftGui = 0xE3;
-inline constexpr uint16_t kHidUsageRightCtrl = 0xE4;
-inline constexpr uint16_t kHidUsageRightShift = 0xE5;
-inline constexpr uint16_t kHidUsageRightAlt = 0xE6;
-inline constexpr uint16_t kHidUsageRightGui = 0xE7;
+// ---- 共享校验谓词（M8-A4 收敛：PC / InputManager / LVGL adapter 单一来源）----
+// HID usage 合法范围（DESIGN.md INPUT_KEY.keycode）：键盘区 0x04..0x65 ∪ 修饰键
+// 0xE0..0xE7。LVGL 支持范围 ≠ HID 合法范围（见 isSupportedLvglKey，hid_lvgl_keymap）。
+inline bool isValidHidUsage(uint32_t usage) {
+    return (usage >= kHidKeyboardFirst && usage <= kHidKeyboardLast) ||
+           (usage >= kHidModifierFirst && usage <= kHidModifierLast);
+}
+// 鼠标按钮掩码合法（INPUT_MOUSE.buttons <= 0x07）。
+inline bool isValidButtonMask(uint8_t buttons) { return (buttons & ~kMouseButtonMask) == 0; }
+// 修饰键掩码合法（INPUT_KEY.modifiers <= 0x0F）。
+inline bool isValidModifierMask(uint16_t modifiers) { return (modifiers & ~kModifierMask) == 0; }
+// 显示坐标边界（0 <= x < width && 0 <= y < height；width/height 为分辨率）。
+inline bool isPointInDisplayBounds(uint16_t x, uint16_t y, uint16_t width, uint16_t height) {
+    return x < width && y < height;
+}
 
 struct InputEvent {
     InputType type = InputType::kMouseMove;

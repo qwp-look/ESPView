@@ -36,14 +36,21 @@ void appendTail(std::vector<uint8_t>& cmds) {
 // 实机修正（2026-08-15）：本模块在 0xA0/0xA1 segment remap 下均呈现水平镜像
 // （控制器疑似忽略 remap 命令），按页反转列序可确定性消除镜像——地址列 C
 // 接收 fb 列 (127-C)，无论 SEG0 物理位于哪一端，fb 左列都落在屏幕左侧。
+//
+// M8-A4：页内列序反转收敛为单一 helper（writeReversedPage），SSD1306 整块
+// 构建与 SH1106 分段上传共用，消除两份镜像实现。
+void writeReversedPage(uint8_t* dst, const uint8_t* page, size_t width) {
+    for (size_t i = 0; i < width; ++i) {
+        dst[i] = page[width - 1 - i];
+    }
+}
+
 std::vector<uint8_t> buildFbUploadData(const OledFb& fb) {
     std::vector<uint8_t> out;
-    out.reserve(OledFb::kSizeBytes);
+    out.resize(OledFb::kSizeBytes);
     for (int p = 0; p < OledFb::kPageCount; ++p) {
-        const uint8_t* page = fb.page(p);
-        for (int x = OledFb::kWidth - 1; x >= 0; --x) {
-            out.push_back(page[x]);
-        }
+        writeReversedPage(out.data() + static_cast<size_t>(p) * static_cast<size_t>(OledFb::kWidth),
+                          fb.page(p), static_cast<size_t>(OledFb::kWidth));
     }
     return out;
 }
@@ -127,8 +134,11 @@ std::vector<WireSegment> segmentFrameUpload(const OledFb& fb, ControllerType c,
             cmd.push_back(static_cast<uint8_t>(0x10 | ((colStart >> 4) & 0x0F)));
             out.push_back(std::move(cmd));
 
-            const uint8_t* pageData = fb.page(p);
-            // 页内列序反转（与 SSD1306 分支同语义：地址列 ← fb 列 127-x）。
+            // M8-A4：列序反转统一走 writeReversedPage（与 SSD1306 整块同
+            // helper）；128B 栈缓冲，无堆分配。
+            uint8_t reversedPage[OledFb::kWidth];
+            writeReversedPage(reversedPage, fb.page(p),
+                              static_cast<size_t>(OledFb::kWidth));
             size_t off = 0;
             while (off < static_cast<size_t>(OledFb::kWidth)) {
                 const size_t n = std::min(maxPayload,
@@ -136,9 +146,7 @@ std::vector<WireSegment> segmentFrameUpload(const OledFb& fb, ControllerType c,
                 WireSegment seg;
                 seg.reserve(n + 1);
                 seg.push_back(kCtrlData);
-                for (size_t k = 0; k < n; ++k) {
-                    seg.push_back(pageData[OledFb::kWidth - 1 - (off + k)]);
-                }
+                seg.insert(seg.end(), reversedPage + off, reversedPage + off + n);
                 out.push_back(std::move(seg));
                 off += n;
             }

@@ -84,9 +84,16 @@ DisplayStatus DisplayRouter::setMode(DisplayRouteMode mode) {
 }
 
 DisplayStatus DisplayRouter::writeRect(const Rect& rect, const uint8_t* pixels) {
+    return writeRectDetailed(rect, pixels).overall;
+}
+
+DisplayRouter::RouteWriteResult DisplayRouter::writeRectDetailed(
+    const Rect& rect, const uint8_t* pixels) {
+    RouteWriteResult out;
     std::lock_guard<std::mutex> lock(mutex_);
     if (state_ != RouterState::kConnected && state_ != RouterState::kDegraded) {
-        return DisplayStatus::kNotEnabled;  // kIdle / kSwitching：输出未就绪
+        out.overall = DisplayStatus::kNotEnabled;  // kIdle / kSwitching：输出未就绪
+        return out;
     }
     // Split：应用帧只走 virtual（物理侧经 presentScene 收独立场景帧）。
     const bool virtualGetsApp = mode_ != DisplayRouteMode::kPhysicalOnly;
@@ -97,6 +104,8 @@ DisplayStatus DisplayRouter::writeRect(const Rect& rect, const uint8_t* pixels) 
     bool anyAccepted = false;
     if (virtualGetsApp && virtual_ && virtual_->isAvailable()) {
         const DisplayStatus s = virtual_->present(rect, pixels);
+        out.virtualInPath = true;
+        out.virtualStatus = s;
         if (s == DisplayStatus::kOk) {
             anyAccepted = true;
         } else if (firstError == DisplayStatus::kNotConnected) {
@@ -105,6 +114,7 @@ DisplayStatus DisplayRouter::writeRect(const Rect& rect, const uint8_t* pixels) 
     }
     if (physicalGetsApp && physical_ && physical_->isAvailable()) {
         const DisplayStatus s = physical_->present(rect, pixels);
+        out.physicalStatus = s;
         if (s == DisplayStatus::kOk) {
             anyAccepted = true;
         } else if (firstError == DisplayStatus::kNotConnected) {
@@ -112,7 +122,8 @@ DisplayStatus DisplayRouter::writeRect(const Rect& rect, const uint8_t* pixels) 
         }
     }
     reconcileStateLocked();
-    return anyAccepted ? DisplayStatus::kOk : firstError;
+    out.overall = anyAccepted ? DisplayStatus::kOk : firstError;
+    return out;
 }
 
 DisplayStatus DisplayRouter::flush() {

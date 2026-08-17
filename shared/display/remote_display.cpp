@@ -291,19 +291,24 @@ bool RemoteDisplay::pump() {
         }
     }
     if (needAbortEnd) {
-        sink_.send(proto::makeFrameEnd(endId, endRects, endBytes, true));  // 锁外
+        const proto::SendResult r = sink_.send(
+            proto::makeFrameEnd(endId, endRects, endBytes, true));  // 锁外
+        if (r != proto::SendResult::kOk) {
+            needFull_ = true;  // ABORTED END 未上 wire：PC 仍见开放帧，下一帧 FULL resync
+        }
         return true;
     }
     if (needEnd) {
         const proto::SendResult r = sink_.send(
             proto::makeFrameEnd(endId, endRects, endBytes, false));
         const uint64_t now = nowMs_();
-        {
+        if (r == proto::SendResult::kOk) {
             std::lock_guard<std::mutex> lock(mutex_);
             updateLastFrameLocked(endType, endRects, endBytes,
                                   now > endBeginMs ? now - endBeginMs : 0);
+        } else {
+            needFull_ = true;  // END 未上 wire：PC 仍见开放帧，下一帧 FULL resync；不虚增统计
         }
-        (void)r;
         return true;
     }
 
@@ -426,19 +431,24 @@ bool RemoteDisplay::pump() {
             }
         }
         if (needAbortEnd) {
-            sink_.send(proto::makeFrameEnd(endId, endRects, endBytes, true));
+            const proto::SendResult r = sink_.send(
+                proto::makeFrameEnd(endId, endRects, endBytes, true));
+            if (r != proto::SendResult::kOk) {
+                needFull_ = true;  // ABORTED END 未上 wire：下一帧 FULL resync
+            }
             return true;
         }
         if (needEnd) {
             const proto::SendResult r = sink_.send(
                 proto::makeFrameEnd(endId, endRects, endBytes, false));
             const uint64_t now = nowMs_();
-            {
+            if (r == proto::SendResult::kOk) {
                 std::lock_guard<std::mutex> lock(mutex_);
                 updateLastFrameLocked(endType, endRects, endBytes,
                                       now > endBeginMs ? now - endBeginMs : 0);
+            } else {
+                needFull_ = true;  // END 未上 wire：下一帧 FULL resync；不虚增统计
             }
-            (void)r;
             return true;
         }
     }

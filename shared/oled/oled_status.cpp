@@ -62,7 +62,7 @@ void renderStatus(OledFb& fb, const StatusSnapshot& s) {
     fb.drawText(0, 32, line);
 
     std::snprintf(line, sizeof(line), "ERR %llu",
-                  static_cast<unsigned long long>(clampDigits(s.errorCount, 6)));
+                  static_cast<unsigned long long>(clampDigits(s.sessionErrors, 6)));
     fb.drawText(0, 40, line);
 
     std::snprintf(line, sizeof(line), "HEAP %lu",

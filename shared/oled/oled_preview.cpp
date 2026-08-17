@@ -18,6 +18,7 @@ void OledPreviewSlot::store(const uint8_t* src1024) {
     if (src1024 == nullptr) {
         return;  // 非法指针：no-op
     }
+    std::lock_guard<std::mutex> lock(writeMutex_);  // 写者互斥（vs reset）
     publish(src1024);
     valid_.store(true, std::memory_order_release);
 }
@@ -31,29 +32,12 @@ bool OledPreviewSlot::snapshot(uint8_t* out1024, uint16_t& outFrameId) {
 }
 
 void OledPreviewSlot::reset() {
+    std::lock_guard<std::mutex> lock(writeMutex_);  // 写者互斥（vs store）
     valid_.store(false, std::memory_order_release);
     frameId_.store(0, std::memory_order_relaxed);  // frameId 归零（AE.3：握手重置 frameId/清槽）
     publish(nullptr);  // 全零覆盖（与 store 同一发布协议，读者看不到半清状态）
 }
 
-std::vector<uint8_t> OledPreviewSlot::makePhysicalPreviewPayload(
-    uint16_t width, uint16_t height, uint8_t pixelFormat, uint8_t flags) {
-    std::vector<uint8_t> payload(kPayloadSizeBytes, 0);
-    if (!copySlot(payload.data() + 8)) {
-        return {};  // 槽无效：空向量 = 本帧无内容，调用方跳过发送
-    }
-    const uint16_t frameId = frameId_.fetch_add(1, std::memory_order_relaxed);  // 取最新 frameId
-    // AE.2：多字节字段一律小端（LE）。
-    payload[0] = static_cast<uint8_t>(frameId & 0xFFu);
-    payload[1] = static_cast<uint8_t>((frameId >> 8) & 0xFFu);
-    payload[2] = static_cast<uint8_t>(width & 0xFFu);
-    payload[3] = static_cast<uint8_t>((width >> 8) & 0xFFu);
-    payload[4] = static_cast<uint8_t>(height & 0xFFu);
-    payload[5] = static_cast<uint8_t>((height >> 8) & 0xFFu);
-    payload[6] = pixelFormat;
-    payload[7] = flags;
-    return payload;
-}
 
 bool OledPreviewSlot::valid() const {
     return valid_.load(std::memory_order_acquire);

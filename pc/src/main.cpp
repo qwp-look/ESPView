@@ -205,7 +205,7 @@ public:
         connect(modeWidget_, &DisplayModeWidget::applyRequested, this,
                 [this](int mode) {
                     screen_->clearDisplay();  // §五：切换先清陈旧镜像（旧模式帧不残留）
-                    manager_.sendDisplayMode(static_cast<uint8_t>(mode));
+                    manager_.sendDisplayMode(espview::display::toWireMode(mode));
                     modeSwitchStartMs_ = steadyMs();
                     modeWatchdog_->start();
                     syncModeStateToUi();
@@ -374,7 +374,7 @@ private slots:
             }
             modeWidget_->setUiState(s);
             if (needsAutoSend) {
-                manager_.sendDisplayMode(static_cast<uint8_t>(s.selectedMode));
+                manager_.sendDisplayMode(espview::display::toWireMode(s.selectedMode));
                 modeSwitchStartMs_ = steadyMs();
                 modeWatchdog_->start();
             }
@@ -494,7 +494,7 @@ private slots:
                               .arg(st.pingReceived)
                               .arg(st.pongSent)
                               .arg(st.pongReceived)
-                              .arg(st.heartbeatTimeouts));
+                              .arg(st.pingTimeouts));
         if (st.rttValid) {
             rttLabel_->setText(tr_("%1 ms (min %2 / avg %3 / max %4, n=%5)")
                                    .arg(st.rttMs)

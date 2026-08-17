@@ -109,7 +109,7 @@ struct WorkerStats {
     uint64_t pingReceived = 0;
     uint64_t pongSent = 0;
     uint64_t pongReceived = 0;
-    uint64_t heartbeatTimeouts = 0;
+    uint64_t pingTimeouts = 0;      // 对端心跳超时次数（SessionStats.pingTimeouts）
     uint64_t lastPingTimeMs = 0;
     uint64_t lastPongTimeMs = 0;
     bool rttValid = false;            // 最近一次 PING→PONG 是否有有效测量

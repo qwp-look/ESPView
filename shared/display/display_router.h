@@ -51,8 +51,11 @@
 #include <functional>
 #include <memory>
 #include <mutex>
+#include <optional>
 
 #include "display.h"               // DisplayStatus
+
+#include "protocol.h"
 #include "display_capabilities.h"  // DisplaySinkKind
 #include "display_sink.h"          // IDisplaySink / Rect
 
@@ -60,13 +63,43 @@ namespace espview {
 namespace display {
 
 // 路由模式（值与 wire SET_MODE.mode 对齐：0/1/2/3 =
-// DisplayMode kWindow/kDevice/kMirror/kSplit）。
+// proto::DisplayMode kWindow/kDevice/kMirror/kSplit）。
 enum class DisplayRouteMode : uint8_t {
     kVirtualOnly = 0,
     kPhysicalOnly = 1,
     kMirror = 2,
     kSplit = 3,
 };
+
+// ---- wire SET_MODE.mode 显式转换（M8-A4：唯一转换点，禁止散落 static_cast）----
+// DisplayRouteMode ↔ wire byte 0..3（proto::DisplayMode 值）。proto::DisplayMode
+// 是 wire 侧唯一权威；本组函数是 shared/display 与 wire 的边界转换，PC/ESP32
+// 一律经此转换（§八「只保留一个 canonical mode，其他层经 conversion 映射」）。
+inline uint8_t toWireMode(DisplayRouteMode mode) {
+    switch (mode) {
+        case DisplayRouteMode::kVirtualOnly: return 0;
+        case DisplayRouteMode::kPhysicalOnly: return 1;
+        case DisplayRouteMode::kMirror: return 2;
+        case DisplayRouteMode::kSplit: return 3;
+    }
+    return 0;  // 不可达（enum 全覆盖）
+}
+
+// DisplayRouteMode → wire 协议枚举（单一集中转换点；依赖 toWireMode 的映射）。
+inline proto::DisplayMode toProtoMode(DisplayRouteMode mode) {
+    return static_cast<proto::DisplayMode>(toWireMode(mode));
+}
+
+// wire byte → DisplayRouteMode；非法值（>3）返回 nullopt（调用方拒绝）。
+inline std::optional<DisplayRouteMode> fromWireMode(uint8_t wire) {
+    switch (wire) {
+        case 0: return DisplayRouteMode::kVirtualOnly;
+        case 1: return DisplayRouteMode::kPhysicalOnly;
+        case 2: return DisplayRouteMode::kMirror;
+        case 3: return DisplayRouteMode::kSplit;
+        default: return std::nullopt;
+    }
+}
 
 // 物理侧场景（C2 预留）：Split 模式下物理 sink 的独立内容来源。
 enum class PhysicalScene : uint8_t {
@@ -112,6 +145,18 @@ public:
 
     // ---- 生产者路径（Application / LVGL 侧）----
     DisplayStatus writeRect(const Rect& rect, const uint8_t* pixels);
+
+    // M8-A4：writeRect 的逐路径结果（lvgl flush_cb 判断 Virtual 背压用）。
+    // 聚合规则不变（任一启用且可用的 sink 成功 → overall kOk）；extra 字段
+    // 只报告「实际被调用」的路径状态：virtualInPath=false 表示 Virtual 不在
+    // 应用帧路径（PhysicalOnly）或不可用（未调用 present）。
+    struct RouteWriteResult {
+        DisplayStatus overall = DisplayStatus::kNotEnabled;
+        bool virtualInPath = false;
+        std::optional<DisplayStatus> virtualStatus;
+        std::optional<DisplayStatus> physicalStatus;
+    };
+    RouteWriteResult writeRectDetailed(const Rect& rect, const uint8_t* pixels);
     DisplayStatus flush();
 
     // ---- C2 预留：Split 模式下物理侧独立场景帧 ----

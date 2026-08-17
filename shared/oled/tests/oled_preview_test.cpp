@@ -1,17 +1,17 @@
 // ESPView M7-D2 — OledPreviewSlot Host Tests。
 //
-// 覆盖：
-//   1. 无效槽：fresh / reset 后 snapshot=false、payload 空、valid()=false；
-//      store(nullptr) no-op；
+// 覆盖（M8-A4：AE.2 编码已归 protocol 层，本测试只验证槽语义）：
+//   1. 无效槽：fresh / reset 后 snapshot=false、valid()=false；store(nullptr) no-op；
 //   2. store→snapshot 往返：1KB 逐字节一致 + frameId 递增（0 起）；
-//   3. payload AE.2 布局逐字段断言：frameId/width/height LE、pixelFormat/flags、
-//      1024B 像素逐字节；非默认头参数编码；
-//   4. 覆盖合并：store 两次只留最新（snapshot 与 payload 像素均为后帧）；
+//   3. frameId 长序列递增 + 高字节回绕（AE.2 0..65535）；
+//   4. 覆盖合并：store 两次只留最新（snapshot 像素为后帧）；
 //   5. reset 清零：valid 清除、snapshot 拒绝、frameId 归零（复位后首帧 id=0）；
 //   6. frameId 回绕：0..65535 → 0；
 //   7. 并发 seqlock 不撕裂：写线程交替 store(A)/store(B)，读线程并发
-//      snapshot/payload，任何成功帧像素必须完整等于 A 或 B（无混合/半帧），
-//      frameId 严格 +1。
+//      snapshot，任何成功帧像素必须完整等于 A 或 B（无混合/半帧），
+//      frameId 严格 +1；
+//   8. M8-A4 写者互斥回归：store 与 reset 双线程并发，槽内容必须始终是
+//      某次完整发布（A/B/全零），不得撕裂（修复 Agent C/K 双写者竞态）。
 // 纯 C++17，零平台依赖；独立可执行（CMake 目标 oled_preview_test，定义
 // OLED_PREVIEW_TEST_MAIN 提供 main），亦可并入 shared/protocol host 套件
 // （去掉该定义后由 test_main.cpp 调用 runOledPreviewTests()）。
@@ -31,22 +31,16 @@ namespace {
 
 using espview::oled::OledPreviewSlot;
 
-constexpr size_t kPixelsOffset = 8;
-
-// 全字节填充模式（与 OledFb 页式无关，仅验证槽复制/编码的字节保真）。
+// 全字节填充模式（与 OledFb 页式无关，仅验证槽复制字节保真）。
 void fillPattern(uint8_t* dst, uint8_t seed) {
     for (size_t i = 0; i < OledPreviewSlot::kSizeBytes; ++i) {
         dst[i] = static_cast<uint8_t>(seed + static_cast<uint8_t>(i));
     }
 }
 
-bool payloadPixelsMatch(const std::vector<uint8_t>& payload,
-                        const uint8_t* expected) {
-    if (payload.size() != OledPreviewSlot::kPayloadSizeBytes) {
-        return false;
-    }
-    return std::memcmp(payload.data() + kPixelsOffset, expected,
-                       OledPreviewSlot::kSizeBytes) == 0;
+// 帧字节是否完整等于某参考帧（撕裂检测用）。
+bool bytesEqual(const uint8_t* lhs, const uint8_t* rhs) {
+    return std::memcmp(lhs, rhs, OledPreviewSlot::kSizeBytes) == 0;
 }
 
 // ---- 1. 无效槽 ----
@@ -58,7 +52,6 @@ void invalidSlotRejects() {
     uint16_t fid = 0xABCD;
     CHECK(!slot.snapshot(out, fid));
     CHECK_EQ(fid, uint16_t(0xABCD));  // 失败不触碰 out param
-    CHECK(slot.makePhysicalPreviewPayload().empty());
     // 非法出参：拒绝且不崩溃。
     CHECK(!slot.snapshot(nullptr, fid));
 }
@@ -67,7 +60,6 @@ void storeNullIsNoop() {
     OledPreviewSlot slot;
     slot.store(nullptr);
     CHECK(!slot.valid());
-    CHECK(slot.makePhysicalPreviewPayload().empty());
     uint8_t out[OledPreviewSlot::kSizeBytes] = {};
     uint16_t fid = 0;
     CHECK(!slot.snapshot(out, fid));
@@ -95,51 +87,23 @@ void storeSnapshotRoundTrip() {
     CHECK(std::memcmp(out2, src, OledPreviewSlot::kSizeBytes) == 0);
 }
 
-// ---- 3. payload AE.2 布局 ----
+// ---- 3. frameId 长序列递增（高字节非零）+ 字节保真 ----
 
-void payloadLayout() {
+void snapshotFrameIdAdvances() {
     OledPreviewSlot slot;
     uint8_t src[OledPreviewSlot::kSizeBytes] = {};
     fillPattern(src, 0x5A);
     slot.store(src);
 
-    // 推进 frameId 到 257（快照返回 0..256），使 frameId 高字节非零。
+    // 推进 frameId 到 257（快照返回 0..256），使 frameId 高字节非零
+    // （AE.2 编码由 protocol 层负责，本层只保证计数与字节保真）。
     uint8_t out[OledPreviewSlot::kSizeBytes] = {};
     for (uint16_t i = 0; i < 257; ++i) {
         uint16_t fid = 0;
         CHECK(slot.snapshot(out, fid));
         CHECK_EQ(fid, i);
     }
-    CHECK(std::memcmp(out, src, OledPreviewSlot::kSizeBytes) == 0);
-
-    const std::vector<uint8_t> payload = slot.makePhysicalPreviewPayload();
-    CHECK_EQ(payload.size(), size_t(OledPreviewSlot::kPayloadSizeBytes));
-    // frameId = 257 = 0x0101 → LE {0x01, 0x01}（取最新，已递增）。
-    CHECK_EQ(int(payload[0]), 0x01);
-    CHECK_EQ(int(payload[1]), 0x01);
-    // width 128 = 0x0080 → LE {0x80, 0x00}。
-    CHECK_EQ(int(payload[2]), 0x80);
-    CHECK_EQ(int(payload[3]), 0x00);
-    // height 64 = 0x0040 → LE {0x40, 0x00}。
-    CHECK_EQ(int(payload[4]), 0x40);
-    CHECK_EQ(int(payload[5]), 0x00);
-    CHECK_EQ(int(payload[6]), int(OledPreviewSlot::kMono1));
-    CHECK_EQ(int(payload[7]), 0);
-    CHECK(payloadPixelsMatch(payload, src));
-
-    // 非默认头参数（pixelFormat/flags/自定义 width/height）原样编码。
-    const std::vector<uint8_t> custom =
-        slot.makePhysicalPreviewPayload(100, 50, 2, 0x03);
-    CHECK_EQ(custom.size(), size_t(OledPreviewSlot::kPayloadSizeBytes));
-    CHECK_EQ(int(custom[0]), 0x02);  // frameId 258 = 0x0102 → LE {0x02, 0x01}
-    CHECK_EQ(int(custom[1]), 0x01);
-    CHECK_EQ(int(custom[2]), 100);
-    CHECK_EQ(int(custom[3]), 0);
-    CHECK_EQ(int(custom[4]), 50);
-    CHECK_EQ(int(custom[5]), 0);
-    CHECK_EQ(int(custom[6]), 2);
-    CHECK_EQ(int(custom[7]), 0x03);
-    CHECK(payloadPixelsMatch(custom, src));
+    CHECK(bytesEqual(out, src));
 }
 
 // ---- 4. 覆盖合并（store 两次只留最新）----
@@ -156,12 +120,8 @@ void storeOverwriteKeepsLatest() {
     uint8_t out[OledPreviewSlot::kSizeBytes] = {};
     uint16_t fid = 0;
     CHECK(slot.snapshot(out, fid));
-    CHECK(std::memcmp(out, b, OledPreviewSlot::kSizeBytes) == 0);
-    CHECK(std::memcmp(out, a, OledPreviewSlot::kSizeBytes) != 0);
-
-    const std::vector<uint8_t> payload = slot.makePhysicalPreviewPayload();
-    CHECK(payloadPixelsMatch(payload, b));
-    CHECK(!payloadPixelsMatch(payload, a));
+    CHECK(bytesEqual(out, b));
+    CHECK(!bytesEqual(out, a));
 }
 
 // ---- 5. reset 清零 ----
@@ -180,7 +140,6 @@ void resetClearsSlotAndFrameId() {
     slot.reset();
     CHECK(!slot.valid());
     CHECK(!slot.snapshot(out, fid));  // 拒绝读取
-    CHECK(slot.makePhysicalPreviewPayload().empty());
 
     // reset 后重新 store：frameId 归零（新首帧 id = 0）。
     slot.store(src);
@@ -253,28 +212,12 @@ void concurrentNoTornFrames() {
         uint8_t out[OledPreviewSlot::kSizeBytes] = {};
         for (int i = 0; i < kReadIters; ++i) {
             uint16_t fid = 0;
-            if ((i & 1) == 0) {
-                if (!slot.snapshot(out, fid)) {
-                    ++dropped;  // 仅写者极端连发（µs 级）时可能发生
-                    continue;
-                }
-                CHECK((std::memcmp(out, a, OledPreviewSlot::kSizeBytes) == 0) ||
-                      (std::memcmp(out, b, OledPreviewSlot::kSizeBytes) == 0));
-            } else {
-                const std::vector<uint8_t> payload = slot.makePhysicalPreviewPayload();
-                if (payload.empty()) {
-                    ++dropped;
-                    continue;
-                }
-                CHECK_EQ(payload.size(), size_t(OledPreviewSlot::kPayloadSizeBytes));
-                CHECK_EQ(int(payload[2]), int(OledPreviewSlot::kWidth) & 0xFF);
-                CHECK_EQ(int(payload[4]), int(OledPreviewSlot::kHeight) & 0xFF);
-                CHECK_EQ(int(payload[6]), int(OledPreviewSlot::kMono1));
-                CHECK_EQ(int(payload[7]), 0);
-                CHECK(payloadPixelsMatch(payload, a) || payloadPixelsMatch(payload, b));
-                fid = static_cast<uint16_t>(payload[0] |
-                                            (static_cast<uint16_t>(payload[1]) << 8));
+            if (!slot.snapshot(out, fid)) {
+                ++dropped;  // 仅写者极端连发（µs 级）时可能发生
+                continue;
             }
+            // 任何成功帧像素必须完整等于 A 或 B（无混合/半帧）。
+            CHECK(bytesEqual(out, a) || bytesEqual(out, b));
             // frameId 严格 +1（每次成功读恰好消耗一个 id）。
             CHECK_EQ(int(fid), last + 1);
             last = fid;
@@ -294,6 +237,82 @@ void concurrentNoTornFrames() {
     reader.join();
 }
 
+// ---- 8. M8-A4 回归：store/reset 双写者互斥（修复 Agent C/K 竞态）----
+// 修复前 store（OLED 任务）与 reset（会话状态回调任务）并发会撕裂 seqlock
+// 奇偶序列 + 槽字节；修复后 writeMutex_ 串行化写者。本测试让两写者并发，
+// 读线程只允许看到 A / B / 全零三种完整帧之一（无撕裂），且槽状态自洽。
+void concurrentStoreResetWriters() {
+    OledPreviewSlot slot;
+    uint8_t a[OledPreviewSlot::kSizeBytes];
+    uint8_t b[OledPreviewSlot::kSizeBytes];
+    std::memset(a, 0xA5, sizeof(a));
+    std::memset(b, 0x5A, sizeof(b));
+    slot.store(a);
+
+    std::atomic<bool> start{false};
+    std::atomic<int> storeDone{0};
+    std::atomic<int> resetDone{0};
+    constexpr int kStoreIters = 2000;
+    constexpr int kResetIters = 200;
+    constexpr int kReadIters = 4000;
+
+    std::thread storer([&]() {
+        while (!start.load(std::memory_order_acquire)) {
+            std::this_thread::yield();
+        }
+        for (int i = 0; i < kStoreIters; ++i) {
+            slot.store((i & 1) == 0 ? a : b);
+            ++storeDone;
+        }
+    });
+    std::thread reseter([&]() {
+        while (!start.load(std::memory_order_acquire)) {
+            std::this_thread::yield();
+        }
+        for (int i = 0; i < kResetIters; ++i) {
+            slot.reset();
+            ++resetDone;
+        }
+    });
+    std::thread reader([&]() {
+        while (!start.load(std::memory_order_acquire)) {
+            std::this_thread::yield();
+        }
+        int drops = 0;
+        uint8_t zero[OledPreviewSlot::kSizeBytes] = {};
+        uint8_t out[OledPreviewSlot::kSizeBytes] = {};
+        for (int i = 0; i < kReadIters; ++i) {
+            uint16_t fid = 0;
+            if (!slot.snapshot(out, fid)) {
+                ++drops;  // 写者互斥下失败只来自复位窗口（valid=false）
+                continue;
+            }
+            // 只允许完整帧：A / B / 全零（reset 发布），禁止混合。
+            CHECK(bytesEqual(out, a) || bytesEqual(out, b) ||
+                  bytesEqual(out, zero));
+        }
+        CHECK(drops >= 0);
+    });
+
+    start.store(true, std::memory_order_release);
+    storer.join();
+    reseter.join();
+    reader.join();
+    CHECK_EQ(storeDone.load(std::memory_order_relaxed), kStoreIters);
+    CHECK_EQ(resetDone.load(std::memory_order_relaxed), kResetIters);
+    // 终止后状态自洽：valid 与 snapshot 一致。
+    if (slot.valid()) {
+        uint8_t out[OledPreviewSlot::kSizeBytes] = {};
+        uint16_t fid = 0;
+        CHECK(slot.snapshot(out, fid));
+        CHECK(bytesEqual(out, a) || bytesEqual(out, b));
+    } else {
+        uint8_t out[OledPreviewSlot::kSizeBytes] = {};
+        uint16_t fid = 0;
+        CHECK(!slot.snapshot(out, fid));
+    }
+}
+
 }  // namespace
 
 // M7-D2：供 shared/protocol host 套件调用（test_main.cpp 声明）；独立目标
@@ -302,11 +321,12 @@ void runOledPreviewTests() {
     invalidSlotRejects();
     storeNullIsNoop();
     storeSnapshotRoundTrip();
-    payloadLayout();
+    snapshotFrameIdAdvances();
     storeOverwriteKeepsLatest();
     resetClearsSlotAndFrameId();
     frameIdWraps();
     concurrentNoTornFrames();
+    concurrentStoreResetWriters();
 }
 
 #if defined(OLED_PREVIEW_TEST_MAIN)

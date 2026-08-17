@@ -863,7 +863,7 @@ void printStats(Harness& h, uint64_t totalMs, bool pass) {
                 static_cast<unsigned long long>(stats.rxPing),
                 static_cast<unsigned long long>(stats.txPong),
                 static_cast<unsigned long long>(stats.rxPong),
-                static_cast<unsigned long long>(stats.heartbeatTimeouts),
+                static_cast<unsigned long long>(stats.pingTimeouts),
                 stats.rtt.lastMs.has_value() ? 1 : 0,
                 static_cast<unsigned>(stats.rtt.lastMs.value_or(0)),
                 static_cast<unsigned>(stats.rtt.minMs), static_cast<unsigned>(stats.rtt.avgMs),

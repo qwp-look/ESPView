@@ -49,5 +49,10 @@ public:
     static const char* keyName(uint32_t lvglKey);
 };
 
+// LVGL 能力分层（M8-A4）：HID 合法范围（isValidHidUsage）≠ LVGL 支持范围。
+// 返回该 HID usage 是否可映射为 LVGL 键（= mapKey 成功）；修饰键 / F 键 /
+// PageUp 等 LVGL v8 不表达的能力返回 false。供 host 断言与文档对照。
+bool isSupportedLvglKey(uint32_t hidUsage);
+
 }  // namespace input
 }  // namespace espview

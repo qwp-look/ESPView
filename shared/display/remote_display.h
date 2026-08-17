@@ -83,7 +83,7 @@ public:
     // 默认：320x240 RGB565；2 槽 × 15360B（= 1/10 屏 320x24，一个 LVGL flush 区域）。
     struct Config : public DisplayConfig {
         size_t queueSlots = 2;                 // 矩形槽数量（bounded TX queue）
-        size_t slotPixelBytes = 320u * 24u * 2u;  // 单槽像素容量
+        size_t slotPixelBytes = 320u * 24u * 2u;  // 单槽像素容量（1/10 屏 band）
     };
 
     // nowMs：单调毫秒时钟（统计用）。默认 steady_clock；ESP32 注入 esp_timer。

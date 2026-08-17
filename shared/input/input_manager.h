@@ -53,7 +53,7 @@ struct InputStats {
 
 class InputManager {
 public:
-    explicit InputManager(uint16_t displayWidth = 320, uint16_t displayHeight = 240);
+    explicit InputManager(uint16_t displayWidth, uint16_t displayHeight);
 
     void registerListener(IInputListener* l);
     // 显示分辨率（来自对端 HELLO / 本地配置；坐标校验上界）。

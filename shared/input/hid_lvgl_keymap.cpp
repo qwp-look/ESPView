@@ -54,6 +54,15 @@ constexpr HidKeyEntry kEntries[] = {
 
 }  // namespace
 
+bool isSupportedLvglKey(uint32_t hidUsage) {
+    for (const HidKeyEntry& e : kEntries) {
+        if (e.hid == hidUsage) {
+            return true;
+        }
+    }
+    return false;
+}
+
 bool HidToLvglKeyMapper::mapKey(uint32_t hidUsage, uint32_t& lvglKey) {
     for (const HidKeyEntry& e : kEntries) {
         if (e.hid == hidUsage) {
