@@ -29,6 +29,8 @@ on:
           - oled
           - oled-off
           - diagnostic
+          # M8-A7（A7-6）：g1_* 为历史实验（M7-G G1 OLED×RF 矩阵）。
+          # 证据保留，仍可显式触发；不进默认矩阵 / 一等发布。
           - g1_a
           - g1_b
           - g1_c
@@ -51,7 +53,9 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        profile: ${{ fromJSON(inputs.profile == 'all' && '["uart","tcp","oled","oled-off","diagnostic","g1_a","g1_b","g1_c","g1_d"]' || (inputs.profile != '' && format('["{0}"]', inputs.profile)) || '["uart","tcp","diagnostic"]') }}
+        # M8-A7（A7-6）：all = 5 个正式 profile；g1_* 历史实验移出默认矩阵
+        # （仍可经 dispatch 单选触发）；PR/push 默认矩阵含 oled。
+        profile: ${{ fromJSON(inputs.profile == 'all' && '["uart","tcp","oled","oled-off","diagnostic"]' || (inputs.profile != '' && format('["{0}"]', inputs.profile)) || '["uart","tcp","oled","diagnostic"]') }}
 
     steps:
       - name: Checkout

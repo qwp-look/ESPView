@@ -18,7 +18,7 @@ CI 按「速度从快到慢、环境从薄到厚」分四层，外加两条特�
 | --- | --- | --- | --- |
 | Layer 1 快速宿主 CI | `fast-ci.yml` | ubuntu-latest 上 shared/protocol host 测试（cmake + ctest）；windows-latest 上 MSYS2 MinGW64 跑 `scripts\verify_host.bat`；另有静态检查 job | 每次 PR / push main |
 | Layer 2 Windows Qt CI | `windows-ci.yml` | windows-latest + MSYS2 MinGW64 + Qt 6（base / serialport 包），构建 `espview_virtual_display.exe` 并做 offscreen 自关闭冒烟（`--autoclose-ms`，不连硬件） | 按 pc / shared / scripts / docs / README 路径过滤 |
-| Layer 3 ESP32 构建 CI | `esp32-ci.yml` | `espressif/idf:v6.0.2` 容器内构建固件（默认 matrix：uart / tcp / diagnostic；手动可触发全部 9 个 profile）；**只 build，绝不 flash** | 按 esp32 / shared / scripts-profile 路径过滤；`workflow_dispatch` 全 9 profile |
+| Layer 3 ESP32 构建 CI | `esp32-ci.yml` | `espressif/idf:v6.0.2` 容器内构建固件（默认 matrix：uart / tcp / oled / diagnostic，M8-A7 起；手动可触发全部 9 个 profile，g1_* 标记历史）；**只 build，绝不 flash** | 按 esp32 / shared / scripts-profile 路径过滤；`workflow_dispatch` 全 9 profile |
 | Layer 4 docs + security | `docs-security.yml` | `scripts\check_docs.py` + `scripts\security_scan.py` + `scripts\check_bat_crlf.py` + workflow YAML lint | 每次 PR / push（paths 不过滤，始终运行） |
 | Full platform CI | `full-ci.yml` | Ubuntu GCC 全量 host 套件、Ubuntu Clang、fresh-clone 可复现 gate（git archive → 干净目录 configure/build/ctest/docs/security） | push main / 手动 / 每周（周日 03:00 UTC） |
 | Sanitizer CI | `sanitizer.yml` | Linux ASan（全量 host）、UBSan（全量 host）、TSan（core concurrency subset：endpoint_race / ack_concurrency / endpoint_lifecycle / deferred_control / lifecycle） | push main / 手动 / 每周（周日 04:00 UTC） |

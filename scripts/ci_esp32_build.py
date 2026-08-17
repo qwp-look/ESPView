@@ -17,14 +17,16 @@ import shutil
 import subprocess
 import sys
 
+# 全部可构建 profile（含历史 g1_*；g1_* 仅供 dispatch/显式构建，
+# 不进 CI 默认矩阵 —— 见 espview_profiles.HISTORICAL_PROFILES）。
 PROFILES = (
     "uart", "tcp", "oled", "oled-off", "diagnostic",
     "g1_a", "g1_b", "g1_c", "g1_d",
 )
 
-# M8-A7（A7-5）：target 白名单单一来源 = espview_profiles.TARGETS
-# （脚本目录在 sys.path，与 espview_profile_sdkconfig.py 同模式）。
-from espview_profiles import TARGETS
+# M8-A7（A7-5/7-6）：target 白名单 + 历史 profile 标记单一来源 =
+# espview_profiles（脚本目录在 sys.path，与 espview_profile_sdkconfig.py 同模式）。
+from espview_profiles import TARGETS, HISTORICAL_PROFILES
 
 ARTIFACTS = (
     "espview_esp32.bin",

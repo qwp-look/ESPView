@@ -31,6 +31,16 @@ def validate_target(name):
     """Return True if name is a whitelisted IDF target."""
     return name in TARGETS
 
+
+# M8-A7（A7-6）：历史实验 profile（M7-G G1 OLED×RF 矩阵；证据保留，不删除）。
+# 不进 CI 默认矩阵 / 一等发布；仍可经 workflow_dispatch 或 --apply 显式构建。
+HISTORICAL_PROFILES = frozenset({"g1_a", "g1_b", "g1_c", "g1_d"})
+
+
+def is_historical(name):
+    """Return True if the (canonical) profile is a historical experiment."""
+    return canonical_name(name) in HISTORICAL_PROFILES
+
 # Kconfig choice groups: setting one member to "y" unsets the other members.
 CHOICE_GROUPS = (
     ("CONFIG_ESPVIEW_TRANSPORT_UART", "CONFIG_ESPVIEW_TRANSPORT_TCP"),
@@ -182,7 +192,10 @@ def profile_line(name):
     parts = ["# profile %s" % base]
     for attr, value in zip(ATTR_NAMES, spec["attrs"]):
         parts.append("%s=%s" % (attr, value))
-    parts.append("label=%s" % spec["label"])
+    label = spec["label"]
+    if is_historical(base):
+        label += " [historical]"
+    parts.append("label=%s" % label)
     return " ".join(parts)
 
 
@@ -205,10 +218,14 @@ def validate_table():
                 (name, key)
     for alias, target in ALIASES.items():
         assert target in PROFILES, (alias, target)
+    assert HISTORICAL_PROFILES.issubset(PROFILES), \
+        "historical profiles must stay whitelisted"
     return True
 
 
 if __name__ == "__main__":
     validate_table()
-    print("espview_profiles: table OK (%d profiles, %d aliases, %d targets)"
-          % (len(PROFILES), len(ALIASES), len(TARGETS)))
+    print("espview_profiles: table OK (%d profiles, %d aliases, %d targets, "
+          "%d historical)"
+          % (len(PROFILES), len(ALIASES), len(TARGETS),
+             len(HISTORICAL_PROFILES)))
