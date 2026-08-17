@@ -297,8 +297,9 @@ See [docs/testing.md](docs/testing.md) for the full matrix.
 
 ## Continuous integration
 
-GitHub Actions runs the four core workflows on every push and pull request; the
-badges below link to the workflow pages.
+GitHub Actions runs the core workflows on every push and pull request; the badges
+below link to the workflow pages. Additional layers are documented links, not
+badges (M8-A6 badge policy: one badge per常驻 PR-gate workflow).
 
 | Workflow | Badge |
 | --- | --- |
@@ -306,6 +307,16 @@ badges below link to the workflow pages.
 | Windows + Qt CI | [![Windows CI](https://github.com/qwp-look/ESPView/actions/workflows/windows-ci.yml/badge.svg)](https://github.com/qwp-look/ESPView/actions/workflows/windows-ci.yml) |
 | ESP32 build CI | [![ESP32 CI](https://github.com/qwp-look/ESPView/actions/workflows/esp32-ci.yml/badge.svg)](https://github.com/qwp-look/ESPView/actions/workflows/esp32-ci.yml) |
 | Docs + security | [![Docs + security](https://github.com/qwp-look/ESPView/actions/workflows/docs-security.yml/badge.svg)](https://github.com/qwp-look/ESPView/actions/workflows/docs-security.yml) |
+
+Additional CI layers (no badges; full trigger matrix + local equivalents in
+[docs/ci.md](docs/ci.md)):
+
+| Layer | Workflow | When it runs |
+| --- | --- | --- |
+| Full platform CI | `full-ci.yml` | push main / manual / weekly: Ubuntu GCC full suite, Ubuntu Clang, fresh-clone reproducibility gate |
+| Sanitizer CI | `sanitizer.yml` | push main / manual / weekly: Linux ASan + UBSan (full host), TSan (core concurrency subset) |
+| Benchmark CI | `benchmark.yml` | every PR/push (smoke + `stream_encode` zero-alloc gate); nightly/manual (full CSV + &gt;25% regression gate) |
+| Hardware smoke | `hardware-smoke.yml` | manual only, self-hosted runner with physical ESP32 (`workflow_dispatch`) |
 
 | Layer | What it runs | Never does |
 | --- | --- | --- |
@@ -463,6 +474,8 @@ See [docs/security.md](docs/security.md).
 | [docs/faq.md](docs/faq.md) | Frequently asked questions |
 | [docs/README.md](docs/README.md) | Docs landing page and index |
 | [scripts/README.md](scripts/README.md) | Build/flash scripts reference |
+| [examples/quickstart.md](examples/quickstart.md) | Quick-start walkthrough (copy-paste commands) |
+| [examples/sdkconfig.wifi-tcp.defaults.example](examples/sdkconfig.wifi-tcp.defaults.example) | Wi-Fi + TCP sdkconfig snippet (placeholders only) |
 
 ## Project status and roadmap
 

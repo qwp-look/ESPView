@@ -1,0 +1,121 @@
+# ESPView M8-A6 benchmark CI.
+#
+#   bench-smoke : every PR/push -- compile both bench executables, run a
+#                 reduced protocol bench (--quick) + the display bench, and
+#                 enforce the stream_encode alloc_count=0 non-regression gate.
+#   bench-full  : workflow_dispatch / schedule (nightly) / main push -- full
+#                 runs compared against the committed baselines; a major
+#                 regression (>25%) fails the job (task book §十八: no strict
+#                 +/-1% gate on noisy GitHub runners).
+#
+# Outputs machine-parseable CSV (protocol-bench.csv / display-bench.csv) as
+# artifacts. Never touches hardware / COM / Wi-Fi.
+name: benchmark
+
+on:
+  pull_request:
+    branches:
+      - main
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+  schedule:
+    - cron: '30 2 * * *'   # nightly 02:30 UTC full run
+
+concurrency:
+  group: benchmark-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  bench-smoke:
+    name: Benchmark smoke (compile + quick run + alloc gate)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    # PR 上只跑 smoke；push main / 手动 / nightly 由 bench-full 全量覆盖，避免重复。
+    if: github.event_name == 'pull_request'
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure (build/bench)
+        run: cmake -S shared/protocol -B build/bench -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build bench targets
+        run: cmake --build build/bench --target espview_protocol_bench espview_m8a4_bench -j "$(nproc)"
+
+      - name: Run protocol bench (--quick)
+        run: |
+          ./build/bench/espview_protocol_bench --quick > build/protocol-bench.csv 2> build/protocol-bench-guards.log
+          cat build/protocol-bench-guards.log
+
+      - name: Run display/input/OLED bench
+        run: |
+          ./build/bench/espview_m8a4_bench > build/display-bench.csv 2> build/display-bench-guards.log
+          cat build/display-bench-guards.log
+
+      - name: Enforce stream_encode zero-alloc gate
+        run: |
+          awk -F, '$1 == "stream_encode" && $10 != 0 { print "alloc gate FAIL row: " $0; bad=1 } END { if (bad) exit 1; print "alloc gate OK: stream_encode alloc_count == 0" }' build/protocol-bench.csv
+
+      - name: Upload bench smoke CSV
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bench-smoke-csv
+          path: |
+            build/protocol-bench.csv
+            build/display-bench.csv
+            build/protocol-bench-guards.log
+            build/display-bench-guards.log
+          if-no-files-found: warn
+
+  bench-full:
+    name: Benchmark full (regression vs committed baseline)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    if: github.event_name != 'pull_request'
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure (build/bench)
+        run: cmake -S shared/protocol -B build/bench -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build bench targets
+        run: cmake --build build/bench --target espview_protocol_bench espview_m8a4_bench -j "$(nproc)"
+
+      - name: Run protocol bench (full)
+        run: |
+          ./build/bench/espview_protocol_bench > build/protocol-bench.csv 2> build/protocol-bench-guards.log
+          cat build/protocol-bench-guards.log
+
+      - name: Run display/input/OLED bench (full)
+        run: |
+          ./build/bench/espview_m8a4_bench > build/display-bench.csv 2> build/display-bench-guards.log
+          cat build/display-bench-guards.log
+
+      - name: Compare protocol bench vs baseline
+        run: python3 scripts/bench_compare.py shared/protocol/bench/results/m8a1_baseline.csv build/protocol-bench.csv
+
+      - name: Compare display bench vs baseline
+        run: python3 scripts/bench_compare.py shared/bench/results/m8a4_baseline.csv build/display-bench.csv
+
+      - name: Print environment metadata
+        run: |
+          g++ --version | head -n 1
+          cmake --version | head -n 1
+          nproc
+
+      - name: Upload full bench CSV
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: benchmark-full-csv
+          path: |
+            build/protocol-bench.csv
+            build/display-bench.csv
+            build/protocol-bench-guards.log
+            build/display-bench-guards.log
+          if-no-files-found: warn

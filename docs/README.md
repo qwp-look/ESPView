@@ -8,7 +8,7 @@
 
 | 文档 | 一句话说明 |
 | --- | --- |
-| [DESIGN.md](DESIGN.md) | **唯一权威**：冻结的协议规范（Packet/Message/Frame）、架构、里程碑证据与验收记录（M0–M7-G） |
+| [DESIGN.md](DESIGN.md) | **唯一权威**：冻结的协议规范（Packet/Message/Frame）、架构、里程碑证据与验收记录（M0–M8-A6） |
 | [README.md](README.md) | 本页：docs 目录索引 |
 | [ci.md](ci.md) | GitHub Actions CI：分层模型、触发矩阵、PR gate、产物/凭据策略与故障排查 |
 | [architecture-overview.md](architecture-overview.md) | 高层架构速览（显示权威、双传输、输入逆链路） |

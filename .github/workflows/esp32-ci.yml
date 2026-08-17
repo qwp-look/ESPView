@@ -113,3 +113,55 @@ jobs:
           tail -n 120 esp32/build/${{ matrix.profile }}/idf_build.log 2>/dev/null || true
           tail -n 120 esp32/build/${{ matrix.profile }}/CMakeFiles/CMakeError.log 2>/dev/null || true
           find esp32/build/${{ matrix.profile }} -maxdepth 2 -type f -name '*.log' -exec tail -n 60 {} \; 2>/dev/null || true
+
+  # M8-A6 §二十一/§三十八：ESP32-S3 compile portability smoke（experimental）。
+  # 只做 configure + compile（不 flash、不做 S3 peripheral integration）；
+  # 使用 sdkconfig.defaults（UART transport + LVGL + OLED off，无凭据）。
+  # 不在 PR 上运行（Nightly / push main / 手动）；结果失败只影响本 job。
+  esp32s3-smoke:
+    name: ESP32-S3 compile smoke (experimental)
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    if: github.event_name != 'pull_request'
+    container:
+      image: espressif/idf:v6.0.2
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Cache ESP-IDF managed components
+        uses: actions/cache@v4
+        with:
+          path: esp32/managed_components
+          key: ${{ runner.os }}-idf-${{ hashFiles('esp32/dependencies.lock') }}
+
+      - name: set-target esp32s3
+        working-directory: esp32
+        shell: bash
+        run: |
+          set -euo pipefail
+          . "$IDF_PATH/export.sh" >/dev/null
+          mkdir -p build/s3
+          idf.py -B build/s3 set-target esp32s3 2>&1 | tee build/s3/set_target.log
+
+      - name: Build firmware (esp32s3)
+        working-directory: esp32
+        shell: bash
+        run: |
+          set -euo pipefail
+          . "$IDF_PATH/export.sh" >/dev/null
+          idf.py -B build/s3 build 2>&1 | tee build/s3/idf_build.log
+
+      - name: Verify build artifact
+        working-directory: esp32
+        run: |
+          ls -l build/s3/espview_esp32.bin
+          sha256sum build/s3/espview_esp32.bin
+
+      - name: Upload S3 smoke logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: esp32s3-smoke-logs
+          path: esp32/build/s3/*.log
+          if-no-files-found: warn

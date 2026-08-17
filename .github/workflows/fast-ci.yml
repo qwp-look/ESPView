@@ -96,7 +96,7 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Syntax-check Python scripts
-        run: python3 -m py_compile scripts/check_docs.py scripts/security_scan.py scripts/check_bat_crlf.py
+        run: python3 -m py_compile scripts/check_docs.py scripts/security_scan.py scripts/check_bat_crlf.py scripts/bench_compare.py
 
       - name: Docs check
         run: python3 scripts/check_docs.py

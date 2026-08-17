@@ -4217,3 +4217,144 @@ G11 验收清单（本日全部执行，工作树含 M7-G 全部 13 个提交）
 - ESP32 profiles：idf.py clean build + uart/tcp 两 profile build PASS；PC Qt build
   PASS；wire format 0 修改。
 - 真实硬件：UART profile + OLED smoke 见 M8-A5 硬件回归记录（真机 COM4/CH340）。
+
+## AR. M8-A6 CI / Benchmark / Sanitizer / Build Matrix / Documentation Tooling（2026-08-17 冻结）
+
+> 定位：工程化收尾层。wire protocol 与 M8-A5 生命周期语义全部零修改；本阶段只改
+> `.github/workflows`、`scripts`、CMake/test infrastructure、benchmark、docs、README，
+> 目标是让本机已验证的 host 测试 / lifecycle / benchmark / sanitizer / ESP32 build /
+> Qt build / docs check / security scan 变成可重复 + 自动化 + 跨平台 + CI 可执行 +
+> 失败可定位。真实 COM4/CH340 与真实 Wi-Fi/AP 一律不是 GitHub-hosted runner 的依赖
+> （硬件验收仍走 `hardware-smoke.yml` 手动 + self-hosted 通道，见 AQ.17）。
+> 测试分类纪律（§四十）：Smoke（fast-ci）、Regression（fast/full-ci）、Stress
+> （full-ci / nightly）、Sanitizer（sanitizer.yml）、Benchmark（benchmark.yml）、
+> Hardware（hardware-smoke.yml，手动）；stress 不混入 unit 命名。
+
+### AR.1 CI 分层模型（五个 gate workflow + 三条特殊通道）
+
+| 层 | Workflow | 内容 | 触发 |
+| --- | --- | --- | --- |
+| Layer 1 快速宿主 | `fast-ci.yml` | Ubuntu host（cmake+ctest+直接运行）、Windows MSYS2 `verify_host.bat`、静态检查（docs/security/CRLF/YAML） | 每次 PR / push main |
+| Layer 2 Windows Qt | `windows-ci.yml` | MSYS2 + Qt6 构建 + offscreen 自关闭冒烟（`--autoclose-ms`） | 路径过滤 |
+| Layer 3 ESP32 构建 | `esp32-ci.yml` | `espressif/idf:v6.0.2` 容器 9 profile matrix + `esp32s3-smoke`（非 PR） | 路径过滤 + 手动 |
+| Layer 4 docs + security | `docs-security.yml` | check_docs / security_scan / check_bat_crlf / YAML lint | 每次 PR / push |
+| Full platform | `full-ci.yml` | Ubuntu GCC 全量 host 套件、Ubuntu Clang、fresh-clone gate | push main / 手动 / 周日 03:00 UTC |
+| Sanitizer | `sanitizer.yml` | Linux ASan、UBSan（全量 host）、TSan（core concurrency subset） | push main / 手动 / 周日 04:00 UTC |
+| Benchmark | `benchmark.yml` | bench-smoke（PR/push）+ bench-full（nightly 02:30 UTC / 手动） | 见 §AR.4 |
+| Release | `release.yml` | tag `v*` 产物收集 + GitHub Release | 仅 tag / 手动 |
+| Hardware smoke | `hardware-smoke.yml` | 真机冒烟（self-hosted，有人类操作员） | 仅手动 |
+
+- PR gate 只有 fast-ci / windows-ci / esp32-ci（路径命中时）/ docs-security；full-ci、
+  sanitizer、benchmark 的 full 档不属于 PR 必须项（§三十九：Fast CI 必须分钟级）。
+- 触发矩阵、本地等价命令、故障排查与产物策略以 `docs/ci.md` 为准（README 只放主
+  badge 表格 + 文档链接，不堆 badge，§五十七）。
+
+### AR.2 Sanitizer matrix（sanitizer.yml）
+
+- **ASan**（Ubuntu，`-fsanitize=address -fno-omit-frame-pointer`，`ASAN_OPTIONS=detect_leaks=1:halt_on_error=1`）：
+  全量 host 套件（protocol / transport / lifecycle / failure injection / display / input / OLED，
+  `espview_protocol_tests` + `scan_transaction_test`）。
+- **UBSan**（Ubuntu，`-fsanitize=undefined -fno-sanitize-recover=undefined`，
+  `UBSAN_OPTIONS=halt_on_error=1:print_stacktrace=1`）：全量 host 套件；UB 即失败。
+- **TSan**（Ubuntu，`-fsanitize=thread`）：只跑 **core concurrency subset**
+  （`espview_tsan_concurrency_tests`，`-DESPVIEW_BUILD_TSAN_SUBSET=ON`）：endpoint_race /
+  ack_concurrency / endpoint_lifecycle / deferred_control / lifecycle failure injection
+  （§十三/§四十二/§四十三）。subset 刻意不链接 counting_allocator（TSan 需要标准
+  malloc 拦截才能正确跟踪 shadow memory）。
+- 环境限制如实记录（§十四纪律）：**Windows 无 TSan 支持**（MSYS2/MinGW 无 libtsan）；
+  已建立 Linux TSan core concurrency target 作为替代证据。禁止写“TSan 不支持所以没做”。
+- 本机（MSYS2 MinGW64 g++ 16.1.0）实测：`-fsanitize=address|undefined|thread` 全部
+  因工具链缺 sanitizer runtime（无 libasan/libubsan/libtsan，链接报 `cannot find -lasan`）
+  而不可运行——已如实记录，不作为“全量 sanitizer PASS”的证据；ASan/UBSan/TSan 的
+  权威结果来自 Linux CI（sanitizer.yml，Ubuntu GCC）。TSan subset 目标在本机以
+  非 TSan 构建验证了链接与运行（3,864 checks / 0 failures）。
+
+### AR.3 Fresh-clone reproducibility gate（full-ci.yml）
+
+- `git archive --format=tar HEAD | tar -x -C <clean-dir>` 导出**仅 git 跟踪文件**，
+  在干净目录里 configure + build（espview_protocol_tests + scan_transaction_test）+
+  ctest + `check_docs.py` + `security_scan.py`（§五十六）。
+- 证明任何开发者从 `git clone` 开始都能按 README 构建；本阶段同时是 release-like
+  validation 的替代（不发布 release，§三十五）。
+- Ubuntu GCC = 第一公民（§四十一，防 MSYS2 过 / Ubuntu 挂的 header 传递包含问题）；
+  Ubuntu Clang job 做编译/测试可移植性冒烟（§八）。
+
+### AR.4 Benchmark（benchmark.yml + scripts/run_bench.* + scripts/bench_compare.py）
+
+- 两个既有基准保留：`espview_protocol_bench`（M8-A1，6 ops × 5 payloads × 5 trials，
+  中位数行 trial=5）与 `espview_m8a4_bench`（M8-A4，display/input/OLED）。CSV 列不变
+  （`op,payload_bytes,wire_bytes,...`），checksum guard 走 stderr（guard 失败 → exit 1）。
+- `protocol_bench.cpp` 新增 `--quick`（payloads {1024, 65536}，迭代 8/4）供 PR smoke；
+  完整表 = M8-A1 基线格式（§十七：PR 不跑完整 benchmark）。
+- 本地入口：`scripts\run_bench.bat` / `scripts\run_bench.sh`（核心逻辑在 CMake +
+  Python，平台脚本只做环境初始化与转发，§二十四）；全量模式自动比较基线。
+- 回归阈值 = **+25%**（§十八：GitHub runner 噪声大，禁止 ±1% 严格门）；比较脚本
+  `scripts/bench_compare.py`：按 (op, payload_bytes) 比中位数行 `elapsed_us_per_op`，
+  打印 baseline/current/ratio，>25% 才失败（`--warn-only` 可告警不失败）。
+- **分配非回归门槛（§十九）**：`stream_encode` 每行 `alloc_count == 0`；bench-smoke
+  在每次 PR/push 强制（awk gate + bench_compare alloc gate），full 档同样检查。
+- 基线：`shared/protocol/bench/results/m8a1_baseline.csv`（保留，不重写格式）+
+  `shared/bench/results/m8a4_baseline.csv`（M8-A6 新增，7 ops）；只提交小型 CSV，
+  不提交巨型 runtime logs（§四十四/§四十五）。
+- benchmark.yml 上传 `protocol-bench.csv` / `display-bench.csv` + guard logs 为 artifacts
+  （§二十九/§五十二）。
+
+### AR.5 Docs checker 增强（check_docs.py，§二十五）
+
+既有 8 项检查保留，新增 3 项（全部为路径/索引/结构一致性，不做语义 proof）：
+
+1. **workflow → script 引用**：`.github/workflows/*.yml` 中 `scripts/...` 引用必须存在
+   （支持 path filter 的 `scripts/xxx*` glob 前缀形式）。
+2. **examples 覆盖（§四十八）**：`examples/` 每个文件必须被 README 引用；example 内部
+   引用 `scripts/...` 与 `examples/...` 必须存在（example 内的本地生成文件如
+   `esp32/sdkconfig.defaults.wifi-tcp` 属文档说明的本地产物，不做存在性断言）。
+3. **README Documentation index 完整性**：index 必须覆盖每个顶层 `docs/*.md` 与
+   `scripts/README.md`（原 check 8 只要求 ci.md + README.md 两文件）。
+4. 凭证红线不变：示例配置只允许占位符（`REPLACE_WITH_*`、RFC 5737 文档网段与
+   security_scan.py 模块文档中记录的单个示例 IP 精确 allowlist）；真实凭据零入仓
+   （§二十七/§四十九）。
+
+### AR.6 ESP32-S3 compile smoke（esp32-ci.yml `esp32s3-smoke`）
+
+- 最低目标（§二十一/§三十八）：shared core + ESPView transport base 在
+  `espressif/idf:v6.0.2` 容器内 configure + compile 通过；不 flash、不做 S3 peripheral
+  integration、不复制整个 esp32 工程、不引入 target hack。
+- **本机实测（2026-08-17，ESP-IDF v6.0.2 + 本机 xtensa-esp-elf 统一工具链）**：
+  `idf.py -B build/s3 set-target esp32s3` + `idf.py build`（sdkconfig.defaults：
+  UART transport + LVGL + OLED off）**PASS**，产出 `espview_esp32.bin`
+  （1,096,224 bytes）。说明：`CONFIG_IDF_TARGET="esp32"` 在 sdkconfig.defaults 不阻止
+  `set-target`（set-target 会覆盖目标）；Kconfig GPIO range（`0..39`/`-1..39`）为
+  classic 范围，接 S3 N16R8 时需按 AQ.16/AP.11 必改点做 S3-specific defaults overlay
+  （UART0/GPIO 默认值簇、OLED 几何）——这是**配置层适配**，不是 shared 代码 hack。
+- CI job 只跑 push main / 手动 / 每周（不在 PR 上跑），结果失败只影响该 job。
+
+### AR.7 文档责任边界（§二十六/§四十六/§四十七）
+
+- README = 用户入口（不复制协议细节；每个关键声明可指向 docs 页）。
+- docs/*.md = 开发者/使用者指南；docs/ci.md 是 CI 行为真相源（workflow 改动必须同步）。
+- DESIGN.md = 工程架构 / 协议冻结 / 实现语义唯一真相源，保留并继续追加章节。
+- examples/ = 可复制命令 + 占位符配置；被 README 与 check_docs 覆盖。
+
+### AR.8 测试与验收记录（M8-A6）
+
+- host（MSYS2 MinGW64 g++ 16.1.0，clean build 无 warning）：`espview_protocol_tests`
+  393,661 checks / 0 failures + `scan_transaction_test` 211 checks / 0 failures；
+  ctest 2/2 PASS；`verify_host.bat` ALL PASS（含 transport_config 97 + ByteQueue
+  selftest + TCP loopback 140，其中 reconnect 测试预算已按本机实测放宽到 8s，
+  见 pc/src/tcp_transport_test.cpp 的 M8-A6 注释）。
+- `verify_qt.bat` ALL PASS（Qt6 构建 espview_virtual_display.exe）；
+  `verify_lvgl.bat` ALL PASS（host + ESP-IDF v6.0.2 LVGL app 构建）。
+- ESP32 profiles（本机 ESP-IDF v6.0.2）：uart / tcp / oled / oled-off / diagnostic
+  全部 build PASS（profile sdkconfig 由 espview_profile_sdkconfig.py 应用，无凭据）。
+- ESP32-S3 compile smoke：本机实测 PASS（见 AR.6）。
+- TSan subset：本机按等价非 TSan 构建验证链接与运行 3,864 checks / 0 failures；
+  ASan/UBSan/TSan 权威结果来自 Linux CI（本机工具链无 sanitizer runtime，见 AR.2）。
+- benchmark：protocol `--quick` 与 full 运行通过，`stream_encode` alloc_count=0；
+  m8a1/m8a4 基线比较 0 回归 >25%（`scripts/bench_compare.py`）；`run_bench.bat`
+  全量模式 ALL PASS；新增提交 `shared/bench/results/m8a4_baseline.csv`。
+- fresh-clone gate：`git archive HEAD` → 干净目录 configure/build/ctest（2/2）+
+  check_docs PASS（本机复现）；CI 版本见 full-ci.yml。
+- docs/security：check_docs.py 全绿（新增 workflow→script / examples / docs index
+  检查）；security_scan clean（276 tracked files）；check_bat_crlf 全绿（8 .bat，
+  CRLF 必须）；9 个 workflow YAML 全部可解析；bash -n（run_bench.sh）通过。
+- wire format 0 修改；DESIGN.md 保留；working tree clean；HEAD == origin/main。

@@ -69,3 +69,33 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
 endif()
 
 add_test(NAME espview_protocol_tests COMMAND espview_protocol_tests)
+
+# M8-A6：TSan 专用 core-concurrency subset（默认不构建；sanitizer CI 开启）。
+# 只链接任务书 §十三/§四十二/§四十三 要求的并发/生命周期测试；不链接
+# counting_allocator.cpp（TSan 需要标准 malloc 拦截）。Linux TSan 专用。
+option(ESPVIEW_BUILD_TSAN_SUBSET "Build TSan core-concurrency subset target" OFF)
+if(ESPVIEW_BUILD_TSAN_SUBSET)
+    add_executable(espview_tsan_concurrency_tests
+        tsan_main.cpp
+        endpoint_race_test.cpp
+        ack_concurrency_test.cpp
+        endpoint_lifecycle_test.cpp
+        deferred_control_test.cpp
+        ../../transport/tests/lifecycle_test.cpp
+    )
+    target_link_libraries(espview_tsan_concurrency_tests PRIVATE
+        espview_protocol espview_transport
+    )
+    target_include_directories(espview_tsan_concurrency_tests PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR}/../../transport
+        ${CMAKE_CURRENT_SOURCE_DIR}/../../transport/tests
+    )
+    if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+        target_compile_options(espview_tsan_concurrency_tests PRIVATE -Wall -Wextra -Wpedantic)
+        # 与 espview_protocol_tests 相同的 GCC16 -Warray-bounds 误报抑制。
+        set_source_files_properties(../../transport/tests/lifecycle_test.cpp PROPERTIES
+                                    COMPILE_OPTIONS "-Wno-array-bounds")
+    endif()
+    add_test(NAME espview_tsan_concurrency_tests COMMAND espview_tsan_concurrency_tests)
+endif()

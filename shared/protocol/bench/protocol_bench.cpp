@@ -96,11 +96,19 @@ struct BenchCase {
     std::vector<uint8_t> data;
 };
 
-std::vector<BenchCase> makeCases() {
-    const std::pair<size_t, size_t> table[] = {
+// quick=true（--quick，CI smoke）：小载荷 + 少迭代，仍覆盖单包与多包；
+// 默认完整表 = M8-A1 基线格式（任务书 §十七 Fast CI 只 smoke）。
+std::vector<BenchCase> makeCases(bool quick) {
+    const std::pair<size_t, size_t> quickTable[] = {{1024, 8}, {65536, 4}};
+    const std::pair<size_t, size_t> fullTable[] = {
         {1024, 64}, {4096, 64}, {65536, 64}, {153600, 64}, {1048576, 16}};
+    const std::pair<size_t, size_t>* table = quick ? quickTable : fullTable;
+    const size_t tableCount = quick
+        ? sizeof(quickTable) / sizeof(quickTable[0])
+        : sizeof(fullTable) / sizeof(fullTable[0]);
     std::vector<BenchCase> out;
-    for (const auto& kv : table) {
+    for (size_t i = 0; i < tableCount; ++i) {
+        const auto& kv = table[i];
         BenchCase c;
         c.payloadBytes = kv.first;
         c.iterations = kv.second;
@@ -644,10 +652,17 @@ void benchFrameAssembly(const std::vector<BenchCase>& cases) {
 }  // namespace
 
 int main(int argc, char** argv) {
-    (void)argc;
-    (void)argv;
+    bool quick = false;
+    for (int i = 1; i < argc; ++i) {
+        if (std::strcmp(argv[i], "--quick") == 0) {
+            quick = true;
+        } else {
+            std::fprintf(stderr, "unknown arg: %s\n", argv[i]);
+            return 2;
+        }
+    }
     std::setvbuf(stdout, nullptr, _IONBF, 0);
-    const std::vector<BenchCase> cases = makeCases();
+    const std::vector<BenchCase> cases = makeCases(quick);
     std::printf(
         "op,payload_bytes,wire_bytes,packets,iterations,trial,total_elapsed_us,"
         "elapsed_us_per_op,bytes_per_sec,alloc_count,alloc_bytes\n");

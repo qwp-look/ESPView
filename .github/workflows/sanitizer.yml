@@ -1,0 +1,131 @@
+# ESPView M8-A6 sanitizer CI (Linux).
+#
+#   ASan  : full host suite (protocol/transport/lifecycle/failure injection)
+#   UBSan : full host suite with -fno-sanitize-recover=undefined (UB is fatal)
+#   TSan  : core-concurrency subset only (endpoint_race / ack_concurrency /
+#           endpoint_lifecycle / deferred_control / lifecycle failure injection)
+#
+# Triggered on push to main, workflow_dispatch, and a weekly schedule.
+# Not run per-PR: sanitizer belongs to the Full/Nightly layer (task book §三十九),
+# and Fast CI must stay minutes-level. Never touches hardware / COM / Wi-Fi.
+name: sanitizer
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+  schedule:
+    - cron: '0 4 * * 0'   # weekly Sunday 04:00 UTC
+
+concurrency:
+  group: sanitizer-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  asan:
+    name: ASan (Ubuntu, full host suite)
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    env:
+      ASAN_OPTIONS: detect_leaks=1:halt_on_error=1
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure (build/asan)
+        run: >-
+          cmake -S shared/protocol -B build/asan -DCMAKE_BUILD_TYPE=Debug
+          -DCMAKE_CXX_FLAGS="-fsanitize=address -fno-omit-frame-pointer"
+          -DCMAKE_EXE_LINKER_FLAGS="-fsanitize=address"
+
+      - name: Build host test targets
+        run: cmake --build build/asan --target espview_protocol_tests scan_transaction_test -j "$(nproc)"
+
+      - name: Run ctest under ASan
+        run: |
+          mkdir -p build/logs
+          ctest --test-dir build/asan --output-on-failure 2>&1 | tee build/logs/asan-ctest.log
+
+      - name: Run test binaries directly under ASan
+        run: |
+          ./build/asan/tests/espview_protocol_tests 2>&1 | tee -a build/logs/asan-ctest.log
+          ./build/asan/wifi_build/scan_transaction_test 2>&1 | tee -a build/logs/asan-ctest.log
+
+      - name: Upload ASan logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sanitizer-asan-logs
+          path: build/logs/
+          if-no-files-found: warn
+
+  ubsan:
+    name: UBSan (Ubuntu, full host suite)
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    env:
+      UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure (build/ubsan)
+        run: >-
+          cmake -S shared/protocol -B build/ubsan -DCMAKE_BUILD_TYPE=Debug
+          -DCMAKE_CXX_FLAGS="-fsanitize=undefined -fno-sanitize-recover=undefined"
+          -DCMAKE_EXE_LINKER_FLAGS="-fsanitize=undefined"
+
+      - name: Build host test targets
+        run: cmake --build build/ubsan --target espview_protocol_tests scan_transaction_test -j "$(nproc)"
+
+      - name: Run ctest under UBSan
+        run: |
+          mkdir -p build/logs
+          ctest --test-dir build/ubsan --output-on-failure 2>&1 | tee build/logs/ubsan-ctest.log
+
+      - name: Run test binaries directly under UBSan
+        run: |
+          ./build/ubsan/tests/espview_protocol_tests 2>&1 | tee -a build/logs/ubsan-ctest.log
+          ./build/ubsan/wifi_build/scan_transaction_test 2>&1 | tee -a build/logs/ubsan-ctest.log
+
+      - name: Upload UBSan logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sanitizer-ubsan-logs
+          path: build/logs/
+          if-no-files-found: warn
+
+  tsan:
+    name: TSan (Ubuntu, core concurrency subset)
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    env:
+      TSAN_OPTIONS: halt_on_error=1
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure (build/tsan, ESPVIEW_BUILD_TSAN_SUBSET=ON)
+        run: >-
+          cmake -S shared/protocol -B build/tsan -DCMAKE_BUILD_TYPE=Debug
+          -DESPVIEW_BUILD_TSAN_SUBSET=ON
+          -DCMAKE_CXX_FLAGS="-fsanitize=thread"
+          -DCMAKE_EXE_LINKER_FLAGS="-fsanitize=thread"
+
+      - name: Build TSan concurrency subset
+        run: cmake --build build/tsan --target espview_tsan_concurrency_tests -j "$(nproc)"
+
+      - name: Run concurrency subset under TSan
+        run: |
+          mkdir -p build/logs
+          ./build/tsan/tests/espview_tsan_concurrency_tests 2>&1 | tee build/logs/tsan-concurrency.log
+
+      - name: Upload TSan logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sanitizer-tsan-logs
+          path: build/logs/
+          if-no-files-found: warn

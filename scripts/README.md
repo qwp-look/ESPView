@@ -21,6 +21,8 @@
 | `check_bat_crlf.py` | 全部 tracked `.bat` 必须 CRLF（只报告，不重写） | `--help` |
 | `ci_esp32_build.py` | ESP32 profile 构建编排（CI 辅助，可选） | `--help` |
 | `ci_collect_artifacts.py` | release 产物收集/重命名 + SHA256SUMS（禁传 sdkconfig/日志） | `--help` |
+| `run_bench.bat` / `run_bench.sh` | M8-A6 本地基准：构建两个 bench 可执行 → 运行 → 与提交基线比较（`--quick` = CI smoke 档） | `--quick` |
+| `bench_compare.py` | M8-A6 基准 CSV 比较：按 (op, payload) 比中位数行，回归 &gt;25% 失败；`stream_encode` alloc_count=0 门槛 | `--threshold`、`--alloc-zero-ops`、`--warn-only` |
 
 CI 分层与触发矩阵见 [docs/ci.md](../docs/ci.md)；workflow 位于 `.github/workflows/`。
 

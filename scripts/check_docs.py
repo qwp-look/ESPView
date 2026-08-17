@@ -23,7 +23,13 @@ Checks (all local, no build / no hardware):
   7. README CI badge URLs for .github/workflows/<file>.yml must reference
      existing workflow files.
   8. README Documentation index must link docs/ci.md and docs/README.md
-     (files must exist).
+     (files must exist) and cover every top-level docs/*.md plus
+     scripts/README.md.
+  9. Every .github/workflows/*.yml reference to scripts/... must resolve to an
+     existing script file.
+ 10. examples/ coverage: every file under examples/ must be referenced from
+     README; example-internal references to scripts/... and examples/... must
+     resolve to existing files.
 
 Scope note: credential / IP patterns are checked on the *scripts* surface
 (scripts/**, README.md, docs/**). docs/DESIGN.md legitimately records test
@@ -395,6 +401,88 @@ class Checker:
                 self.report(readme, heading_lineno,
                             "README Documentation index links missing file: "
                             "%s" % req)
+        # Completeness (M8-A6 §二十五.1): every top-level docs/*.md and
+        # scripts/README.md must be listed in the README Documentation index.
+        docs_root = os.path.join(REPO_ROOT, "docs")
+        if os.path.isdir(docs_root):
+            for name in sorted(os.listdir(docs_root)):
+                if not name.endswith(".md"):
+                    continue
+                norm = os.path.join("docs", name).replace("/", os.sep)
+                if norm not in links:
+                    self.report(readme, heading_lineno,
+                                "README Documentation index missing docs/%s"
+                                % name)
+        scripts_readme = os.path.join("scripts", "README.md")
+        if os.path.isfile(os.path.join(REPO_ROOT, *scripts_readme.split("/"))):
+            norm = scripts_readme.replace("/", os.sep)
+            if norm not in links:
+                self.report(readme, heading_lineno,
+                            "README Documentation index must link "
+                            "scripts/README.md")
+
+    # -- check 9: workflow YAML script references must exist --
+    def check_workflow_script_refs(self):
+        wf_root = os.path.join(REPO_ROOT, ".github", "workflows")
+        if not os.path.isdir(wf_root):
+            return
+        for name in sorted(os.listdir(wf_root)):
+            if not name.endswith((".yml", ".yaml")):
+                continue
+            path = os.path.join(wf_root, name)
+            for lineno, line in enumerate(read_text(path).splitlines(), 1):
+                for m in re.finditer(r"scripts[\\/]([\w.\-]+)(\*)?", line):
+                    script = m.group(1)
+                    if m.group(2) == "*":
+                        # glob 前缀（workflow path filter 的 scripts/xxx* 形式）
+                        if not any(fn.startswith(script)
+                                   for fn in os.listdir(SCRIPTS_DIR)):
+                            self.report(path, lineno,
+                                        "workflow references missing script "
+                                        "glob prefix: %s" % script)
+                    elif not os.path.isfile(
+                            os.path.join(SCRIPTS_DIR, script)):
+                        self.report(path, lineno,
+                                    "workflow references missing script: %s"
+                                    % script)
+
+    # -- check 10: examples coverage (M8-A6 §二十五.4 / §四十八) --
+    def check_examples(self):
+        examples_dir = os.path.join(REPO_ROOT, "examples")
+        if not os.path.isdir(examples_dir):
+            return
+        readme = os.path.join(REPO_ROOT, "README.md")
+        readme_text = read_text(readme) if os.path.isfile(readme) else ""
+        example_files = []
+        for dirpath, dirnames, filenames in os.walk(examples_dir):
+            dirnames[:] = [d for d in dirnames
+                           if d not in ("build", "__pycache__")]
+            for fn in filenames:
+                if fn.endswith(".pyc"):
+                    continue
+                example_files.append(os.path.join(dirpath, fn))
+        # (a) README must be able to find every example file.
+        for path in example_files:
+            rel = os.path.relpath(path, REPO_ROOT).replace(os.sep, "/")
+            if rel not in readme_text:
+                self.report(readme, 0,
+                            "README must reference example: %s" % rel)
+        # (b) example-internal script/config references must exist.
+        for path in example_files:
+            text = read_text(path)
+            for lineno, line in enumerate(text.splitlines(), 1):
+                for m in re.finditer(r"scripts[\\/]([\w.\-]+)", line):
+                    script = m.group(1)
+                    if not os.path.isfile(os.path.join(SCRIPTS_DIR, script)):
+                        self.report(path, lineno,
+                                    "example references missing script: %s"
+                                    % script)
+                for m in re.finditer(r"examples[\\/]([\w.\-]+)", line):
+                    target = m.group(1)
+                    if not os.path.exists(os.path.join(examples_dir, target)):
+                        self.report(path, lineno,
+                                    "example references missing example "
+                                    "file: %s" % target)
 
 def main():
     c = Checker()
@@ -407,6 +495,8 @@ def main():
     c.check_docs_script_refs()
     c.check_ci_badges()
     c.check_doc_index()
+    c.check_workflow_script_refs()
+    c.check_examples()
     issues = c.issues
     if issues:
         for issue in issues:

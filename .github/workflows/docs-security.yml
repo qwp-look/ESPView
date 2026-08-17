@@ -25,7 +25,7 @@ jobs:
 
       - name: Compile and run docs checker
         run: |
-          python3 -m py_compile scripts/check_docs.py
+          python3 -m py_compile scripts/check_docs.py scripts/bench_compare.py
           python3 scripts/check_docs.py
 
   security:

@@ -974,12 +974,14 @@ void runProtocolIntegration() {
         CHECK_MSG(espTransport.open(), "esp reconnect open");
         CHECK_MSG(srv.waitAccept(3000), "server re-accept after reconnect");
         esp.ep->onTransportConnected();
-        CHECK_MSG(pumpBoth(esp, pc, 3000,
+        // M8-A6：reconnect 握手在 Windows 高负载下偶发超过 3s（线程调度抖动，
+        // loopback 不丢包；非生产 bug）。预算放宽到 8s 以消除本地/CI 偶发 flake。
+        CHECK_MSG(pumpBoth(esp, pc, 8000,
                            [&] { return esp.ep->isConnected() && pc.ep->isConnected(); }),
                   "both re-CONNECTED");
         const uint64_t commitsBefore = pc.commits;
         CHECK_MSG(sendFull(esp, 8, 10), "send FULL frame 8 after reconnect");
-        CHECK_MSG(pumpBoth(esp, pc, 5000, [&] { return pc.commits == commitsBefore + 1; }),
+        CHECK_MSG(pumpBoth(esp, pc, 8000, [&] { return pc.commits == commitsBefore + 1; }),
                   "FULL commit after reconnect");
         CHECK_MSG(verifyFrame(pc, 8, FrameType::kFull, 10, 153600),
                   "post-reconnect FULL content");

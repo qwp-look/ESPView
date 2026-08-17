@@ -6,8 +6,9 @@
 > [docs/development.md](development.md)；提交纪律见 [docs/contributing.md](contributing.md)；
 > 文档索引见 [docs/README.md](README.md)。
 >
-> 相关 workflow（由 CI 代理在 `.github/workflows/` 下并行落地）：`fast-ci.yml`、
-> `windows-ci.yml`、`esp32-ci.yml`、`docs-security.yml`、`release.yml`、`hardware-smoke.yml`。
+> 相关 workflow（`.github/workflows/` 下）：`fast-ci.yml`、`windows-ci.yml`、
+> `esp32-ci.yml`、`docs-security.yml`、`release.yml`、`hardware-smoke.yml`、
+> `full-ci.yml`、`sanitizer.yml`、`benchmark.yml`。
 
 ## 1. 概览：CI 分层模型
 
@@ -19,6 +20,9 @@ CI 按「速度从快到慢、环境从薄到厚」分四层，外加两条特�
 | Layer 2 Windows Qt CI | `windows-ci.yml` | windows-latest + MSYS2 MinGW64 + Qt 6（base / serialport 包），构建 `espview_virtual_display.exe` 并做 offscreen 自关闭冒烟（`--autoclose-ms`，不连硬件） | 按 pc / shared / scripts / docs / README 路径过滤 |
 | Layer 3 ESP32 构建 CI | `esp32-ci.yml` | `espressif/idf:v6.0.2` 容器内构建固件（默认 matrix：uart / tcp / diagnostic；手动可触发全部 9 个 profile）；**只 build，绝不 flash** | 按 esp32 / shared / scripts-profile 路径过滤；`workflow_dispatch` 全 9 profile |
 | Layer 4 docs + security | `docs-security.yml` | `scripts\check_docs.py` + `scripts\security_scan.py` + `scripts\check_bat_crlf.py` + workflow YAML lint | 每次 PR / push（paths 不过滤，始终运行） |
+| Full platform CI | `full-ci.yml` | Ubuntu GCC 全量 host 套件、Ubuntu Clang、fresh-clone 可复现 gate（git archive → 干净目录 configure/build/ctest/docs/security） | push main / 手动 / 每周（周日 03:00 UTC） |
+| Sanitizer CI | `sanitizer.yml` | Linux ASan（全量 host）、UBSan（全量 host）、TSan（core concurrency subset：endpoint_race / ack_concurrency / endpoint_lifecycle / deferred_control / lifecycle） | push main / 手动 / 每周（周日 04:00 UTC） |
+| Benchmark CI | `benchmark.yml` | bench-smoke（每次 PR/push：编译 + `--quick` + `stream_encode alloc_count=0` gate）；bench-full（每晚/手动：全量 CSV + 与基线比较，回归 &gt;25% 才失败） | PR/push（smoke）；schedule 02:30 UTC / 手动（full） |
 | Release（tag 通道） | `release.yml` | tag `v*` 触发（可手动），收集固件产物与校验和发布到 GitHub Release | 仅 tag `v*` 或手动 |
 | Hardware smoke（手动通道） | `hardware-smoke.yml` | 手动触发的真机冒烟，运行在 self-hosted runner（有硬件环境） | 仅手动 + self-hosted |
 
@@ -34,6 +38,9 @@ CI 按「速度从快到慢、环境从薄到厚」分四层，外加两条特�
 | `windows-ci` | pull_request + push | pc/**、shared/**、scripts/**、docs/**、README.md 等（以 workflow 文件为准） | 命中 pc / shared / scripts / docs / README 路径时 |
 | `esp32-ci` | pull_request + push + workflow_dispatch | esp32/**、shared/**、scripts/espview_profile*、scripts/ci_esp32*、examples/**、.github/workflows/esp32-ci.yml | 命中 esp32 / shared / scripts-profile 路径时；手动触发全部 9 个 profile |
 | `docs-security` | pull_request + push + workflow_dispatch | 无（始终运行） | 每次 PR、每次 push |
+| `full-ci` | push main + workflow_dispatch + schedule（周日 03:00 UTC） | 无 | main push / 手动 / 每周 |
+| `sanitizer` | push main + workflow_dispatch + schedule（周日 04:00 UTC） | 无 | main push / 手动 / 每周（不在 PR 上跑，保持 PR 分钟级） |
+| `benchmark` | pull_request + push + workflow_dispatch + schedule（每晚 02:30 UTC） | 无 | smoke：每次 PR/push；full：main push / 手动 / 每晚 |
 | `release` | push tag `v*` + workflow_dispatch | 无 | 仅 v* tag 或手动 |
 | `hardware-smoke` | workflow_dispatch（仅手动） | 无（runs-on self-hosted） | 仅手动，且有 self-hosted runner 在线 |
 
@@ -46,7 +53,8 @@ CI 按「速度从快到慢、环境从薄到厚」分四层，外加两条特�
 | --- | --- | --- | --- |
 | ubuntu-latest | g++、cmake、ctest（GitHub-hosted runner 自带） | `fast-ci` host-ubuntu：shared/protocol host 测试 | 无 Qt、无 ESP-IDF 依赖 |
 | windows-latest | MSYS2 MinGW64（mingw-w64-x86_64-gcc / cmake / ninja / make）+ Qt 6（base / serialport 包） | `fast-ci` host-windows 跑 `scripts\verify_host.bat`；`windows-ci` Qt 6 构建 + offscreen 冒烟 | MSYS2 PATH 必须前置（见 §10） |
-| ESP32 构建 | container `espressif/idf:v6.0.2`（跑在 ubuntu-latest 上） | `esp32-ci`：`idf.py` 构建 9 个 profile | **版本固定 v6.0.2，不漂移**（与本地 ESP-IDF v6.0.2 对齐）；组件走 `esp32/managed_components` 缓存 |
+| ESP32 构建 | container `espressif/idf:v6.0.2`（跑在 ubuntu-latest 上） | `esp32-ci`：`idf.py` 构建 9 个 profile + `esp32s3-smoke`（ESP32-S3 编译冒烟，非 PR 触发） | **版本固定 v6.0.2，不漂移**（与本地 ESP-IDF v6.0.2 对齐）；组件走 `esp32/managed_components` 缓存 |
+| Sanitizer / Benchmark | ubuntu-latest（GitHub-hosted，自带 g++ / cmake / ctest） | `sanitizer.yml`（ASan/UBSan/TSan）、`benchmark.yml`（CSV 基准 + 回归阈值 25%） | Linux 专用：Windows 无 TSan；sanitizer/benchmark 结果见 workflow artifacts |
 
 ## 4. PR gate
 
@@ -135,6 +143,9 @@ oled-off, diagnostic, g1_a, g1_b, g1_c, g1_d}；`<sha>` = 触发 commit 短 SHA�
 | 安全扫描 | `py scripts\security_scan.py`（随 CI 一并加入仓库，本地即可跑） | 否 |
 | CRLF 检查 | `py scripts\check_bat_crlf.py`（随 CI 一并加入仓库） | 否 |
 | workflow YAML 语法 | 本地 `python -c "import yaml; yaml.safe_load(open('.github/workflows/<name>.yml'))"` | 否 |
+| 基准（benchmark） | `scripts\run_bench.bat`（或 `scripts\run_bench.sh`）；全量模式自动与提交基线比较，`py scripts\bench_compare.py` 可单独执行 | 否（结果可本地复现；CI 只是自动兜底 + 产物归档） |
+| ASan / UBSan | Linux 下 `cmake -DCMAKE_CXX_FLAGS="-fsanitize=address"`（或 `-fsanitize=undefined`）独立 build dir 跑 ctest；Windows MSYS2 可跑 ASan/UBSan 但支持度有限 | TSan 仅 Linux（Windows 不支持 libtsan）；TSan 目标 = `espview_tsan_concurrency_tests`（`-DESPVIEW_BUILD_TSAN_SUBSET=ON`） |
+| fresh-clone 可复现 | `git archive HEAD | tar -x -C <tmp>` 后 configure / build / ctest / `check_docs.py` / `security_scan.py` | 否 |
 | ESP32 固件构建 | 本地等价：`scripts\verify_lvgl.bat` 或 `scripts\espview_build.bat -esp32 -b <profile>`（与并行代理串行） | 容器内 `espressif/idf:v6.0.2` 构建本身是 GitHub-only |
 | workflow 触发 / PR 状态 | `gh run list` / `gh run view` / `gh run watch` | 是（事件由 GitHub 触发） |
 | badge 状态 | — | 是（状态由 GitHub 渲染） |
@@ -182,7 +193,9 @@ README 顶部的四个 badge 对应四个常驻 workflow（默认分支 `main` �
 | esp32-ci | `.github/workflows/esp32-ci.yml` | Layer 3 |
 | docs-security | `.github/workflows/docs-security.yml` | Layer 4 |
 
-`release.yml` 与 `hardware-smoke.yml` 非常驻运行（tag / 手动触发），不出 badge。
+`release.yml`、`hardware-smoke.yml`、`full-ci.yml`、`sanitizer.yml`、`benchmark.yml`
+非常驻 / 非 PR gate，不出 badge；其行为与触发矩阵见本文档 §1 / §2（M8-A6 原则：
+README 只放一个主 badge 的表格，其余用文档链接，不堆 badge）。
 
 ## 12. 章节 checkpoint 纪律
 

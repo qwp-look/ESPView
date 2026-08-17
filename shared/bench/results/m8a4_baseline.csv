@@ -1,0 +1,9 @@
+op,payload_bytes,wire_bytes,iterations,trial,total_elapsed_us,elapsed_us_per_op,ops_per_sec,alloc_count,alloc_bytes
+physical_render_full,153600,1024,16,5,3586,224.125,4462,0,0
+oled_fb_write,1024,1024,32,5,381,11.906,83990,0,0
+preview_encode,1032,1032,64,5,9,0.141,7111111,64,66048
+preview_decode,1032,1032,64,5,0,0.000,0,0,0
+input_encode,8,8,128,5,17,0.133,7529412,512,2816
+coordinate_map,0,0,256,5,1,0.004,256000000,0,0
+router_fanout,15360,15360,128,5,1,0.008,128000000,0,0
+checksum=728370 presents=1280

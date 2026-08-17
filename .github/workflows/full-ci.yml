@@ -1,0 +1,127 @@
+# ESPView M8-A6 full platform CI.
+#
+# Complements the path-filtered fast/windows/esp32/docs workflows with the
+# full matrix that must be green before release-like validation:
+#
+#   ubuntu-gcc    : first-class Ubuntu GCC build of every host target + ctest
+#                   (catches MSYS2-pass / Ubuntu-fail header portability bugs)
+#   ubuntu-clang  : same suite under clang++ (portability smoke)
+#   fresh-clone   : git-archive the tracked tree into a clean dir, then
+#                   configure/build/ctest + docs/security checks -- proves any
+#                   developer can build from `git clone` alone
+#
+# Triggered on push to main, workflow_dispatch, and a weekly schedule.
+# Never touches hardware / COM / Wi-Fi; the hardware gate stays manual.
+name: full-ci
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+  schedule:
+    - cron: '0 3 * * 0'   # weekly Sunday 03:00 UTC
+
+concurrency:
+  group: full-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  ubuntu-gcc:
+    name: Host full suite (Ubuntu GCC)
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure (build/protocol)
+        run: cmake -S shared/protocol -B build/protocol -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build all host targets
+        run: cmake --build build/protocol -j "$(nproc)"
+
+      - name: Run ctest suite
+        run: |
+          mkdir -p build/logs
+          ctest --test-dir build/protocol --output-on-failure 2>&1 | tee build/logs/ubuntu-gcc-ctest.log
+
+      - name: Run test binaries directly
+        run: |
+          ./build/protocol/tests/espview_protocol_tests 2>&1 | tee -a build/logs/ubuntu-gcc-ctest.log
+          ./build/protocol/wifi_build/scan_transaction_test 2>&1 | tee -a build/logs/ubuntu-gcc-ctest.log
+
+      - name: Print environment diagnostics
+        run: |
+          echo "OS: $(uname -a)"
+          g++ --version | head -n 1
+          cmake --version | head -n 1
+          ninja --version 2>/dev/null || true
+          python3 --version
+
+      - name: Upload Ubuntu GCC logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: full-ci-ubuntu-gcc-logs
+          path: build/logs/
+          if-no-files-found: warn
+
+  ubuntu-clang:
+    name: Host suite (Ubuntu Clang)
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install clang
+        run: sudo apt-get update && sudo apt-get install -y clang
+
+      - name: Configure (build/clang, clang++)
+        run: >-
+          cmake -S shared/protocol -B build/clang -DCMAKE_BUILD_TYPE=Release
+          -DCMAKE_CXX_COMPILER=clang++
+
+      - name: Build host test targets
+        run: cmake --build build/clang --target espview_protocol_tests scan_transaction_test -j "$(nproc)"
+
+      - name: Run ctest under Clang
+        run: |
+          mkdir -p build/logs
+          ctest --test-dir build/clang --output-on-failure 2>&1 | tee build/logs/ubuntu-clang-ctest.log
+
+      - name: Upload Clang logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: full-ci-ubuntu-clang-logs
+          path: build/logs/
+          if-no-files-found: warn
+
+  fresh-clone:
+    name: Fresh-clone reproducibility gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Export tracked tree (git archive)
+        run: |
+          mkdir -p /tmp/espview-fresh
+          git archive --format=tar HEAD | tar -x -C /tmp/espview-fresh
+          ls /tmp/espview-fresh
+
+      - name: Configure + build host from fresh tree
+        run: |
+          cd /tmp/espview-fresh
+          cmake -S shared/protocol -B build -DCMAKE_BUILD_TYPE=Release
+          cmake --build build --target espview_protocol_tests scan_transaction_test -j "$(nproc)"
+          ctest --test-dir build --output-on-failure
+
+      - name: Docs + security checks from fresh tree
+        run: |
+          cd /tmp/espview-fresh
+          python3 scripts/check_docs.py
+          python3 scripts/security_scan.py
