@@ -22,7 +22,7 @@ CI 按「速度从快到慢、环境从薄到厚」分四层，外加两条特�
 | Layer 4 docs + security | `docs-security.yml` | `scripts\check_docs.py` + `scripts\security_scan.py` + `scripts\check_bat_crlf.py` + workflow YAML lint | 每次 PR / push（paths 不过滤，始终运行） |
 | Full platform CI | `full-ci.yml` | Ubuntu GCC 全量 host 套件、Ubuntu Clang、fresh-clone 可复现 gate（git archive → 干净目录 configure/build/ctest/docs/security） | push main / 手动 / 每周（周日 03:00 UTC） |
 | Sanitizer CI | `sanitizer.yml` | Linux ASan（全量 host）、UBSan（全量 host）、TSan（core concurrency subset：endpoint_race / ack_concurrency / endpoint_lifecycle / deferred_control / lifecycle） | push main / 手动 / 每周（周日 04:00 UTC） |
-| Benchmark CI | `benchmark.yml` | bench-smoke（每次 PR/push：编译 + `--quick` + `stream_encode alloc_count=0` gate）；bench-full（每晚/手动：全量 CSV + 与基线比较，回归 &gt;25% 才失败） | PR/push（smoke）；schedule 02:30 UTC / 手动（full） |
+| Benchmark CI | `benchmark.yml` | bench-smoke（每次 PR/push：编译 + `--quick` + `stream_encode alloc_count=0` gate）；bench-full（每晚/手动：全量 CSV + 与基线比较；GitHub runner 上时间比较为 advisory（--warn-only，回归表入日志 + 环境元数据），alloc_count=0 为硬门槛；严格 &gt;25% 留给同机 run_bench） | PR/push（smoke）；schedule 02:30 UTC / 手动（full） |
 | Release（tag 通道） | `release.yml` | tag `v*` 触发（可手动），收集固件产物与校验和发布到 GitHub Release | 仅 tag `v*` 或手动 |
 | Hardware smoke（手动通道） | `hardware-smoke.yml` | 手动触发的真机冒烟，运行在 self-hosted runner（有硬件环境） | 仅手动 + self-hosted |
 
@@ -54,7 +54,7 @@ CI 按「速度从快到慢、环境从薄到厚」分四层，外加两条特�
 | ubuntu-latest | g++、cmake、ctest（GitHub-hosted runner 自带） | `fast-ci` host-ubuntu：shared/protocol host 测试 | 无 Qt、无 ESP-IDF 依赖 |
 | windows-latest | MSYS2 MinGW64（mingw-w64-x86_64-gcc / cmake / ninja / make）+ Qt 6（base / serialport 包） | `fast-ci` host-windows 跑 `scripts\verify_host.bat`；`windows-ci` Qt 6 构建 + offscreen 冒烟 | MSYS2 PATH 必须前置（见 §10） |
 | ESP32 构建 | container `espressif/idf:v6.0.2`（跑在 ubuntu-latest 上） | `esp32-ci`：`idf.py` 构建 9 个 profile + `esp32s3-smoke`（ESP32-S3 编译冒烟，非 PR 触发） | **版本固定 v6.0.2，不漂移**（与本地 ESP-IDF v6.0.2 对齐）；组件走 `esp32/managed_components` 缓存 |
-| Sanitizer / Benchmark | ubuntu-latest（GitHub-hosted，自带 g++ / cmake / ctest） | `sanitizer.yml`（ASan/UBSan/TSan）、`benchmark.yml`（CSV 基准 + 回归阈值 25%） | Linux 专用：Windows 无 TSan；sanitizer/benchmark 结果见 workflow artifacts |
+| Sanitizer / Benchmark | ubuntu-latest（GitHub-hosted，自带 g++ / cmake / ctest） | `sanitizer.yml`（ASan/UBSan/TSan）、`benchmark.yml`（CSV 基准；跨机时间比较 advisory --warn-only + alloc gate 硬门槛） | Linux 专用：Windows 无 TSan；sanitizer/benchmark 结果见 workflow artifacts |
 
 ## 4. PR gate
 
@@ -205,3 +205,11 @@ README 只放一个主 badge 的表格，其余用文档链接，不堆 badge）
 - workflow 行为变化必须与本文档同步（改 `fast-ci.yml` 后 `docs/ci.md` 对应小节一起提交，反之亦然）。
 - 并行代理边界：`.github/workflows/` 与静态检查脚本（`security_scan.py`、`check_bat_crlf.py`）
   由 CI 代理独占；`docs/ci.md` 由文档代理维护；交叉改动先沟通再落笔。
+
+## 13. M8-A6 首跑修复记录（2026-08-17）
+
+首次 push 后 3 个 job 失败（bench-smoke 在 push main 按设计 skipped），均已修复并复跑验证：
+
+- `esp32-ci` S3 smoke：`tee build/s3/set_target.log` 在 `idf.py set-target` 启动前就向 build/s3 写入日志，fullclean 因「非空但无 CMakeCache.txt」拒绝清理（exit 2）；修复为日志先落在工作目录、成功后移入 build/s3。本地已按相同错误复现并验证修复路径。
+- `full-ci` fresh-clone：`security_scan.py` 在无 `.git` 的 `git archive` 树中 `git ls-files` 失败（exit 128）；修复为 git 不可用时回退文件系统遍历（跳过 .git / build）。
+- `benchmark` bench-full：提交基线在本机测得，GitHub runner 整体慢 +27%..+60%，绝对 ns 跨机比较无效（任务书 §十八）；修复为 CI 上比较 `--warn-only` + 环境元数据，`stream_encode alloc_count=0` alloc gate 保持硬失败；严格 >25% 时间门槛保留给同机 `run_bench.bat` / `run_bench.sh`。

@@ -141,8 +141,12 @@ jobs:
         run: |
           set -euo pipefail
           . "$IDF_PATH/export.sh" >/dev/null
+          # set-target triggers fullclean, which refuses to touch a non-empty
+          # dir without CMakeCache.txt. Tee the log OUTSIDE build/s3 first, then
+          # move it in after set-target succeeds (a fresh checkout has no dir).
+          idf.py -B build/s3 set-target esp32s3 2>&1 | tee set_target.log
           mkdir -p build/s3
-          idf.py -B build/s3 set-target esp32s3 2>&1 | tee build/s3/set_target.log
+          mv set_target.log build/s3/set_target.log
 
       - name: Build firmware (esp32s3)
         working-directory: esp32

@@ -2,7 +2,9 @@
 # -*- coding: utf-8 -*-
 """ESPView GitHub Actions security scanner.
 
-Scans git-tracked files only (git ls-files -z from the repo root) and
+Scans git-tracked files only (git ls-files -z from the repo root; when the
+tree has no .git -- the fresh-clone gate / tarball -- falls back to a
+filesystem walk of the repo tree) and
 flags hardcoded secrets and private networking material:
 
   a) GitHub tokens: ghp_/gho_/ghs_/ghu_ + github_pat_ forms.
@@ -121,34 +123,48 @@ def is_allowed_ip(ip_str):
     return any(addr in net for net in ALLOWED_NETS)
 
 
-def git_tracked_files():
+def _git_ls_files(args):
+    # git ls-files -z <args> output, or None when git is missing / not a repo.
     try:
-        proc = subprocess.run(["git", "-C", REPO_ROOT, "ls-files", "-z"],
-                              stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                              timeout=60)
-    except Exception as exc:
-        raise IOError("git ls-files failed: %s" % exc)
+        proc = subprocess.run(
+            ["git", "-C", REPO_ROOT, "ls-files", "-z"] + args,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=60)
+    except Exception:
+        return None
     if proc.returncode != 0:
-        raise IOError("git ls-files exited %d: %s"
-                      % (proc.returncode,
-                         proc.stderr.decode("utf-8", "replace").strip()))
-    text = proc.stdout.decode("utf-8", "replace")
+        return None
+    return proc.stdout.decode("utf-8", "replace")
+
+
+def _walk_fallback():
+    # Enumerate repo files without git (fresh-clone gate / tarball trees).
+    out = []
+    for root, dirs, files in os.walk(REPO_ROOT):
+        dirs[:] = [d for d in dirs if d not in (".git", "build")]
+        for name in files:
+            full = os.path.join(root, name)
+            rel = os.path.relpath(full, REPO_ROOT).replace(os.sep, "/")
+            out.append(rel)
+    return sorted(out)
+
+
+def git_tracked_files():
+    text = _git_ls_files([])
+    if text is None:
+        print("security_scan: git unavailable (not a repo); scanning filesystem tree",
+              file=sys.stderr)
+        return _walk_fallback()
     return [p for p in text.split("\0") if p]
 
 
 def check_tracked_sdkconfig():
     findings = []
-    try:
-        proc = subprocess.run(
-            ["git", "-C", REPO_ROOT, "ls-files", "esp32/sdkconfig*"],
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=60)
-    except Exception as exc:
-        raise IOError("git ls-files esp32/sdkconfig* failed: %s" % exc)
-    if proc.returncode != 0:
-        raise IOError("git ls-files esp32/sdkconfig* exited %d: %s"
-                      % (proc.returncode,
-                         proc.stderr.decode("utf-8", "replace").strip()))
-    for name in proc.stdout.decode("utf-8", "replace").splitlines():
+    text = _git_ls_files(["esp32/sdkconfig*"])
+    if text is None:
+        names = [p for p in _walk_fallback() if p.startswith("esp32/sdkconfig")]
+    else:
+        names = [n for n in text.split("\0") if n.strip()]
+    for name in names:
         name = name.strip()
         if not name:
             continue

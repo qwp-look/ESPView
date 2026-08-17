@@ -4358,3 +4358,26 @@ G11 验收清单（本日全部执行，工作树含 M7-G 全部 13 个提交）
   检查）；security_scan clean（276 tracked files）；check_bat_crlf 全绿（8 .bat，
   CRLF 必须）；9 个 workflow YAML 全部可解析；bash -n（run_bench.sh）通过。
 - wire format 0 修改；DESIGN.md 保留；working tree clean；HEAD == origin/main。
+
+AR.9 首跑 CI 修复记录（2026-08-17，M8-A6 首个 checkpoint 推送后的首次 GitHub Actions 全量运行）
+
+首次 push 后 3 个 job 失败（另 1 个 bench-smoke 在 push main 上按设计 skipped）：
+
+1. `esp32-ci` → `ESP32-S3 compile smoke`：`idf.py set-target esp32s3` 内部先执行
+   fullclean；`tee build/s3/set_target.log` 在 idf.py 启动前就向 build/s3 写入
+   日志文件，使目录「非空但无 CMakeCache.txt」，fullclean 拒绝清理（exit 2，
+   判断位于 esp-idf tools/idf_py_actions/core_ext.py 的 fullclean）。
+   修复：set-target 的日志先 tee 到工作目录（build/s3 之外），成功后移入
+   build/s3（esp32-ci.yml）。本地以相同错误复现（exit 2）并验证修复路径 PASS。
+2. `full-ci` → `Fresh-clone reproducibility gate`：`git archive` 解包目录没有
+   `.git`，`security_scan.py` 的 `git ls-files` 失败（exit 128）。
+   修复：security_scan.py 在 git 不可用/非仓库时回退为文件系统遍历
+   （跳过 .git / build），fresh-clone gate 语义不变。
+3. `benchmark` → `Benchmark full`：提交的 m8a1/m8a4 基线在本机（Windows/MSYS2）
+   测得，GitHub runner（ubuntu-latest）整体慢约 +27%..+60%，24 项绝对时间
+   「回归」是机器差异而非代码退化。按任务书 §十八（机器差异巨大时记录环境
+   元数据、不强行比较绝对 ns）：bench-full 的两步比较改为 `--warn-only`
+   （回归表仍打印到日志，环境元数据步骤保留），`stream_encode alloc_count=0`
+   的确定性 alloc gate 仍为硬失败；严格 >25% 时间门槛保留给同机运行
+   （scripts/run_bench.bat / run_bench.sh）。
+

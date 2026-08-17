@@ -315,7 +315,7 @@ Additional CI layers (no badges; full trigger matrix + local equivalents in
 | --- | --- | --- |
 | Full platform CI | `full-ci.yml` | push main / manual / weekly: Ubuntu GCC full suite, Ubuntu Clang, fresh-clone reproducibility gate |
 | Sanitizer CI | `sanitizer.yml` | push main / manual / weekly: Linux ASan + UBSan (full host), TSan (core concurrency subset) |
-| Benchmark CI | `benchmark.yml` | every PR/push (smoke + `stream_encode` zero-alloc gate); nightly/manual (full CSV + &gt;25% regression gate) |
+| Benchmark CI | `benchmark.yml` | every PR/push (smoke + `stream_encode` zero-alloc gate); nightly/manual (full CSV; time compare advisory on CI runners, zero-alloc gate strict) |
 | Hardware smoke | `hardware-smoke.yml` | manual only, self-hosted runner with physical ESP32 (`workflow_dispatch`) |
 
 | Layer | What it runs | Never does |
