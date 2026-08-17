@@ -1,0 +1,8 @@
+# ESPView M8-A7（A7-7）：ESP32-S3 16 MiB flash 分区（编译准备；无 OTA）。
+# 不强制 classic ESP32 的 2 MiB factory；N16R8 容量下 factory 扩为 6 MiB。
+# OTA 未实现（M8-A7 红线）；未来如需 OTA，在此处预留 ota_0 / ota_1 即可，
+# 不改变 wire format / 既有分区布局语义。
+# Name,   Type, SubType, Offset,  Size,     Flags
+nvs,      data, nvs,     0x9000,  0x6000,
+phy_init, data, phy,     0xf000,  0x1000,
+factory,  app,  factory, 0x10000, 0x600000,

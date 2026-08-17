@@ -1,0 +1,9 @@
+# ESPView M8-A7（A7-7）：classic ESP32 target-specific defaults。
+# ESP-IDF 在 target=esp32 时自动叠加到 sdkconfig.defaults（后应用，覆盖同名键）。
+# 目标芯片：经典 ESP32-D0WDQ6（rev v1.1）。
+CONFIG_IDF_TARGET="esp32"
+
+# M6-B：4 MiB flash，custom partition table（single factory app = 2 MiB，no OTA）。
+CONFIG_ESPTOOLPY_FLASHSIZE_4MB=y
+CONFIG_PARTITION_TABLE_CUSTOM=y
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"

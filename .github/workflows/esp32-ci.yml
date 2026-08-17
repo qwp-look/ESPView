@@ -71,7 +71,7 @@ jobs:
         run: python3 scripts/espview_profile_sdkconfig.py --check ${{ matrix.profile }}
 
       - name: Apply profile sdkconfig
-        run: python3 scripts/espview_profile_sdkconfig.py --apply ${{ matrix.profile }} --sdkconfig "$GITHUB_WORKSPACE/esp32/build/${{ matrix.profile }}/sdkconfig" --seed-defaults "$GITHUB_WORKSPACE/esp32/sdkconfig.defaults"
+        run: python3 scripts/espview_profile_sdkconfig.py --apply ${{ matrix.profile }} --sdkconfig "$GITHUB_WORKSPACE/esp32/build/${{ matrix.profile }}/sdkconfig" --seed-defaults "$GITHUB_WORKSPACE/esp32/sdkconfig.defaults.esp32" --target esp32
 
       - name: Build firmware
         working-directory: esp32
@@ -120,7 +120,8 @@ jobs:
 
   # M8-A6 §二十一/§三十八：ESP32-S3 compile portability smoke（experimental）。
   # 只做 configure + compile（不 flash、不做 S3 peripheral integration）；
-  # 使用 sdkconfig.defaults（UART transport + LVGL + OLED off，无凭据）。
+  # 使用 sdkconfig.defaults + sdkconfig.defaults.esp32s3（UART transport + LVGL + OLED off，无凭据）。
+  # A7-7：16 MiB flash 布局来自 partitions.esp32s3.csv（factory 6 MiB，无 OTA）。
   # 不在 PR 上运行（Nightly / push main / 手动）；结果失败只影响本 job。
   esp32s3-smoke:
     name: ESP32-S3 compile smoke (experimental)

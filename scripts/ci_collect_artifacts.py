@@ -10,6 +10,7 @@ sha256sum(1) format covering every file it produced.
 Interface (see --help):
     python3 scripts/ci_collect_artifacts.py \
         --sha <commit-sha> --tag <release-tag> --out <dir> \
+        [--target esp32|esp32s3] \
         --bin "uart:path/to/espview_esp32.bin" \
         --bin "uart:path/to/bootloader.bin" \
         --bin "uart:path/to/partition-table.bin" \
@@ -23,6 +24,10 @@ Naming (short-sha = first 8 characters of --sha):
     espview_esp32.bin      -> espview-<profile>-<short-sha>.bin
     bootloader.bin         -> bootloader-<profile>-<short-sha>.bin
     partition-table.bin    -> partition-table-<profile>-<short-sha>.bin
+
+    With --target <target>, every name is prefixed with "<target>-"
+    (e.g. esp32s3-espview-<profile>-<short-sha>.bin) so artifacts
+    from different chips never collide in one release directory.
 
 Security red lines (never violated):
     * Refuses any path whose text contains 'sdkconfig' or 'logs'
@@ -56,6 +61,9 @@ BIN_KINDS = {
 
 # Profile names may contain only [A-Za-z0-9_-] (see espview_profiles.py).
 PROFILE_NAME_RE = re.compile(r"^[A-Za-z0-9_-]+$")
+
+# IDF targets currently packaged (mirrors espview_profiles.TARGETS).
+TARGETS = ("esp32", "esp32s3")
 
 # Path substrings that are never allowed to be packaged.
 FORBIDDEN_SUBSTRINGS = ("sdkconfig", "logs")
@@ -123,8 +131,9 @@ def read_manifest(path):
     return entries
 
 
-def plan(entries, short):
+def plan(entries, short, target=None):
     """Validate every entry and return [(source, dest_name), ...] pairs."""
+    prefix = "%s-" % target if target else ""
     planned = []
     seen = {}
     for profile, src in entries:
@@ -138,7 +147,7 @@ def plan(entries, short):
                 "unknown bin type %r for profile %r (expected one of: %s)"
                 % (os.path.basename(src), profile,
                    ", ".join(sorted(BIN_KINDS))))
-        dest = "%s-%s-%s.bin" % (kind, profile, short)
+        dest = "%s%s-%s-%s.bin" % (prefix, kind, profile, short)
         assert_safe(dest)
         if dest in seen:
             raise UsageError(
@@ -184,6 +193,10 @@ def main(argv=None):
     group.add_argument(
         "--manifest", metavar="FILE",
         help="text file with one 'PROFILE:PATH' entry per line")
+    ap.add_argument(
+        "--target", default=None, choices=TARGETS,
+        help="IDF target; prefixes artifact names with '<target>-' "
+             "(default: no prefix)")
     args = ap.parse_args(argv)
 
     if not re.fullmatch(r"[0-9a-fA-F]{7,64}", args.sha or ""):
@@ -201,7 +214,7 @@ def main(argv=None):
         assert_safe(out_dir)
         os.makedirs(out_dir, exist_ok=True)
         copied = []
-        for src, dest_name in plan(entries, short):
+        for src, dest_name in plan(entries, short, args.target):
             dest_path = os.path.join(out_dir, dest_name)
             shutil.copyfile(src, dest_path)
             copied.append((dest_name, src))
@@ -210,8 +223,9 @@ def main(argv=None):
         print("wrote %s (%d file%s)" % (
             manifest_path, len(checksum_lines),
             "s" if len(checksum_lines) != 1 else ""))
-        print("ci_collect_artifacts: OK -- %d file(s) for tag %r"
-              % (len(copied), args.tag))
+        print("ci_collect_artifacts: OK -- %d file(s) for tag %r%s"
+              % (len(copied), args.tag,
+                 " (target %s)" % args.target if args.target else ""))
         return 0
     except UsageError as exc:
         print("ci_collect_artifacts: usage error: %s" % exc, file=sys.stderr)

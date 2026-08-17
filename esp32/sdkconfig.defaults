@@ -7,19 +7,15 @@
 #     选择"零占用"路径，彻底消除对启动/flash 的干扰风险。
 CONFIG_ESP_CONSOLE_NONE=y
 
-# 目标芯片：经典 ESP32-D0WDQ6（rev v1.1）
-CONFIG_IDF_TARGET="esp32"
+# M8-A7（A7-7）：target-specific 配置移入 sdkconfig.defaults.esp32 /
+# sdkconfig.defaults.esp32s3（ESP-IDF 按 target 自动叠加），本文件不再固定
+# CONFIG_IDF_TARGET / flash 尺寸 / 分区表，避免 set-target 漂移污染。
 
 # 实验：921600 下 PC 侧丢字节，对照 115200
 CONFIG_ESPVIEW_UART_BAUD=115200
 
 # M5-A：默认应用 = LVGL demo（TestPattern 供硬件回归工具切换）
 CONFIG_ESPVIEW_APP_LVGL=y
-
-# M6-B：4 MiB flash，custom partition table（single factory app = 2 MiB，no OTA）。
-CONFIG_ESPTOOLPY_FLASHSIZE_4MB=y
-CONFIG_PARTITION_TABLE_CUSTOM=y
-CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
 
 # M6-C：TCP 大帧吞吐（5760 -> 24576；代价 ~19KB RAM）。
 CONFIG_LWIP_TCP_SND_BUF_DEFAULT=24576

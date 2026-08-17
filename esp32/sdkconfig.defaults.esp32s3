@@ -1,0 +1,9 @@
+# ESPView M8-A7（A7-7）：ESP32-S3 target-specific defaults（N16R8 编译准备）。
+# ESP-IDF 在 target=esp32s3 时自动叠加到 sdkconfig.defaults（后应用，覆盖同名键）。
+# 本阶段只做 build / 配置 / 可移植性；无 USB / LCD / Touch / OTA（DESIGN AS.2 D10 边界）。
+CONFIG_IDF_TARGET="esp32s3"
+
+# N16R8 = 16 MiB flash；target-specific 分区表（较大 factory，无 OTA）。
+CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y
+CONFIG_PARTITION_TABLE_CUSTOM=y
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.esp32s3.csv"

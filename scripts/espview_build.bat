@@ -5,6 +5,7 @@ REM
 REM   Usage:
 REM     scripts\espview_build.bat [build] [-host] [-qt] [-esp32]
 REM                                [-b <profile>|--profile <profile>]
+REM                                [-t <target>|--target <target>]
 REM                                [--check] [--dry-run] [-h|--help]
 REM     scripts\espview_build.bat verify [verify args]  -> espview_verify.bat
 REM     scripts\espview_build.bat profile list|show <name>|check <name>
@@ -55,6 +56,7 @@ if errorlevel 1 (
     if errorlevel 1 set "ESPVIEW_PYTHON=py"
 )
 set "ESP32_PROFILE=uart_hw"
+set "ESP32_TARGET=esp32"
 for %%i in ("%~dp0..") do set "ROOT=%%~fi"
 
 REM ---- argument parsing -------------------------------------
@@ -69,6 +71,10 @@ if "%~1"=="" goto :parsed
 if /i "%~1"=="-host"        ( set "DO_HOST=1"  & shift & goto :parse )
 if /i "%~1"=="-qt"          ( set "DO_QT=1"    & shift & goto :parse )
 if /i "%~1"=="-esp32"       ( set "DO_ESP32=1" & shift & goto :parse )
+if /i "%~1"=="-t"           ( if "%~2"=="" goto :usage
+                              set "ESP32_TARGET=%~2" & shift & shift & goto :parse )
+if /i "%~1"=="--target"     ( if "%~2"=="" goto :usage
+                              set "ESP32_TARGET=%~2" & shift & shift & goto :parse )
 if /i "%~1"=="-b"           ( if "%~2"=="" goto :usage
                               set "ESP32_PROFILE=%~2" & shift & shift & goto :parse )
 if /i "%~1"=="--profile"    ( if "%~2"=="" goto :usage
@@ -113,7 +119,7 @@ echo                 esp32 profile=%ESP32_PROFILE%  check-only=%CHECK_ONLY% dry-
 echo ============================================================
 
 if defined DO_ESP32 (
-    echo [esp32] profile summary:
+    echo [esp32] target=%ESP32_TARGET%  profile summary:
     "%ESPVIEW_PYTHON%" "%ROOT%\scripts\espview_profile_sdkconfig.py" --show %ESP32_PROFILE%
     if errorlevel 1 goto :prof_tool_fail
 )
@@ -127,7 +133,7 @@ echo [build] DRY-RUN plan:
 if defined DO_HOST echo   host   : scripts\verify_host.bat
 if defined DO_QT   echo   qt     : scripts\verify_qt.bat
 if defined DO_ESP32 (
-    echo   esp32  : "%ESPVIEW_PYTHON%" scripts\espview_profile_sdkconfig.py --apply %ESP32_PROFILE% --sdkconfig "%PROFILE_SDKCONFIG%"
+    echo   esp32  : "%ESPVIEW_PYTHON%" scripts\espview_profile_sdkconfig.py --apply %ESP32_PROFILE% --sdkconfig "%PROFILE_SDKCONFIG%" --target %ESP32_TARGET%
     echo   esp32  : idf.py -B build\%ESP32_PROFILE% -D SDKCONFIG=%PROFILE_SDKCONFIG% build
 )
 echo.
@@ -178,7 +184,9 @@ REM M7-G: prepare the profile's own isolated sdkconfig (seed once from
 REM esp32\sdkconfig without inspecting it, then force-apply the profile's
 REM whitelisted Kconfig keys so no drift is possible). Credentials stay
 REM inside the untracked per-profile sdkconfig; nothing is ever printed.
-"%ESPVIEW_PYTHON%" "%ROOT%\scripts\espview_profile_sdkconfig.py" --apply %ESP32_PROFILE% --sdkconfig "%PROFILE_SDKCONFIG%" --seed "%ROOT%\esp32\sdkconfig" --seed-defaults "%ROOT%\esp32\sdkconfig.defaults"
+REM M8-A7（A7-7）：--target 使 seed/sdkconfig 的 CONFIG_IDF_TARGET 不匹配时
+REM 显式失败（防 esp32s3 漂移静默污染 esp32 构建）。
+"%ESPVIEW_PYTHON%" "%ROOT%\scripts\espview_profile_sdkconfig.py" --apply %ESP32_PROFILE% --sdkconfig "%PROFILE_SDKCONFIG%" --seed "%ROOT%\esp32\sdkconfig" --seed-defaults "%ROOT%\esp32\sdkconfig.defaults" --target %ESP32_TARGET%
 if errorlevel 1 goto :prof_tool_fail
 powershell -NoProfile -ExecutionPolicy Bypass -Command "$ErrorActionPreference='Stop'; try { & { . '%ESPIDF_PROFILE%' }; Set-Location '%ROOT%\esp32'; idf.py -B build/%ESP32_PROFILE% -D SDKCONFIG=%PROFILE_SDKCONFIG% build; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE } } catch { Write-Host ('[esp32] ERROR: ' + $_.Exception.Message); exit 1 }"
 if errorlevel 1 ( set "ERR=1" & goto :fail )
@@ -255,9 +263,10 @@ set "ERR=3" & goto :fail
 :usage
 if not defined ERR set "ERR=2"
 echo.
-echo Usage: scripts\espview_build.bat [build] [-host] [-qt] [-esp32] [-b ^<profile^>] [--check] [--dry-run]
+echo Usage: scripts\espview_build.bat [build] [-host] [-qt] [-esp32] [-b ^<profile^>] [-t ^<target^>] [--check] [--dry-run]
 echo   default (no args): -host -qt -esp32
 echo   -b ^<profile^>   ESP32 build profile (whitelist; default uart)
+echo   -t ^<target^>   IDF target ^(esp32 default; esp32s3^)
 echo   --check     preflight only, no build
 echo   --dry-run   print the plan, run nothing
 echo   verify      delegate to scripts\espview_verify.bat
