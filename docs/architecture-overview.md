@@ -1,6 +1,6 @@
 # 高层架构（Architecture Overview）
 
-> 只描述**已实现**的部分（M0..M7-F 冻结）。目录结构与设计依据：
+> 只描述**已实现**的部分（M0..M8-A6 冻结；M8-A7 进行中）。目录结构与设计依据：
 > [docs/DESIGN.md](DESIGN.md)（E/C/D/K/L 节 + 里程碑 M 节）。
 
 ## 1. 系统图
@@ -113,3 +113,21 @@ PC（Qt VirtualScreen）
 | M7-F | 硬件证据矩阵（F1–F4）+ provisioning 生产化硬化 |
 
 逐条提交历史见 [docs/changelog.md](changelog.md)。
+
+## 7. 依赖规则（什么不能依赖什么）
+
+| 模块 | 不得依赖 | 现状（M8-A7 核查） |
+| --- | --- | --- |
+| `shared/protocol` | Qt、ESP-IDF、具体 Transport 实现 | ✅ 纯 C++17；仅包含 `transport.h` **接口头**（M8-A3 明确豁免，见 DESIGN §35.2） |
+| `shared/display` | Qt、LVGL、ESP-IDF | ✅ 纯 C++17（依赖 protocol/transport/oled 接口头，方向允许） |
+| `shared/input`（InputManager 等） | Qt、LVGL | ✅ 纯 C++17；LVGL 接线只在 `esp32/components/lvgl_port/src/lvgl_indev.cpp` |
+| `shared/transport` | 协议实现 | ✅ 独立；TransportManager 无 UART/TCP 细节 |
+| `shared/oled`、`shared/wifi` | 平台 | ✅ 纯 C++17 + host 测试 |
+| `pc/` | ESP-IDF | ✅ Qt 只依赖 shared 头 |
+| `esp32/` | Qt | ✅ IDF 组件复用 shared 源码 |
+
+**S3 边界（M8-A7）**：`ITransport` 已预留 `TransportType::kUsb=2`（CDC 语义 paced=true），
+未来 UsbTransport 只需实现 ITransport 并接入 TransportManager，不改 shared 核心（DESIGN
+AQ.16）。当前 Classic ESP32 无 native USB；S3 的 USB CDC / LCD / touch 均为 planned、
+not implemented（红线，DESIGN §四十一 对应章节）。
+

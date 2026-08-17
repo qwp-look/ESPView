@@ -1,4 +1,4 @@
-# ESPView 测试与验证指南（M7-G9）
+# ESPView 测试与验证指南（M8-A7）
 
 > 范围：host-only 测试、Qt 构建验证、ESP32 固件构建验证、真实硬件（UART / Wi-Fi / OLED）测试的入口、真实命令、通过标准与当前 baseline。内容与 `docs/DESIGN.md`（§Q 测试分层、各里程碑实测章节、AK 硬件证据矩阵）保持一致，详细设计与证据见 DESIGN.md。
 >
@@ -48,7 +48,7 @@ cmake --build build\verify_host\protocol --target espview_protocol_tests scan_tr
 ctest --test-dir build\verify_host\protocol --output-on-failure
 ```
 
-通过标准（2026-08-16，HEAD c48efcd 实测）：`100% tests passed out of 2`（ctest 2/2）；`espview_protocol_tests` 384,440 checks / 0 failures；`scan_transaction_test` 192 checks / 0 failures。
+通过标准（2026-08-17，M8-A6 DESIGN AR.8 实测）：`100% tests passed out of 2`（ctest 2/2）；`espview_protocol_tests` 393,661 checks / 0 failures；`scan_transaction_test` 211 checks / 0 failures。
 
 套件组成（均并入 `espview_protocol_tests` 单进程）：
 
@@ -251,7 +251,7 @@ Host 侧 OLED 测试（无硬件）：OledFb、命令/分段生成、恢复策�
 - 仓库 CI 分层：Layer 1 fast host CI（ubuntu + windows MSYS2 host 测试）、Layer 2 Windows+Qt CI（Qt 构建 + offscreen 冒烟）、
   Layer 3 ESP32 build CI（容器 `espressif/idf:v6.0.2`，默认 uart/tcp/diagnostic，dispatch 可全量）、
   Layer 4 docs+security（check_docs / security_scan / check_bat_crlf / YAML lint，每次 PR 必跑）。
-- CI 只做 build 与静态验证，绝不 flash、不要求 COM/CH340/真 Wi-Fi；`CI passed ≠ hardware passed`（硬件 gate 边界见 [docs/ci.md](ci.md) 与 DESIGN.md AL.3）。
+- M8-A6 追加层：full-ci（Ubuntu GCC/Clang 全量 + fresh-clone 可复现 gate）、sanitizer（Linux ASan/UBSan/TSan subset）、benchmark（PR smoke + 非 PR full + stream_encode alloc gate）；详见 [docs/ci.md](ci.md) 与 DESIGN AR.2/AR.8/AR.9。`n- CI 只做 build 与静态验证，绝不 flash、不要求 COM/CH340/真 Wi-Fi；`CI passed ≠ hardware passed`（硬件 gate 边界见 [docs/ci.md](ci.md) 与 DESIGN.md AL.3）。
 - 触发矩阵、PR gate、branch protection 建议、artifact 命名与凭据策略详见 [docs/ci.md](ci.md)。
 
 ## 9. 变更纪律

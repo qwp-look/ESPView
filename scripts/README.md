@@ -1,4 +1,4 @@
-# ESPView Build / Flash / Verify 工作流（M7-G）
+# ESPView Build / Flash / Verify 工作流（M8-A7）
 
 本目录是 ESPView 的**工具链层**：构建、烧录、验证、静态检查、硬件实验 harness。
 所有脚本只在 `scripts/` 内；固件（`esp32/`）、PC 端（`pc/`）、共享库（`shared/`）、
@@ -14,7 +14,7 @@
 | `espview_build_flash.bat` | 构建 + 烧录组合 | `build-flash`（默认）、`build`、`flash`、`check`、`dry-run`、`verify`、`profile` |
 | `espview_e_ab_harness.py` | M7-E A/B/C 硬件实验（OLED active/suspended/disabled + Wi-Fi scan） | `--build --flash --dry-run` 等 |
 | `espview_g1_harness.py` | M7-G G1 A/B/C/D 硬件实验（OLED × RF 矩阵，机器可解析） | `--build --flash --probe --dry-run` 等 |
-| `check_docs.bat` / `check_docs.py` | M7-G G10 静态文档检查（无构建、无硬件） | `--help` |
+| `check_docs.bat` / `check_docs.py` | 静态文档检查（无构建、无硬件） | `--help` |
 | `espview_profile_sdkconfig.py` | Profile sdkconfig 管理器（白名单 + 隔离 + 防 drift） | `--list / --show / --check / --apply` |
 | `espview_profiles.py` | 白名单 / label 表 / Kconfig 键映射（唯一事实源） | 内部模块 |
 | `security_scan.py` | 凭据/secret 模式扫描（git tracked 文件；显式 allowlist 语义） | `--help`、`--list-allowlist` |
@@ -50,7 +50,7 @@ scripts\espview_build.bat profile list       :: 白名单 + 6 属性表
 scripts\check_docs.bat                       :: 静态文档检查
 ```
 
-## Profile 系统（M7-G）
+## Profile 系统（M8-A7 更新）
 
 ### 白名单与 label 表
 

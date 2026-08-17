@@ -1,7 +1,7 @@
 # ESPView — 开发者文档（Development）
 
 > 面向在 ESPView 仓库内**做开发与验证**的开发者（含并行子代理）。本文档只描述仓库
-> 当前真实状态（以 `git HEAD` 为准；当前里程碑 M7-G——发布前最终化 + GitHub Actions CI 落地中）；协议与架构的**唯一权威**是
+> 当前真实状态（以 `git HEAD` 为准；当前里程碑 M8-A7——文档/资源预算/target 与 profile 抽象/S3 准备/仓库维护）；协议与架构的**唯一权威**是
 > [docs/DESIGN.md](DESIGN.md)，脚本用法以 [scripts/README.md](../scripts/README.md) 最新为准。
 >
 > 阅读路径：功能总览见 [../README.md](../README.md)（仓库根）；文档索引见

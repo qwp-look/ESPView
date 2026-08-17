@@ -122,3 +122,23 @@ PC 侧 `ReadFile err=5`。
 - COM 口不存在：flash 退出码 4 → 设备管理器确认端口；关闭占用程序。
 - 只想验证流程不真烧：`scripts\espview_flash.bat --dry-run`。
 - profile 参数：`-b <name>`（合法字符 A-Z a-z 0-9 _ -），不是 `--profile`。
+
+## 8. 其他历史问题（M8-A7 补充）
+
+- **运行 Qt GUI 时缺 `libstdc++-6.dll` / Qt DLL**：MSYS2 MinGW64 的 exe 需要
+  `C:\msys64\mingw64\bin` 在 PATH 才能找到运行时 DLL；只把该路径加进构建环境
+  还不够，运行 `espview_virtual_display.exe` 的终端也要先
+  `set PATH=C:\msys64\mingw64\bin;%PATH%`（或把 DLL 拷贝到 exe 目录）。
+- **NVS 持久化不存在（by design）**：ESPView 不把 Wi-Fi 凭据写进 NVS，重启后
+  凭据丢失、需要重新 provisioning；这是凭据 RAM-only 红线的预期行为
+  （docs/security.md），不是 bug。
+- **ESP32-S3 相关**：当前只有 compile smoke（CI `esp32s3-smoke`；本地
+  `idf.py -B build/s3 set-target esp32s3` + `idf.py -B build/s3 build`），
+  没有任何 S3 硬件验证；USB CDC / LCD / touch 未实现。
+- **`--no-reset` 烧录**：`espview_flash.bat --no-reset` 走 esptool 直调
+  （读 `build\<profile>\flash_args`）；必须先用 `espview_build.bat -esp32`
+  构建同一 profile，`flash_args` 才存在；烧完不自动复位，需手动按板子
+  EN/RESET 或重新插拔 USB。
+- **S3 烧录目标**：M8-A7 起 `-t esp32s3` 会让脚本自动选择 `--chip esp32s3`；
+  经典 ESP32 仍是 `--chip esp32`（esptool 不自动推断，见 §7）。
+

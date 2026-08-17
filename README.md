@@ -1,6 +1,6 @@
 # ESPView -- ESP32 Virtual Display & Input Bridge
 
-Phase-1 prototype (v0.1) -- milestones M0-M7-G (2026-08-16). The wire protocol is
+Phase-1 prototype (v0.1) -- milestones M0-M8-A6 completed (2026-08-17), M8-A7 in progress. The wire protocol is
 frozen and covered by host suites plus real-hardware acceptance records; the full
 specification and evidence live in [docs/DESIGN.md](docs/DESIGN.md) (written in
 Simplified Chinese).
@@ -118,12 +118,13 @@ docs/       # DESIGN.md (protocol spec + milestone evidence), per-topic guides
 
 ### Prerequisites
 
+- A fresh checkout: `git clone https://github.com/qwp-look/ESPView.git && cd ESPView` (or your own fork).
 - ESP-IDF v6.0.2 PowerShell profile
   (default `C:\Espressif\tools\Microsoft.v6.0.2.PowerShell_profile.ps1`,
   override with `ESPIDF_PROFILE`).
 - MSYS2 MinGW64 with `g++`, `cmake`, `ctest` (default
   `C:\msys64\mingw64\bin`, override with `MINGW64_BIN`).
-- Qt 6 (MSYS2 MinGW64 package) for the PC GUI.
+- Qt 6.11.1 (MSYS2 MinGW64 package) for the PC GUI.
 
 The one-command entry points are documented in
 [scripts/README.md](scripts/README.md); the raw `idf.py` flow is shown below.
@@ -283,9 +284,9 @@ See [docs/oled.md](docs/oled.md).
 
 ## Verification and testing
 
-| Entry | What it runs | Last measured (2026-08-16, HEAD `faa4c194`) |
+| Entry | What it runs | Last measured (2026-08-17, M8-A6; DESIGN AR.8) |
 | --- | --- | --- |
-| `scripts\verify_host.bat` | Protocol host suite + ctest + `transport_config_test` + `com3_frame_test --selftest-queue` + TCP loopback (127.0.0.1, no hardware) | **384,965 checks / 0 failures** (protocol 384,531; scan transaction 211; transport config 97; TCP loopback 126); ctest 2/2 passed |
+| `scripts\verify_host.bat` | Protocol host suite + ctest + `transport_config_test` + `com3_frame_test --selftest-queue` + TCP loopback (127.0.0.1, no hardware) | **394,109 checks / 0 failures** (protocol 393,661; scan transaction 211; transport config 97; TCP loopback 140); ctest 2/2 passed |
 | `scripts\verify_qt.bat` | Qt GUI target build (`espview_virtual_display.exe`) | ALL PASS |
 | `scripts\verify_lvgl.bat` | Host tests + ctest + ESP32 build via `idf.py` (+ optional COM sanity when `ESPVIEW_COM3` is set) | ALL PASS |
 | Hardware manual | 30-min TCP long-run, TCP reconnect stress 10/10, UART<->TCP runtime switch 20x20, PARTIAL/input chains | Recorded in [docs/DESIGN.md](docs/DESIGN.md) (V.7/V.9/W.6/X.10) |
@@ -299,7 +300,7 @@ See [docs/testing.md](docs/testing.md) for the full matrix.
 
 GitHub Actions runs the core workflows on every push and pull request; the badges
 below link to the workflow pages. Additional layers are documented links, not
-badges (M8-A6 badge policy: one badge per常驻 PR-gate workflow).
+badges (M8-A6 badge policy: one badge per resident PR-gate workflow).
 
 | Workflow | Badge |
 | --- | --- |
@@ -394,8 +395,8 @@ multi-device concurrency is out of scope.
 
 ### Why 4 MiB flash and no OTA?
 The project targets a 4 MiB flash with a custom partition table: a single 2 MiB
-factory app, no OTA partition. Firmware measured ~1.01 MiB (0x1037F0) at M6-B,
-leaving ~49% headroom. TinyUSB/OTA/UDP/mDNS/WebSocket/HTTP/TLS/cloud are
+factory app, no OTA partition. Firmware measured 1,134,624 B (~1.08 MiB, uart profile, 2026-08-17; DESIGN U.2 recorded 1,027,488 B at M6-B),
+leaving ~46% headroom against the 2 MiB factory app (per-profile sizes in docs/RESOURCE_BUDGET.md, M8-A7). TinyUSB/OTA/UDP/mDNS/WebSocket/HTTP/TLS/cloud are
 explicitly out of scope.
 
 ### Where is the protocol / architecture documentation?
@@ -435,6 +436,7 @@ See [docs/security.md](docs/security.md).
 ## Known limitations
 
 - No native USB device support (ESP32 USB OTG not used).
+- ESP32-S3: compile smoke only (no hardware integration started); USB CDC / LCD / touch are planned, not implemented.
 - UART baseline is 115200 8N1; 921600 is experimental-only (unreliable for
   large-frame bursts).
 - UART FULL frame ~13.5 s (115200 baud, 320x240 baseline) -- the design assumes
@@ -479,10 +481,11 @@ See [docs/security.md](docs/security.md).
 
 ## Project status and roadmap
 
-**Status (honest):** Phase-1 v0.1 prototype. Milestones M0-M7-F are committed
-(HEAD `faa4c194`); the M7-G documentation milestone (this README + the per-topic
-docs above) is in progress. The wire protocol has been frozen since M1-3C --
-subsequent milestones only add capabilities without changing existing messages.
+**Status (honest):** Phase-1 v0.1 prototype. Milestones M0-M8-A6 are committed;
+M8-A7 (documentation / resource budget / target & profile abstraction / S3
+preparation / repository maintainability) is in progress (exact history: git log --oneline).
+The wire protocol has been frozen since M1-3C -- subsequent milestones only add
+capabilities without changing existing messages.
 
 - M0 -- protocol core (Packet/Message/Frame, CRC-32, streaming encoder)
 - M1-1/2 -- UART transport, firmware + flash
@@ -499,7 +502,13 @@ subsequent milestones only add capabilities without changing existing messages.
   build/flash UX, UART acceptance + power mitigations
 - M7-E -- power-aware provisioning (A/B/C experiments, OLED scan-suspend)
 - M7-F -- hardware path diagnosis + tooling hardening
-- M7-G -- documentation refresh (in progress)
+- M7-G/H -- user + developer documentation set, contributing guide, FAQ
+- M8-A1..A5 -- benchmark harness, sanitizer prep, transport/display/input/OLED
+  abstraction consolidation, hardware acceptance records
+- M8-A6 -- CI / benchmark / sanitizer / build matrix / docs tooling (9 workflows,
+  TSan subset, bench_compare, fresh-clone gate)
+- M8-A7 -- documentation / resource budget / target & profile abstraction /
+  S3 preparation / repository maintainability (current)
 
 **Roadmap (not yet implemented):** hardware verification of the RF/USB power
 hypothesis (voltage/current capture), AP-outage testing, and -- explicitly out of

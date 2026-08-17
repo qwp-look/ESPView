@@ -19,7 +19,7 @@ git fetch upstream
 
 3. 基于最新的 `upstream/main` 建分支（见 §2）。
 
-仓库当前默认分支为 `main`（集成主干，保持可构建、可测试；HEAD 例如 `c48efcd` 等章节式提交）。
+仓库当前默认分支为 `main`（集成主干，保持可构建、可测试；HEAD 为章节式提交，以 `git rev-parse HEAD` 为准）。
 
 ## 2. 分支约定
 

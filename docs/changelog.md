@@ -1,7 +1,7 @@
 # 变更日志（Changelog）
 
-> 里程碑历史提炼自 `git log`（真实提交）。当前仓库 HEAD = `c48efcd`。
-> M0..M6-E 集中在 v0.1 初始提交；M7 系列逐里程碑提交；本轮 M7-G 为用户文档集
+> 里程碑历史提炼自 `git log`（真实提交）。当前里程碑范围 M0..M8-A6 已提交（HEAD 见 git log）。
+> M0..M6-E 集中在 v0.1 初始提交；M7/M8 系列逐里程碑提交。
 > （本目录 12 份文档，尚未提交）。
 
 ## v0.1 基础（M0..M6-E，2026-08-12..14）
@@ -51,18 +51,19 @@
 | `5d758a2` | M7-F F4 | Build/Flash UX + per-profile sdkconfig 隔离 |
 | `c48efcd` | M7-F F5 | 硬件证据矩阵 + AJ.8 / AI.3 / AG.2 措辞修正（当前 HEAD） |
 
-## M7-G（本轮，未提交）
+## M7-G..H 与 M8 系列（2026-08-16..17，已提交）
 
-- 新增用户文档集 12 份（`docs/getting-started.md`、`hardware.md`、`uart.md`、
-  `wifi.md`、`display-modes.md`、`oled.md`、`input.md`、`troubleshooting.md`、
-  `security.md`、`faq.md`、`architecture-overview.md`、`changelog.md`）。
-- 范围：只创建/修改上述文档；不碰 `README.md`、`docs/DESIGN.md`、
-  `docs/development.md`、`docs/contributing.md`、`docs/testing.md`（其他代理独占）。
-- 待后续提交（本代理不 commit / push）。
+- M7-G：用户文档集（docs/ 12 份 + 本 changelog）与 README 重构。
+- M7-H：文档收尾 + 贡献指南/FAQ。
+- M8-A1..A5：benchmark、sanitizer 准备、transport/display/input/OLED 抽象合并、
+  硬件验收记录。
+- M8-A6：CI / benchmark / sanitizer / build matrix / docs tooling（9 workflows、
+  TSan subset、bench_compare、fresh-clone gate）；首跑修复记录见 DESIGN AR.9。
+- M8-A7：文档时效 / 资源预算 / target 与 profile 抽象 / S3 准备 / 仓库维护（本轮）。
 
 ## 版本策略说明
 
 - 协议版本 `VERSION=0x01` 冻结：M7 系列全部为 wire additive（新增 TYPE/错误码/
   kSplit=3），不改 Packet Header / CRC / 既有消息 / Frame 语义。
-- host 测试规模随里程碑增长：M0 207,900 checks → M7-F 384,438+ checks
+- host 测试规模随里程碑增长：M0 207,900 checks → M8-A6 393,661 checks
   （不含 i18n/transport_config 独立套件；实测数字见 DESIGN.md 对应章节）。
