@@ -165,6 +165,10 @@ espview::transport::TransportManager g_mgr(
 display::DisplayRouteMode g_currentMode = display::DisplayRouteMode::kVirtualOnly;
 // M6-E §22：最近一次 Transport 状态快照（onTransportState 更新；供 statsLoop 诊断行）。
 std::atomic<uint8_t> g_transportState{0};  // ITransport::State::kDisconnected == 0
+// M8-A5（SINK-01）：会话状态原子快照（onSessionState 更新）。g_sink 的 alive
+// 检查只读该 atomic，不触碰 g_endpoint —— 静态析构序/锁竞争零风险。
+// SessionState::kDisconnected == 0（protocol_endpoint.h）。
+std::atomic<uint8_t> g_sessionState{0};
 // M3：ESP32 侧输入汇聚（RX 任务 feed / 会话任务 resetState，内部互斥）。
 espview::input::InputManager g_inputManager(display::kVirtualDisplayGeometry.width,
                            display::kVirtualDisplayGeometry.height);
@@ -258,9 +262,9 @@ espview::oled::StatusSnapshot oledStatusSnapshot() {
 // （send() 内部 sendAll 已按 socket 缓冲/超时背压）。alive：会话已死则放弃。
 espview::transport::TransportSink g_sink(
     g_mgr,
-    []() { return g_endpoint.state() != SessionState::kDisconnected; },
+    []() { return g_sessionState.load(std::memory_order_acquire) != 0; },  // M8-A5（SINK-01）：只读原子快照
     monotonicMs,
-    [](uint32_t ms) { vTaskDelay(pdMS_TO_TICKS(ms)); });
+    [](uint32_t ms) { vTaskDelay(pdMS_TO_TICKS(ms)); return true; });  // M8-A5：Sleep 返回 bool
 
 // ---- M3 Test IInputListener：安全 debug channel（console 禁用时无输出；
 //      统计经 ERROR 消息上报，不污染协议 UART）----
@@ -385,6 +389,7 @@ void sendPhysicalPreviewMessage() {
 #endif  // CONFIG_ESPVIEW_OLED_ENABLE
 
 void onSessionState(SessionState s) {
+    g_sessionState.store(static_cast<uint8_t>(s), std::memory_order_release);  // M8-A5
     ESP_LOGI(kTag, "session state -> %d", static_cast<int>(s));
     if (s == SessionState::kDisconnected) {
         // M3 spec §18：断线/会话重置 → 本地安全恢复（pressed keys/buttons 全部

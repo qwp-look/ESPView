@@ -11,7 +11,7 @@ TransportManager::TransportManager(TransportFactory factory, TransportType initi
     : factory_(std::move(factory)), initialType_(initial), currentType_(initial) {}
 
 TransportManager::~TransportManager() {
-    close();
+    shutdown();  // M8-A5（TM-03）：析构先 detach 回调，绝不触发上层回调
 }
 
 bool TransportManager::open() {
@@ -59,8 +59,30 @@ void TransportManager::close() {
     takePending(pending);
     flushStates(pending);
 }
+void TransportManager::shutdown() {
+    // M8-A5（TM-03）：析构专用收尾。先 detach 上层回调（dataCb_/stateCb_），
+    // 再关闭 Transport —— 即使后端 close 触发 setState，也绝不会回调已销毁的上层。
+    std::shared_ptr<ITransport> old;
+    {
+        std::lock_guard<std::mutex> tx(txMutex_);
+        {
+            std::lock_guard<std::mutex> st(stateMutex_);
+            old = std::move(current_);
+            open_ = false;
+            dataCb_ = nullptr;
+            stateCb_ = nullptr;
+        }
+    }
+    if (old != nullptr) {
+        detachCallbacks(*old);
+        old->close();
+    }
+    switching_.store(false);
+    // 不再冲刷 pending：上层回调已 detach，析构路径禁止触碰已销毁的上层。
+}
 
 bool TransportManager::switchTo(TransportType type) {
+    std::shared_ptr<ITransport> old;
     std::vector<ITransport::State> pending;
     bool ok = false;
     {
@@ -70,10 +92,22 @@ bool TransportManager::switchTo(TransportType type) {
             if (currentType_ == type && open_) {
                 return true;  // 已在目标类型且已 open：幂等
             }
+            old = std::move(current_);
+            open_ = false;
         }
         switching_.store(true);
-        closeLocked();  // Disconnected → pending
-        clearPending();  // CS-3：丢弃旧 Transport 的 stale 状态（保留会话结束 Disconnected）
+    }
+    // M8-A5（TM-02）：锁外关闭旧 Transport —— 后端 join 最坏可达 ~122s，
+    // 持锁等待会冻结全局发送门/控制面。切换窗口内发送门看到 current_==nullptr
+    // → kBackpressure；旧状态经 switching_=true 缓冲，clearPending 只保留会话
+    // 结束信号。生命周期操作由单一管理任务调用（ESP32 sessionLoop / PC runLoop）。
+    if (old != nullptr) {
+        old->close();
+        detachCallbacks(*old);
+    }
+    {
+        std::lock_guard<std::mutex> tx(txMutex_);
+        clearPending(old != nullptr);  // M8-A5（TM-04）：切换窗口关闭过旧 Transport 才合成会话结束信号
         {
             std::lock_guard<std::mutex> st(stateMutex_);
             currentType_ = type;
@@ -91,13 +125,26 @@ bool TransportManager::switchTo(TransportType type) {
 }
 
 bool TransportManager::reopen() {
+    std::shared_ptr<ITransport> old;
     std::vector<ITransport::State> pending;
     bool ok = false;
     {
         std::lock_guard<std::mutex> tx(txMutex_);
+        {
+            std::lock_guard<std::mutex> st(stateMutex_);
+            old = std::move(current_);
+            open_ = false;
+        }
         switching_.store(true);
-        closeLocked();
-        clearPending();  // CS-3：丢弃旧 Transport 的 stale 状态（保留会话结束 Disconnected）
+    }
+    // M8-A5（TM-02）：同 switchTo，锁外关闭旧 Transport。
+    if (old != nullptr) {
+        old->close();
+        detachCallbacks(*old);
+    }
+    {
+        std::lock_guard<std::mutex> tx(txMutex_);
+        clearPending(old != nullptr);
         ok = createAndOpenLocked();
         switching_.store(false);
     }
@@ -132,7 +179,7 @@ bool TransportManager::adopt(TransportType type, std::shared_ptr<ITransport> t) 
         } else {
             switching_.store(true);
             closeLocked();   // 保险：清掉任何残留 transport（正常为空）
-            clearPending();  // 丢弃残留 stale 状态
+            clearPending(false);  // 丢弃残留 stale 状态（无旧 transport，不合成）
             {
                 std::lock_guard<std::mutex> st(stateMutex_);
                 currentType_ = type;
@@ -238,8 +285,11 @@ void TransportManager::unlockTransport() {
 }
 
 void TransportManager::attachCallbacks(ITransport& t) {
-    t.setDataCallback([this](const uint8_t* d, size_t n) { onTransportData(d, n); });
-    t.setStateCallback([this](ITransport::State s) { onTransportState(s); });
+    // M8-A5（TM-01）：新会话代际 —— 回调 lambda 按值捕获；迟到/陈旧回调在
+    // onTransportState/Data 入口校验失败即丢弃，绝不进入新会话。
+    const uint32_t gen = generation_.fetch_add(1, std::memory_order_acq_rel) + 1;
+    t.setDataCallback([this, gen](const uint8_t* d, size_t n) { onTransportData(d, n, gen); });
+    t.setStateCallback([this, gen](ITransport::State s) { onTransportState(s, gen); });
 }
 
 void TransportManager::detachCallbacks(ITransport& t) {
@@ -247,7 +297,10 @@ void TransportManager::detachCallbacks(ITransport& t) {
     t.setStateCallback(nullptr);
 }
 
-void TransportManager::onTransportData(const uint8_t* data, size_t len) {
+void TransportManager::onTransportData(const uint8_t* data, size_t len, uint32_t gen) {
+    if (gen != generation_.load(std::memory_order_acquire)) {
+        return;  // M8-A5（TM-01）：旧会话迟到数据，丢弃
+    }
     if (switching_.load()) {
         return;  // 切换窗口：丢弃（毫秒级；协议握手会恢复）
     }
@@ -261,7 +314,10 @@ void TransportManager::onTransportData(const uint8_t* data, size_t len) {
     }
 }
 
-void TransportManager::onTransportState(ITransport::State s) {
+void TransportManager::onTransportState(ITransport::State s, uint32_t gen) {
+    if (gen != generation_.load(std::memory_order_acquire)) {
+        return;  // M8-A5（TM-01）：旧会话迟到状态，丢弃（不缓冲、不投递）
+    }
     if (switching_.load()) {
         std::lock_guard<std::mutex> pm(pendingMutex_);
         pendingStates_.push_back(s);
@@ -300,25 +356,18 @@ void TransportManager::takePending(std::vector<ITransport::State>& out) {
     pendingStates_.clear();
 }
 
-void TransportManager::clearPending() {
-    // CS-3：丢弃旧 Transport 在 close 窗口内产生的 stale 状态（迟到的
-    // Connecting/Connected 等，不能重放进新会话）。保留 closeLocked() 的正常
-    // Disconnected（会话结束信号）：上层依赖它做 input/session 清理
-    // （main.cpp onSessionState → InputManager.resetState；§二十八.9）。
+void TransportManager::clearPending(bool hadOldTransport) {
+    // M8-A5（TM-04）：会话结束信号必须恰好一次。后端 close 可能静默或只发
+    // kError（transport.h close 契约不保证发 Disconnected）—— manager 在此
+    // 直接合成一个 kDisconnected，保证上层 session/input 重置不缺失；旧
+    // Transport 的 Connecting/Connected/Error 等 stale 状态一律丢弃。
     std::lock_guard<std::mutex> pm(pendingMutex_);
-    bool keepDisconnected = false;
-    for (ITransport::State s : pendingStates_) {
-        if (s == ITransport::State::kDisconnected) {
-            keepDisconnected = true;
-            break;
-        }
-    }
-    if (!keepDisconnected) {
-        pendingStates_.clear();
+    if (!hadOldTransport) {
+        pendingStates_.clear();  // 无旧 Transport：无会话结束信号需要保留
         return;
     }
     std::vector<ITransport::State> keep;
-    keep.push_back(ITransport::State::kDisconnected);
+    keep.push_back(ITransport::State::kDisconnected);  // 后端已发则去重；未发则合成
     pendingStates_.swap(keep);
 }
 

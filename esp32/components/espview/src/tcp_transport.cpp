@@ -232,6 +232,13 @@ espview::transport::SendStatus TcpTransport::send(const uint8_t* data, size_t le
     if (data == nullptr || len == 0) {
         return espview::transport::SendStatus::kError;
     }
+    {
+        // M8-A5（TCP-ESP-04）：close 已请求/未 open → 快速失败（NotConnected 语义）。
+        ScopedLock lock(stateMutex_);
+        if (!running_) {
+            return espview::transport::SendStatus::kNotConnected;
+        }
+    }
     if (sockMutex_ == nullptr) {
         return espview::transport::SendStatus::kNotConnected;  // 从未 open
     }
@@ -307,7 +314,10 @@ void TcpTransport::linkLoop() {
         // 本阶段在 IP 恢复前表现为 TCP connect 失败并退避重试。
         if (!cfg_.adopt_existing_wifi) {
             if (!wifi_.hasIp()) {
-                wifi_.startConnect();
+                const esp_err_t sErr = wifi_.startConnect();
+                if (sErr == ESP_ERR_INVALID_STATE) {
+                    break;  // M8-A5（WIFI-05）：stopReconnect/close 窗口 → link 退出
+                }
                 const bool got = wifi_.waitForIp(cfg_.connect_timeout_ms);
                 {
                     ScopedLock lock(stateMutex_);
@@ -316,8 +326,15 @@ void TcpTransport::linkLoop() {
                     }
                 }
                 if (!got) {
-                    ESP_LOGW(kTag, "wifi wait for IP timed out; retrying");
-                    xSemaphoreTake(linkWake_, pdMS_TO_TICKS(cfg_.reconnect_delay_ms));
+                    // M8-A5（WIFI-02）：终态（认证/AP 未找到）→ 慢退避；瞬态 → 快退避。
+                    reconnectPolicy_.onAttempt(
+                        wifi_.lastFailureTerminal()
+                            ? espview::wifi::WifiFailureKind::kTerminal
+                            : espview::wifi::WifiFailureKind::kTransient);
+                    ESP_LOGW(kTag, "wifi wait for IP failed (terminal=%d); retry in %u ms",
+                             wifi_.lastFailureTerminal() ? 1 : 0,
+                             static_cast<unsigned>(reconnectPolicy_.nextDelayMs()));
+                    xSemaphoreTake(linkWake_, pdMS_TO_TICKS(reconnectPolicy_.nextDelayMs()));
                     continue;
                 }
             }
@@ -327,7 +344,8 @@ void TcpTransport::linkLoop() {
         int fd = -1;
         if (!connectOnce(fd)) {
             reconnectCount_.fetch_add(1, std::memory_order_relaxed);
-            xSemaphoreTake(linkWake_, pdMS_TO_TICKS(cfg_.reconnect_delay_ms));
+            reconnectPolicy_.onAttempt(espview::wifi::WifiFailureKind::kTransient);
+            xSemaphoreTake(linkWake_, pdMS_TO_TICKS(reconnectPolicy_.nextDelayMs()));
             continue;
         }
         bool closeNow = false;
@@ -361,6 +379,7 @@ void TcpTransport::linkLoop() {
             break;
         }
         setState(State::kConnected);
+        reconnectPolicy_.onSuccess();  // M8-A5：连接成功 → 退避起点复位
         wasConnected = true;
         ESP_LOGI(kTag, "TCP CONNECTED (reconnect=%u)",
                  static_cast<unsigned>(reconnectCount_.load(std::memory_order_relaxed)));
@@ -401,10 +420,12 @@ void TcpTransport::linkLoop() {
             setState(State::kDisconnected);
             wasConnected = false;
             reconnectCount_.fetch_add(1, std::memory_order_relaxed);
-            ESP_LOGW(kTag, "TCP DISCONNECTED; reconnecting in %u ms",
-                     static_cast<unsigned>(cfg_.reconnect_delay_ms));
         }
-        xSemaphoreTake(linkWake_, pdMS_TO_TICKS(cfg_.reconnect_delay_ms));
+        // M8-A5（WIFI-01）：有界指数退避替代固定重连 —— 断开立即重连会风暴。
+        reconnectPolicy_.onAttempt(espview::wifi::WifiFailureKind::kTransient);
+        ESP_LOGW(kTag, "TCP DISCONNECTED; reconnecting in %u ms",
+                 static_cast<unsigned>(reconnectPolicy_.nextDelayMs()));
+        xSemaphoreTake(linkWake_, pdMS_TO_TICKS(reconnectPolicy_.nextDelayMs()));
     }
 
     // ---- link 退出路径：关闭 socket，唤醒 RX 退出 ----
@@ -480,13 +501,28 @@ void TcpTransport::rxLoop() {
             if (errno == EINTR) {
                 continue;
             }
-            // fd 错误（可能已被 close）：交给 link 任务处理。
+            // M8-A5（TCP-ESP-02）：非 EINTR select 错误 = fd 失效（对端重置/超时/已被
+            // close）→ 置 connected_=false + 唤醒 link，避免 RX 空转死循环。
+            ESP_LOGW(kTag, "select error errno=%d; dropping link", errno);
+            {
+                ScopedLock lock(sockMutex_);
+                connected_ = false;
+            }
             notifyLink();
             vTaskDelay(pdMS_TO_TICKS(50));
             continue;
         }
         if (sel == 0) {
             continue;  // 超时：回到循环检查 running/connected
+        }
+
+        {
+            // M8-A5（TCP-ESP-06）：select 可读后、recv 前复核 fd 仍是当前 sock_ ——
+            // close/switch 可能在 select 返回窗口内关闭并复用该 fd（防 EBADF/UAF）。
+            ScopedLock lock(sockMutex_);
+            if (!connected_ || sock_ != fd) {
+                continue;
+            }
         }
 
         const int n = lwip_recv(fd, buf, cfg_.rx_buf, 0);
@@ -617,6 +653,13 @@ void TcpTransport::startRxTask() {
             ScopedLock lock(stateMutex_);
             rxTask_ = nullptr;
         }
+        // M8-A5（TCP-ESP-05）：RX 任务创建失败 → 链路失效：断开 + 唤醒 link 退避重连
+        // （否则停留在"已连接但无 RX"的假活状态）。
+        {
+            ScopedLock lock(sockMutex_);
+            connected_ = false;
+        }
+        notifyLink();
         return;
     }
 }

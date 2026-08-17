@@ -217,7 +217,7 @@ WifiWizardDialog::WifiWizardDialog(ConnectionManager& manager, QWidget* parent)
 
     // M7-D3 信号（queued：Worker 线程 → GUI 线程；对话框模态期间持续有效）。
     connect(&manager_, &ConnectionManager::statusChanged, this,
-            [this](WorkerStatus s, const QString& t) { onStatusChanged(s, t); });
+            [this](quint64 sid, WorkerStatus s, const QString& t) { onStatusChanged(sid, s, t); });
     connect(&manager_, &ConnectionManager::capabilitiesReceived, this,
             [this](const espview::proto::CapabilitiesInfo& c) { onCapabilitiesReceived(c); });
     connect(&manager_, &ConnectionManager::wifiScanResult, this,
@@ -777,8 +777,13 @@ void WifiWizardDialog::onCapabilitiesReceived(const espview::proto::Capabilities
     }
 }
 
-void WifiWizardDialog::onStatusChanged(WorkerStatus status, const QString& text) {
+void WifiWizardDialog::onStatusChanged(quint64 sessionId, WorkerStatus status,
+                                   const QString& text) {
     Q_UNUSED(text);
+    // M8-A5（HOSTUART-03）：旧会话滞留队列的 status 不改向导状态（epoch 单调）。
+    if (sessionId != 0 && sessionId < manager_.sessionId()) {
+        return;
+    }
     // M7-G：会话已连接（含打开向导前已连接）→ Step 1 自动前进 + 能力缓存自动前进。
     if (status == WorkerStatus::Connected && state_.step() == WizardStep::kConnectUart) {
         state_.next();

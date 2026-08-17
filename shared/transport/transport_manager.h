@@ -51,6 +51,8 @@ struct TransportDiagSnapshot {
     int8_t rssi = -128;
     uint8_t channel = 0;
 };
+
+
 class TransportManager {
 public:
     // 创建具体 Transport（工厂持有配置；例如 ESP32 侧创建 UART/TCP adapter）。
@@ -71,6 +73,9 @@ public:
     bool open();
     // 关闭当前 Transport（幂等）；不改变已选类型。
     void close();
+    // M8-A5：析构专用收尾 —— 先 detach 上层回调再关闭 Transport，
+    // 保证析构路径绝不触发 state/data 回调（上层可能已先销毁）。
+    void shutdown();
     // 运行时切换（§五）：close 旧 → 工厂创建新 → open 新。
     // 失败时保持 Disconnected（current() == nullptr），返回 false。
     bool switchTo(TransportType type);
@@ -87,6 +92,9 @@ public:
     // ---- 查询 ----
     TransportType current() const;
     bool isOpen() const;
+    // M8-A5：切换窗口标志 —— 门忙但不代表会话永久关闭（trySend 用它区分
+    // kBackpressure 与 kNotConnected；switching_ 为 atomic，无锁读取）。
+    bool isSwitching() const { return switching_.load(); }
     // 当前 Transport 指针（nullptr = 未 open/失败）。仅供统计/日志读取，
     // 发送必须经 lockTransport()/tryLockTransport()。
     ITransport* transport() const;
@@ -118,11 +126,11 @@ private:
     void detachCallbacks(ITransport& t);
     bool createAndOpenLocked();                        // 已持 txMutex_：工厂创建 + open + 状态缓冲
     void closeLocked();                               // 已持 txMutex_：close + 状态缓冲
-    void clearPending();                                // 丢弃旧 Transport 的 stale 状态（保留会话结束 Disconnected）
+    void clearPending(bool hadOldTransport);            // 丢弃 stale 状态；hadOldTransport 时确保恰好一次会话结束 Disconnected
     void takePending(std::vector<ITransport::State>& out);
     void flushStates(const std::vector<ITransport::State>& states);
-    void onTransportData(const uint8_t* data, size_t len);
-    void onTransportState(ITransport::State s);
+    void onTransportData(const uint8_t* data, size_t len, uint32_t gen);
+    void onTransportState(ITransport::State s, uint32_t gen);
     void setLastError(const char* msg);
 
     TransportFactory factory_;
@@ -138,6 +146,11 @@ private:
     ITransport::DataCallback dataCb_;
     ITransport::StateCallback stateCb_;
     std::atomic<bool> switching_{false};  // 切换窗口：丢弃 data / 缓冲 state
+    // M8-A5（TM-01）：会话代际（wire-free 实现字段）。attachCallbacks 时递增；
+    // 回调 lambda 按值捕获当前代际，onTransportState/Data 入口校验，不匹配即丢弃。
+    // 旧 Transport 的迟到状态/数据（post-clearPending 窗口、in-flight 竞态、
+    // zombie 泄漏路径）绝不进入新会话。
+    std::atomic<uint32_t> generation_{0};
     std::mutex pendingMutex_;             // 保护 pendingStates_
     std::vector<ITransport::State> pendingStates_;
 
@@ -146,6 +159,50 @@ private:
     uint32_t switchFailures_ = 0;
     char lastError_[96] = "ok";
 };
+
+class TransportManager;  // M8-A5：TransportLockGuard 前置声明
+
+// M8-A5：发送门 RAII 守卫 —— 禁止裸 lockTransport/unlockTransport 配对泄漏
+// （一次忘记 unlock 即全链路死锁）。析构自动 release；可移动不可拷贝。
+class TransportLockGuard {
+public:
+    explicit TransportLockGuard(ITransport* t, TransportManager& mgr) noexcept
+        : t_(t), mgr_(mgr) {}
+    ~TransportLockGuard() noexcept { release(); }
+    TransportLockGuard(const TransportLockGuard&) = delete;
+    TransportLockGuard& operator=(const TransportLockGuard&) = delete;
+    TransportLockGuard(TransportLockGuard&& o) noexcept : t_(o.t_), mgr_(o.mgr_) {
+        o.t_ = nullptr;
+    }
+    TransportLockGuard& operator=(TransportLockGuard&& o) noexcept {
+        if (this != &o) {
+            release();
+            t_ = o.t_;
+            o.t_ = nullptr;
+        }
+        return *this;
+    }
+    ITransport* get() const noexcept { return t_; }
+    explicit operator bool() const noexcept { return t_ != nullptr; }
+    void release() noexcept {
+        if (t_ != nullptr) {
+            mgr_.unlockTransport();
+            t_ = nullptr;
+        }
+    }
+
+private:
+    ITransport* t_;
+    TransportManager& mgr_;
+};
+
+// M8-A5：RAII 获取发送门（阻塞/非阻塞各一）。
+inline TransportLockGuard lockTransport(TransportManager& mgr) {
+    return TransportLockGuard(mgr.lockTransport(), mgr);
+}
+inline TransportLockGuard tryLockTransport(TransportManager& mgr) {
+    return TransportLockGuard(mgr.tryLockTransport(), mgr);
+}
 
 }  // namespace transport
 }  // namespace espview

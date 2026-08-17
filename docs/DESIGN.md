@@ -4002,3 +4002,218 @@ G11 验收清单（本日全部执行，工作树含 M7-G 全部 13 个提交）
   pipeline 图）、K 节（早期 OLED 设计）、B.2（早期模式描述）、M 表标题
   “M7-G 更新”应理解为“M8-A4 更新”；P.11 status_ui、Y/Z 节相关历史描述以
   shared/oled 现状为准；display.h 头部“§31”引用以 AP 章为准。
+
+
+## AQ. M8-A5 Lifecycle / Failure Recovery / Security semantics（2026-08-17 冻结）
+
+> 定位：实现层语义冻结。wire protocol（Packet/CRC/Message/Frame/CHUNKED/SEQ/
+> CAPABILITIES/PREVIEW/WIFI_SCAN/CONFIG/INPUT_*）零修改。本阶段覆盖 Transport /
+> Wi-Fi / Socket / UART / Task / Callback 在正常运行、断开、重连、失败、取消、
+> 析构、切换、异常返回下的生命周期语义，全部为本地实现字段，不接触 wire。
+>
+> 审计/修复编号沿用 M8-A 审计报告：TM-01..05（TransportManager）、SINK-01/03/04、
+> HOSTUART-01..06（PC UART）、WIFI-01..06（Wi-Fi STA）、TCP-ESP-01..06（ESP32 TCP）。
+
+### AQ.1 Transport 所有权与单一管理任务
+
+- 生命周期操作（open/close/switchTo/reopen/adopt/shutdown）由**单一管理任务**调用：
+  ESP32 为 sessionLoop（main.cpp），PC 为 SerialWorker::runLoop。禁止两个任务并发
+  调用生命周期方法（send 可并发，经发送门 txMutex_ 串行化）。
+- `TransportManager` 持有当前 backend（`current_`，shared_ptr）；backend 的创建由
+  TransportFactory 注入（ESP32 侧 UART/TCP adapter，PC 侧 HostUart/HostTcp）。
+- `adopt()`（PC TCP accept 路径）只接受已激活（isConnected）的 Transport，且要求
+  当前未 open；成功路径自身调用 attachCallbacks（generation 恰递增一次），不经过
+  createAndOpenLocked（无二次递增）。
+- 发送必须经 lockTransport()/tryLockTransport()/unlockTransport() 或 RAII 守卫
+  `TransportLockGuard`（TM-05）：忘记 unlock 即全链路死锁，结构上禁止裸配对。
+
+### AQ.2 状态模型（统一生命周期语义）
+
+- 各对象保留自己的状态 enum（ITransport::State / WifiSta / SessionState），不强行
+  共用一套。关键统一约束：每个状态必须有 owner、合法转移、teardown 行为。
+- ITransport 状态：kDisconnected → kConnecting → kConnected → kDisconnected；
+  kError 仅在 fatal 路径投递（UART 写失败、open 失败等），随后必须转 Disconnected
+  或由上层关闭。
+- **禁止假 Connected**：`TransportSink::trySend` 在 !isOpen() && !isSwitching() 时
+  报 kNotConnected；切换窗口（isSwitching()==true）报 kBackpressure（会话未死，
+  上层可安全重试，不误判会话终止）。
+
+### AQ.3 TCP FD / socket 所有权
+
+- 一个 FD 任一时刻最多一个 owner；ESP32 TcpTransport linkLoop 独占 fd 生命周期
+  （创建 → 移交 sock_ → 断开清理 → close），rxLoop 只读不关。
+- close 窗口防护：select 可读后、recv 前复核 `connected_ && sock_ == fd`（TCP-ESP-06），
+  防 select 返回窗口内 fd 被关闭复用（EBADF/UAF）。
+- select 非 EINTR 错误 = fd 失效 → connected_=false + notifyLink（TCP-ESP-02），
+  由 link 任务清理并退避重连，RX 不空转。
+- startRxTask 的 xTaskCreate 失败 → connected_=false + notifyLink（TCP-ESP-05），
+  绝不停留在“已连接但无 RX”的假活状态。
+- send() 首行 running_ 检查（stateMutex_，短临界）→ 快速 kNotConnected（TCP-ESP-04）；
+  随后 sockMutex_ 保护 sock_ 读写。锁序全文件为**顺序作用域、无嵌套反转**
+  （stateMutex_ 短临界后释放，再取 sockMutex_）。
+
+### AQ.4 UART 所有权与自动恢复
+
+- PC HostUartTransport：handle_ 归 Transport 所有；open 失败/close 释放（CloseHandle）。
+- open() 先 setState(kConnected) 再启动 RX 线程（HOSTUART-02）——rxLoop 启动即失败的
+  kError 不会被 open 的 kConnected 覆盖；std::thread 构造异常 → 回滚句柄/标志 → kError，
+  返回 false（HOSTUART-06）。
+- send() 中 WriteFile 非 ERROR_SEM_TIMEOUT 失败 → setState(kError)（HOSTUART-01）：
+  上层必须看到断开驱动重连，而不是永久假 Connected。send 持 sendMutex_，**禁止**在
+  send 内调 close()（join rxThread 会死锁）；pumpLoop 看到 kError 后由 runLoop 在
+  Worker 线程执行 mgr_->close()。
+- UART 自动恢复：runLoopUart 的 open 失败/链路断开 → ReconnectPolicy（transient）
+  有界退避 100ms→5s 后重开（HOSTUART-04），替代固定 1.5s；打开成功即复位退避。
+- 可恢复 vs 致命：瞬态读错误、CH340/USB 掉线重插 = recoverable（退避重开）；
+  对象已析构/stop 请求 = fatal（退出循环，不再重开）。
+
+### AQ.5 worker / task 生命周期
+
+- TCB 生命周期规则（TCP-ESP/FreeRTOS）：任务退出前在 stateMutex_ 内清 TaskHandle，
+  close 在同一锁下 notify，杜绝对已删除 TCB 的 notify（stale TCB）。
+- join 语义：close() 请求 → 唤醒阻塞等待（link 经 linkWake_ 信号量、RX 经 select
+  超时、UART 经 WaitForSingleObject）→ join/等待退出 → 再释放资源。
+- join 超时兜底：ESP32 TCP 任务未在限期内退出 → leaked_ 置位 + 数据/状态回调清空，
+  对象 pinned（不再析构，防 UAF），资源不重复释放（已有日志告警）。
+- PC 侧线程构造异常回滚见 AQ.4；runLoop 循环以 stop_ 原子为唯一退出条件，
+  waitMs 被中断返回 false → 立即 break（SINK-04 配套）。
+
+### AQ.6 回调生命周期统一契约
+
+- **generation 代际隔离（TM-01）**：attachCallbacks 时 generation_ 递增，回调 lambda
+  按值捕获当前代际；onTransportState/Data 入口校验 `gen == generation_`，不匹配即丢弃
+  （不缓冲、不投递）。旧 Transport 的迟到状态/数据（post-clearPending 窗口、
+  in-flight 竞态、zombie 泄漏路径）绝不进入新会话。generation 为 wire-free 本地字段。
+- 每个回调明确：dataCallback/stateCallback 异步、非 owning、禁止重入生命周期方法、
+  禁止持锁等待 join；flushStates/takePending 在锁外冲刷（上层可安全调用 sink）。
+- TransportSink 契约（SINK-03）：AliveCheck 在**持发送门（txMutex_）**时调用，
+  禁止重入 mgr_ 的 lockTransport/生命周期方法、禁止阻塞获取其他锁；Sleep 回调返回
+  bool（SINK-04）：false = 被中断（stop/join 中）→ 调用方立即放弃本次发送
+  （kBackpressure），不得空转。
+- ESP32 main：g_sink 的 alive 检查只读 g_sessionState 原子快照（SINK-01），
+  不触碰 g_endpoint（静态析构序/锁竞争零风险）。
+
+### AQ.7 Wi-Fi 状态机（终态 vs 瞬态）
+
+- 事件 handler 内**禁止递归/多任务并发 esp_wifi_connect**：瞬态断开的自动重连
+  有界（≤ kMaxAutoReconnectAttempts=3，WIFI-01），超限置 kFailBit 交给 link task
+  的 ReconnectPolicy 退避调度（防 reconnect storm）。
+- 终态分类（WIFI-02，isTerminalWifiReason）：认证/握手/AP 未找到类 reason → 立即
+  置 kFailBit 并返回，不再事件内自动重连；link task 按 terminal 慢退避（1s→30s）
+  重试（等待配置/AP 恢复）。
+- stopReconnect()（WIFI-05）：teardown 窗口语义——事件 handler 不再自动 connect，
+  kFailBit 唤醒阻塞中的 waitForIp；startConnect() 在 stopped 后拒绝；init() 重置。
+- DHCP 悬挂防护（WIFI-03）：STA_CONNECTED 后 kDhcpTimeoutMs=20s 无 GOT_IP → 置
+  kFailBit；waitForIp 分块等待（≤1000ms/次），timeoutMs=0 也不再无限挂死。
+- 共享标志 volatile → std::atomic（WIFI-06）：wifiConnected_/gotIp_/stopped_/
+  lastFailTerminal_/staConnectedMs_/reconnectAttempts_。
+- 事件 handler 生命周期：register 成功必须对称 unregister（deinit 中先 unregister
+  再释放 netif/event group）；context 为 this，销毁顺序保证 handler 不再执行。
+
+### AQ.8 Retry / Backoff（有界）
+
+- `ReconnectPolicy`（shared/wifi/reconnect_policy.{h,cpp}，纯 C++17，零平台依赖）：
+  单一 owner 调度（ESP32 link task / PC runLoopUart）。
+- transient：100 → 200 → 400 → 800 → 1600 → 3200 → 5000ms（cap）；
+  terminal：1000 → 2000 → 4000 → 8000 → 16000 → 30000ms（cap）。
+- onAttempt(kind) 推进、onSuccess() 复位、stop() 后 mustStop() 恒 true——
+  stop 后调用方不得再安排下一次 retry（重连循环可停止）。
+- 适用点：ESP32 TCP linkLoop（Wi-Fi 失败/connect 失败/断开后）、PC UART 重开。
+
+### AQ.9 Teardown 顺序（显式，非“析构即修复”）
+
+- Transport（TM-02/03）：request stop（switching_/stop 原子）→ 禁用新工作
+  （open_=false）→ detach 回调（setDataCallback/StateCallback=nullptr）→ 唤醒阻塞
+  等待（notifyLink / kFailBit / WaitForSingleObject）→ 等待 worker 退出（join，
+  锁外执行——最坏 ~122s 的 join 不得冻结全局发送门）→ 释放资源。
+- TransportManager::~TransportManager 调 shutdown()（TM-03）：先清空上层回调再
+  close 后端，析构路径绝不触发上层 state/data 回调（上层可能已先销毁）；不再冲刷
+  pending。正常路径仍必须显式 close()/stop()/join()。
+- Wi-Fi：stop retry（stopReconnect）→ 注销 event handlers → 停止依赖 TCP →
+  disconnect → deinit（esp_wifi_stop/deinit → destroy netif → delete event group）。
+- ProtocolEndpoint：停止外部生产者 → 清 pending → 断开会话（epoch 递增）→ 销毁
+  transport 依赖 → 销毁 endpoint（沿用 AN 章会话纪元语义）。
+
+### AQ.10 Failure Recovery（stale 隔离 / 合成断开 / 假 Connected 防护）
+
+- switchTo/reopen 先移出并**锁外**关闭旧 Transport（TM-02），switching_=true 窗口内
+  data 丢弃、state 缓冲；clearPending(hadOldTransport)（TM-04）只保留**恰好一次**
+  会话结束 kDisconnected（后端未发则合成；重复则去重），stale Connecting/Connected/
+  Error 一律丢弃，再按 Disconnected → Connected 顺序冲刷（上层完成会话重置 +
+  HELLO + FULL resync）。
+- 旧 Transport 已 close 但 worker 未真正退出时，新 Transport 不得启动：generation
+  隔离 + 发送门 + clearPending 三重保证 stale 回调/状态不进入新会话。
+- close()（用户路径）与 shutdown()（析构路径）语义分离：前者冲刷 pending 投递
+  Disconnected（上层会话重置），后者不投递任何回调。
+- PC 会话 epoch 门控（HOSTUART-03）：statusChanged 携带 sessionId；GUI
+  （main.cpp onStatusChanged / WiFiWizardDialog）丢弃 sessionId < 当前会话的
+  stale queued signal；frameReady 同样按 sessionId 门控（沿用 P1-2 语义）。
+
+### AQ.11 TransportSink 契约（RAII 发送门 / 中断语义）
+
+- send()（阻塞式，paced）：alive 检查 → RAII 取门（TM-05）→ 按 TxPolicy 重试；
+  Sleep 返回 false（被中断）→ 立即 kBackpressure，整帧丢弃交给上层。
+- trySend()（控制面，非阻塞）：!isOpen() && !isSwitching() → kNotConnected；门忙
+  → kBackpressure；kError 不重试不 sleep。
+- 上层（ProtocolEndpoint transmit / tryTransmit）在 sendMutex_ 下串行调用 sink，
+  整条 Message 的 1..N Packet 原子性由上层保证（Transport 不理解帧）。
+
+### AQ.12 PC 会话 epoch 门控（HOSTUART-03）
+
+- SerialWorker 每次新传输会话递增 sessionId_；statusChanged/frameReady 携带该值。
+- GUI 主控 currentSessionId_ 在收到新会话 Connected 时更新；旧会话滞留队列的信号
+  （switchTransport/stop 后 in-flight）按 epoch 丢弃，不改 UI/向导状态。
+- DisplayModeWidget::applyRequested 直传 display::DisplayRouteMode（M8-A4 收敛），
+  wire 转换经 shared/display toWireMode 唯一转换点（serial_worker 侧 fromWireMode）。
+
+### AQ.13 资源清理与泄漏兜底
+
+- host fake backend 维护 live-transport 计数（gLiveTransports），stress 结束断言归零：
+  1000x open/close、1000x switch、200x destroy-immediately、20x teardown 期间回调
+  flood、100x 失败后 repeated reopen。
+- ESP32：任务 join 超时 = pinned 对象（不析构），回调清空，资源不重复释放；
+  UART/TCP handle 全部走显式 close（无裸指针逃逸）。
+- 失败路径与成功路径对称释放（WifiSta::deinit 不再以 initDone_ 早退——半初始化
+  也必须释放，TCP-ESP-01）。
+
+### AQ.14 Security / Logging
+
+- Wi-Fi 凭据：RAM-only（WIFI_STORAGE_RAM）、PC 侧应用后清零、不日志、不进
+  QSettings/source/DESIGN.md/README/diag。日志只打印 SSID 长度，绝不打印凭据。
+- 断开日志只打印 reason 数值（不打印 SSID/BSSID/密码）。
+- peer IP：诊断级（INFO）仅出现在 open 成功路径（tcp_transport “open: target=…”），
+  属产品可接受策略；异常路径不重复打印目标地址，凭据/认证信息绝不进入日志。
+- 纯实现层安全要求：stale callback 不得进入新会话（AQ.6/10）、析构不回调（TM-03）、
+  凭据副本生命周期最小化（PC wizard zeroWifiPassword）。
+
+### AQ.15 PM / RF configuration boundary
+
+- 生产默认保持 ESP-IDF power save ON；WIFI_PS_NONE 仅经 Kconfig 显式开启
+  （CONFIG_ESPVIEW_WIFI_PS_NONE，experimental）。
+- 80MHz CPU 固定 + TX power 2dBm（esp_wifi_set_max_tx_power(8)）只存在于
+  **provisioning 路径**（wifi_provisioning.cpp，电源受限板卡的校准/扫描期降流），
+  不是生产显示路径默认；本阶段不改默认功耗策略。
+- RF 参数集中为配置项（Kconfig / WifiStaConfig），不散落为 cpp literal 的隐含默认。
+
+### AQ.16 S3 portability boundary
+
+- shared 三层（protocol/transport/wifi/display）零平台泄漏：无 ESP-IDF API、无
+  #ifdef ESP32、无 UART0/CH340/GPIO 1/3/classic flash layout 假设（沿用 AP.11）。
+- lifecycle 代码不绑定 classic-only target：ESP-IDF 平台适配（FreeRTOS 任务、
+  lwIP socket）限定在 esp32/ 组件；接 S3 N16R8 时新增 USB CDC 后端实现 ITransport，
+  状态机/退避/teardown 语义直接复用。
+- 已知边界（接 S3 时必改点）：OLED/显示几何、UART0/GPIO 默认值簇（Kconfig，
+  classic-only range）；kUsb=2 为 S3 USB CDC 预留（AO.13，仅架构预留）。
+
+### AQ.17 测试与验收记录（M8-A5）
+
+- host：393,696 checks / 0 failures，ctest 2/2 PASS，clean build 无 warning
+  （含 lifecycle_test 12 项 + reconnect_policy_test 5 项 + 既有 M0–M8-A4 全部）。
+- failure injection（§三十二）：switch while connecting、switch failure、stale
+  state/data callback、close during switch、sleep 中断、close 后 send、静默 close
+  合成 Disconnected、repeated reopen after failure。
+- stress（§三十三）：1000x open/close、1000x switch、destroy immediately、callback
+  flood during teardown、repeated reopen，live 计数归零（§三十五）。
+- ESP32 profiles：idf.py clean build + uart/tcp 两 profile build PASS；PC Qt build
+  PASS；wire format 0 修改。
+- 真实硬件：UART profile + OLED smoke 见 M8-A5 硬件回归记录（真机 COM4/CH340）。

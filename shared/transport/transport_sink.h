@@ -28,14 +28,20 @@ namespace transport {
 class TransportSink {
 public:
     // 会话存活检查：DISCONNECTED 时放弃发送（与 M1-3B paced sink 语义一致）。
+    // M8-A5 契约（SINK-03）：AliveCheck 在持发送门（txMutex_）时被调用，
+    // 禁止重入 mgr_ 的 lockTransport/生命周期方法，禁止阻塞获取其他锁。
     using AliveCheck = std::function<bool()>;
     // 单调毫秒时钟（统计/超时）。
     using Clock = std::function<uint64_t()>;
     // 背压重试间隔 sleep（UART pacing；host 测试注入计数/短眠）。
-    using Sleep = std::function<void(uint32_t ms)>;
+    // M8-A5（SINK-04）：返回 bool —— true=完成睡眠；false=被中断（stop/join 中），
+    // 调用方必须立即放弃本次发送（返回 kBackpressure），不得空转。
+    using Sleep = std::function<bool(uint32_t ms)>;
 
     TransportSink(TransportManager& mgr, AliveCheck alive, Clock now, Sleep sleep)
-        : mgr_(mgr), alive_(std::move(alive)), now_(std::move(now)), sleep_(std::move(sleep)) {}
+        : mgr_(mgr), alive_(std::move(alive)), now_(std::move(now)), sleep_(std::move(sleep)) {
+        // M8-A5 契约：sink 必须先于 mgr_ 销毁（引用生命周期由调用方声明顺序保证）。
+    }
 
     // 阻塞式发送（按当前 Transport 的 TxPolicy）。整条消息 1..N 包由上层
     // （ProtocolEndpoint transmit）在 sendMutex_ 下串行调用。

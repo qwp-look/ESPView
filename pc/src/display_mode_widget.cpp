@@ -243,7 +243,7 @@ void DisplayModeWidget::setUiLanguage(int lang) {
 void DisplayModeWidget::onApplyClicked() {
     const bool shouldSend = state_.applyRequested();
     if (shouldSend) {
-        emit applyRequested(static_cast<int>(state_.selectedMode));
+        emit applyRequested(state_.selectedMode);  // M8-A4：直传 DisplayRouteMode
     }
     refresh();
 }

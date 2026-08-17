@@ -78,7 +78,9 @@ public:
 
 signals:
     void frameReady(const DisplayFrame& frame);
-    void statusChanged(WorkerStatus status, const QString& text);
+    // M8-A5（HOSTUART-03）：statusChanged 携带会话 epoch —— GUI 侧据此丢弃
+    // switchTransport 后滞留队列的旧会话信号（stale queued signal 门控）。
+    void statusChanged(quint64 sessionId, WorkerStatus status, const QString& text);
     void statsChanged(const WorkerStats& stats);
     // M4：诊断条目转发（timestampMs, severity, source, message）。
     void diagAdded(quint64 timestampMs, int severity, const QString& source,

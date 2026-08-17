@@ -39,6 +39,8 @@
 #include "freertos/semphr.h"
 #include "freertos/task.h"
 
+#include "reconnect_policy.h"
+
 #include "espview/transport_base.hpp"
 #include "espview/wifi_sta.hpp"
 
@@ -119,6 +121,9 @@ private:
 
     TcpTransportConfig cfg_;
     WifiSta wifi_;
+    // M8-A5（WIFI-01/02）：有界指数退避 —— 替代固定 reconnect_delay；
+    // transient 100ms→5s / terminal 1s→30s（link task 单一 owner 调度）。
+    espview::wifi::ReconnectPolicy reconnectPolicy_;
     espview::transport::TransportCapabilities caps_;
 
     std::atomic<uint32_t> reconnectCount_{0};  // link 任务写，OLED diag 任务读（M7-B 原子化）

@@ -80,6 +80,7 @@ if(ESPVIEW_BUILD_QT_GUI)
         src/virtual_screen_widget.h
         src/connection_manager.cpp
         src/connection_manager.h
+        ../shared/wifi/reconnect_policy.cpp  # M8-A5（HOSTUART-04）：UART 重开退避
         src/input/input_controller.cpp
         src/input/input_controller.h
         src/input/qt_key_adapter.cpp
@@ -91,7 +92,7 @@ if(ESPVIEW_BUILD_QT_GUI)
         CXX_STANDARD 17
         CXX_STANDARD_REQUIRED ON
     )
-    target_include_directories(espview_virtual_display PRIVATE src src/input)
+    target_include_directories(espview_virtual_display PRIVATE src src/input ../shared/wifi)
     target_link_libraries(espview_virtual_display PRIVATE
         espview_protocol
         espview_input

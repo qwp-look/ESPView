@@ -10,6 +10,7 @@ idf_component_register(
         "${CMAKE_CURRENT_LIST_DIR}/../../../shared/transport/transport_manager.cpp"
         "${CMAKE_CURRENT_LIST_DIR}/../../../shared/transport/transport_sink.cpp"
         "${CMAKE_CURRENT_LIST_DIR}/../../../shared/wifi/scan_transaction.cpp"  # M7-E：ScanTransaction（Agent K 并行交付）
+        "${CMAKE_CURRENT_LIST_DIR}/../../../shared/wifi/reconnect_policy.cpp"  # M8-A5：有界指数退避（WIFI-01/02）
     INCLUDE_DIRS
         "include"
         "${CMAKE_CURRENT_LIST_DIR}/../../../shared/transport"

@@ -146,9 +146,27 @@ bool HostUartTransport::open() {
         readSizes_.clear();
     }
 
-    rxThread_ = std::thread([this]() { rxLoop(); });
-
+    // M8-A5（HOSTUART-02）：先置 kConnected 再启动 RX 线程 —— rxLoop 启动即失败
+    // （如 ReadFile 错误）的 kError 不会被 open 的 kConnected 覆盖（假 Connected 假象）。
     setState(State::kConnected);
+
+    // M8-A5（HOSTUART-06）：线程构造异常 → 回滚句柄/标志，绝不返回假 open。
+    try {
+        rxThread_ = std::thread([this]() { rxLoop(); });
+    } catch (...) {
+        std::fprintf(stderr, "[transport] rx thread create failed\n");
+        stopRequested_.store(true);
+        {   // sendMutex_ → stateMutex_（与 close 同序，无锁序反转）
+            std::lock_guard<std::mutex> lock(sendMutex_);
+            std::lock_guard<std::mutex> slock(stateMutex_);
+            handle_ = INVALID_HANDLE_VALUE;
+            opened_ = false;
+        }
+        CloseHandle(h);
+        setState(State::kError);
+        return false;
+    }
+
     std::printf("[transport] open OK: %s @ %u 8N1 (mtu=%zu)\n", cfg_.port.c_str(), cfg_.baud,
                 caps_.mtu);
     return true;
@@ -225,8 +243,14 @@ espview::transport::SendStatus HostUartTransport::send(const uint8_t* data, size
             const DWORD err = GetLastError();
             std::fprintf(stderr, "[transport] WriteFile failed: %s\n",
                          lastErrorText(err).c_str());
-            // 写入超时（driver 写缓冲满/线忙）= would-block（背压）；
-            // 其余失败 = Transport 层错误。
+            // M8-A5（HOSTUART-01）：写入超时（driver 写缓冲满/线忙）= would-block（背压）；
+            // 其余失败 = Transport 层错误 —— 必须驱动断开（setState kError），否则上层
+            // 一直看到假 Connected，永不触发重连。注：send 持 sendMutex_，不得在此
+            // 调 close()（join rxThread 会死锁）；pumpLoop 看到 kError 后由 runLoop
+            // 在 Worker 线程执行 mgr_->close()。
+            if (err != ERROR_SEM_TIMEOUT) {
+                setState(State::kError);
+            }
             return err == ERROR_SEM_TIMEOUT ? espview::transport::SendStatus::kBackpressure
                                             : espview::transport::SendStatus::kError;
         }

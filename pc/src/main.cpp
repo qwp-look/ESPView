@@ -194,7 +194,9 @@ public:
         connect(&manager_, &ConnectionManager::frameReady, this,
                 [this](const DisplayFrame& f) { onFrameReady(f); });
         connect(&manager_, &ConnectionManager::statusChanged, this,
-                [this](WorkerStatus s, const QString& text) { onStatusChanged(s, text); });
+                [this](quint64 sid, WorkerStatus s, const QString& text) {
+                    onStatusChanged(sid, s, text);
+                });
         connect(&manager_, &ConnectionManager::statsChanged, this,
                 [this](const WorkerStats& st) { onStatsChanged(st); });
         connect(&manager_, &ConnectionManager::diagAdded, this,
@@ -203,7 +205,7 @@ public:
                 });
         // M7-C3：Display Mode 发送与 ACK（独立于 Transport 切换，保留会话）。
         connect(modeWidget_, &DisplayModeWidget::applyRequested, this,
-                [this](int mode) {
+                [this](espview::display::DisplayRouteMode mode) {
                     screen_->clearDisplay();  // §五：切换先清陈旧镜像（旧模式帧不残留）
                     manager_.sendDisplayMode(espview::display::toWireMode(mode));
                     modeSwitchStartMs_ = steadyMs();
@@ -329,7 +331,12 @@ private slots:
         }
     }
 
-    void onStatusChanged(WorkerStatus status, const QString& text) {
+    void onStatusChanged(quint64 sessionId, WorkerStatus status, const QString& text) {
+        // M8-A5（HOSTUART-03）：stale queued signal 门控 —— switchTransport/stop
+        // 后旧会话滞留队列的 status 不得再改 UI（epoch 单调：仅接受 ≥ 当前会话）。
+        if (currentSessionId_ != 0 && sessionId != 0 && sessionId < currentSessionId_) {
+            return;
+        }
         switch (status) {
             case WorkerStatus::Connected:
                 connLabel_->setText(tr_("Transport ✓ / Session CONNECTED"));

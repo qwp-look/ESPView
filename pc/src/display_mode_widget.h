@@ -12,7 +12,7 @@
 //     时高亮差异）+ 条件徽标（DISCONNECTED / PHYSICAL UNAVAILABLE / SWITCHING /
 //     WAITING FOR FULL / DEGRADED / READY，颜色 + 文案，不假装修复）；
 //   - 持有 espview::display::DisplayUiState 模型副本（GUI 线程独占，无锁）；
-//   - 用户点击 Apply → 模型 applyRequested() 校验后发出 applyRequested(int)，
+//   - 用户点击 Apply → 模型 applyRequested() 校验后发出 applyRequested(DisplayRouteMode)，
 //     由主控接线转发 ConnectionManager::sendDisplayMode；
 //   - 主控把 SET_MODE ACK 经 onAck(bool) 投回本控件（模型收敛）；
 //   - 主控可把权威状态快照经 setUiState() 注入（会话 / 路由 / FULL resync 事件）。
@@ -56,7 +56,9 @@ public:
 
 signals:
     // 用户点击 Apply 且模型判定应发送（已连接 / 能力满足 / 未在切换）。
-    void applyRequested(int mode);
+    // M8-A4：携带 DisplayRouteMode（不散落 int→enum static_cast；wire 转换
+    // 由主控经 shared/display toWireMode 唯一转换点完成）。
+    void applyRequested(display::DisplayRouteMode mode);
 
 private slots:
     void onApplyClicked();

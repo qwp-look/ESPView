@@ -8,6 +8,7 @@ project(espview_wifi LANGUAGES CXX)
 
 add_library(espview_wifi STATIC
     scan_transaction.cpp
+    reconnect_policy.cpp
 )
 target_include_directories(espview_wifi PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 target_compile_features(espview_wifi PUBLIC cxx_std_17)

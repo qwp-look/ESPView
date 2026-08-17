@@ -35,6 +35,8 @@ add_executable(espview_protocol_tests
     ../../transport/tests/transport_sink_test.cpp
     ../../transport/tests/transport_pipeline_test.cpp
     ../../transport/tests/bounded_queue_test.cpp
+    ../../transport/tests/lifecycle_test.cpp
+    ../../wifi/tests/reconnect_policy_test.cpp
     ../../oled/tests/oled_test.cpp
     ../../oled/tests/oled_status_test.cpp
     ../../oled/tests/physical_renderer_test.cpp
@@ -44,7 +46,7 @@ add_executable(espview_protocol_tests
     ../../../pc/src/wifi_wizard_state.cpp
     ../../../pc/src/wifi_wizard_state_test.cpp
 )
-target_link_libraries(espview_protocol_tests PRIVATE espview_protocol espview_input espview_display espview_transport espview_oled)
+target_link_libraries(espview_protocol_tests PRIVATE espview_protocol espview_input espview_display espview_transport espview_oled espview_wifi)
 
 # remote_display_test.cpp 位于 shared/display/tests（相对引用本目录 test_util.h）。
 target_include_directories(espview_protocol_tests PRIVATE
@@ -60,6 +62,9 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
     # （make_shared + std::function 析构链），仅对该文件单独抑制；不改测试逻辑。
     # M8-A2：加编译器判定（仅 GNU/Clang）——MSVC 的 cl 拒绝该参数（Curie F）。
     set_source_files_properties(../../display/tests/remote_display_test.cpp PROPERTIES
+                                COMPILE_OPTIONS "-Wno-array-bounds")
+    # M8-A5：GCC16 对 lifecycle_test.cpp 的 -Warray-bounds 同属 std::function 误报（与 remote_display 同模式）。
+    set_source_files_properties(../../transport/tests/lifecycle_test.cpp PROPERTIES
                                 COMPILE_OPTIONS "-Wno-array-bounds")
 endif()
 

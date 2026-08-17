@@ -87,7 +87,8 @@ private:
 
     // M7-D3 信号（queued 连接在 ctor 建立；GUI 线程消费）。
     void onCapabilitiesReceived(const espview::proto::CapabilitiesInfo& caps);
-    void onStatusChanged(WorkerStatus status, const QString& text);
+    // M8-A5（HOSTUART-03）：statusChanged 携带会话 epoch；旧会话 stale 信号丢弃。
+    void onStatusChanged(quint64 sessionId, WorkerStatus status, const QString& text);
     void onWifiScanResult(const espview::proto::WifiScanResultInfo& result);
     void onWifiScanReqAck(bool ok, quint16 errorCode);
     void onWifiConfigAck(bool ok, quint16 errorCode);

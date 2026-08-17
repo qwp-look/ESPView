@@ -12,6 +12,8 @@
 
 #include "input_codec.h"  // InputEvent → INPUT_* Message
 #include "message.h"      // M7-C3：makeSetMode（SET_MODE payload [0] mode，自动 ACK_REQ）
+#include "reconnect_policy.h"  // M8-A5（HOSTUART-04）：UART 重开有界指数退避
+#include "display_router.h"  // M8-A4：DisplayRouteMode ↔ wire mode 唯一转换点（drainDisplayModeQueue）
 
 namespace espview {
 namespace pc {
@@ -165,7 +167,8 @@ bool SerialWorker::waitMs(uint64_t ms) {
 
 void SerialWorker::emitStatus(WorkerStatus status, const QString& text) {
     lastStatus_.store(static_cast<int>(status));  // M7-G：状态快照（GUI 可读）
-    emit statusChanged(status, text);
+    // M8-A5（HOSTUART-03）：携带会话 epoch，GUI 据此丢弃旧会话 stale 信号。
+    emit statusChanged(sessionId_, status, text);
 }
 
 void SerialWorker::pushDiag(proto::Severity severity, std::string source,
@@ -294,7 +297,7 @@ void SerialWorker::runLoop() {
         *mgr_,
         [this]() { return ep_ != nullptr && ep_->state() != proto::SessionState::kDisconnected; },
         [this]() { return steadyMs(); },
-        [this](uint32_t ms) { waitMs(ms); });
+        [this](uint32_t ms) { return waitMs(ms); });  // M8-A5（SINK-04）：stop 中断 → sink 立即放弃
 
     // PacketSink（正常帧流：阻塞式，paced 时按 TxPolicy 重试）。
     auto sink = [this](const uint8_t* d, size_t n) -> proto::SendStatus {
@@ -493,6 +496,10 @@ void SerialWorker::runLoop() {
 }
 
 void SerialWorker::runLoopUart() {
+    // M8-A5（HOSTUART-04）：UART 重开使用有界指数退避（transient 100ms→5s cap），
+    // 替代固定 1.5s —— 设备拔出/COM 占用等反复失败不再以恒定频率空转；
+    // 打开成功即复位退避（正常断线重连保持快节奏）。
+    espview::wifi::ReconnectPolicy retry;
     while (!stop_.load()) {
         emitStatus(WorkerStatus::Connecting,
                    QString("Opening %1 @ %2 ...").arg(port_).arg(baud_));
@@ -501,26 +508,29 @@ void SerialWorker::runLoopUart() {
         // open 内部状态回调 Connecting/Connected 已转发到 transportState_）。
         if (!mgr_->open()) {
             ++reconnectCount_;
-            emitStatus(WorkerStatus::Error, "Open failed — retrying in 1.5s");
+            retry.onAttempt(espview::wifi::WifiFailureKind::kTransient);
+            emitStatus(WorkerStatus::Error, "Open failed — retrying");
             pushDiag(proto::Severity::kError, "transport", "open failed — retrying");
             ep_->onTransportDisconnected();
-            if (!waitMs(1500)) {
+            if (!waitMs(retry.nextDelayMs())) {
                 break;
             }
             continue;
         }
         emitStatus(WorkerStatus::Connecting, "Waiting for HELLO");
+        retry.onSuccess();  // M8-A5：打开成功 → 退避起点复位
         pumpLoop(nowMs());
 
         if (stop_.load()) {
             break;
         }
         ++reconnectCount_;
-        emitStatus(WorkerStatus::Disconnected, "Link lost — reconnecting in 1.5s");
+        retry.onAttempt(espview::wifi::WifiFailureKind::kTransient);
+        emitStatus(WorkerStatus::Disconnected, "Link lost — reconnecting");
         pushDiag(proto::Severity::kWarning, "transport", "link lost — reconnecting");
         ep_->onTransportDisconnected();
         mgr_->close();
-        if (!waitMs(1500)) {
+        if (!waitMs(retry.nextDelayMs())) {
             break;
         }
     }

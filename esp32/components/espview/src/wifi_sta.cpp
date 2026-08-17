@@ -5,6 +5,7 @@
 #include <cstring>
 
 #include "esp_log.h"
+#include "esp_timer.h"
 #include "esp_wifi.h"
 #include "freertos/task.h"
 #include "nvs_flash.h"
@@ -17,12 +18,50 @@ const char* kTag = "espview_wifi";
 
 constexpr UBaseType_t kWifiEventTaskPriority = 8;  // esp_event 默认任务优先级
 
+// M8-A5（WIFI-01）：事件 handler 内瞬态断开的连续自动重连上限（有界防风暴）。
+// 超过后置 kFailBit —— 重连收敛到 link task 的 ReconnectPolicy 退避调度。
+constexpr uint32_t kMaxAutoReconnectAttempts = 3;
+// M8-A5（WIFI-03）：STA_CONNECTED 后等待 GOT_IP 的 DHCP 上限（毫秒）。
+// 关联成功但 DHCP 无 IP 时 waitForIp 不再无限等待（timeoutMs=0 也有限）。
+constexpr uint64_t kDhcpTimeoutMs = 20000;
+
+// M8-A5（WIFI-02）：断开 reason 终态分类 —— 凭据/AP 级失败重试不会自愈，
+// 立即置 kFailBit（waitForIp 返回 false），不再事件内自动重连。
+bool isTerminalWifiReason(uint8_t reason) {
+    switch (reason) {
+        case WIFI_REASON_AUTH_EXPIRE:
+        case WIFI_REASON_MIC_FAILURE:
+        case WIFI_REASON_4WAY_HANDSHAKE_TIMEOUT:
+        case WIFI_REASON_GROUP_KEY_UPDATE_TIMEOUT:
+        case WIFI_REASON_IE_IN_4WAY_DIFFERS:
+        case WIFI_REASON_GROUP_CIPHER_INVALID:
+        case WIFI_REASON_PAIRWISE_CIPHER_INVALID:
+        case WIFI_REASON_AKMP_INVALID:
+        case WIFI_REASON_UNSUPP_RSN_IE_VERSION:
+        case WIFI_REASON_INVALID_RSN_IE_CAP:
+        case WIFI_REASON_802_1X_AUTH_FAILED:
+        case WIFI_REASON_CIPHER_SUITE_REJECTED:
+        case WIFI_REASON_NO_AP_FOUND:
+        case WIFI_REASON_AUTH_FAIL:
+        case WIFI_REASON_ASSOC_FAIL:
+        case WIFI_REASON_HANDSHAKE_TIMEOUT:
+        case WIFI_REASON_CONNECTION_FAIL:
+            return true;
+        default:
+            return false;
+    }
+}
+
 }  // namespace
 
 esp_err_t WifiSta::init(const WifiStaConfig& cfg) {
     if (initDone_) {
         return ESP_ERR_INVALID_STATE;  // 幂等保护：不隐式重开
     }
+    // M8-A5（WIFI-05）：全新 init 允许自动重连（stop 是 teardown 窗口语义）。
+    stopped_.store(false);
+    lastFailTerminal_.store(false);
+    reconnectAttempts_.store(0);
     if (cfg.ssid == nullptr || cfg.ssid[0] == '\0') {
         ESP_LOGE(kTag, "init: empty SSID (credentials from local sdkconfig/menuconfig)");
         return ESP_ERR_INVALID_ARG;
@@ -130,9 +169,9 @@ esp_err_t WifiSta::init(const WifiStaConfig& cfg) {
 }
 
 void WifiSta::deinit() {
-    if (!initDone_) {
-        return;
-    }
+    // M8-A5（TCP-ESP-01）：不再以 initDone_ 早退 —— init() 任一步失败后的
+    // 半初始化状态也必须在 deinit() 中释放（esp_wifi_stop/deinit 未初始化时
+    // 返回错误码但无害；所有资源均带 null 检查，可幂等重入）。
     if (wifiAny_ != nullptr) {
         esp_event_handler_instance_unregister(WIFI_EVENT, ESP_EVENT_ANY_ID, wifiAny_);
         wifiAny_ = nullptr;
@@ -177,7 +216,12 @@ esp_err_t WifiSta::startConnect() {
     if (!initDone_) {
         return ESP_ERR_INVALID_STATE;
     }
+    if (stopped_.load()) {
+        // M8-A5（WIFI-05）：stopReconnect() 后不再发起连接（link task 将退出/退避）。
+        return ESP_ERR_INVALID_STATE;
+    }
     xEventGroupClearBits(eventGroup_, kGotIpBit | kFailBit);
+    reconnectAttempts_.store(0);  // M8-A5（WIFI-01）：外部显式 connect 重置风暴计数
     const esp_err_t err = esp_wifi_connect();
     if (err != ESP_OK) {
         ESP_LOGE(kTag, "esp_wifi_connect failed: %s", esp_err_to_name(err));
@@ -185,14 +229,52 @@ esp_err_t WifiSta::startConnect() {
     return err;
 }
 
+void WifiSta::stopReconnect() {
+    // M8-A5（WIFI-05）：关闭 stop 窗口 —— 事件 handler 不再自动 connect；
+    // 置 kFailBit 让阻塞中的 waitForIp 立即返回（close 不必等 connect_timeout）。
+    stopped_.store(true);
+    if (eventGroup_ != nullptr) {
+        xEventGroupSetBits(eventGroup_, kFailBit);
+        xEventGroupClearBits(eventGroup_, kGotIpBit);
+    }
+}
+
 bool WifiSta::waitForIp(uint32_t timeoutMs) {
     if (!initDone_ || eventGroup_ == nullptr) {
         return false;
     }
-    const EventBits_t bits = xEventGroupWaitBits(
-        eventGroup_, kGotIpBit | kFailBit, pdFALSE, pdFALSE,
-        timeoutMs == 0 ? portMAX_DELAY : pdMS_TO_TICKS(timeoutMs));
-    return (bits & kGotIpBit) != 0;
+    // M8-A5（WIFI-03）：分块等待（≤1000ms/次）。timeoutMs=0 也不得无限等 ——
+    // STA_CONNECTED 后超过 kDhcpTimeoutMs 无 GOT_IP → 置 kFailBit 返回 false。
+    const uint64_t startMs = static_cast<uint64_t>(esp_timer_get_time() / 1000);
+    while (true) {
+        const uint64_t nowMs = static_cast<uint64_t>(esp_timer_get_time() / 1000);
+        uint32_t waitTicks;
+        if (timeoutMs == 0) {
+            waitTicks = pdMS_TO_TICKS(1000);
+        } else {
+            const uint64_t elapsed = nowMs - startMs;
+            if (elapsed >= timeoutMs) {
+                return false;
+            }
+            const uint64_t remaining = timeoutMs - elapsed;
+            waitTicks = pdMS_TO_TICKS(remaining < 1000 ? remaining : 1000);
+        }
+        const EventBits_t bits = xEventGroupWaitBits(eventGroup_, kGotIpBit | kFailBit,
+                                                    pdFALSE, pdFALSE, waitTicks);
+        if ((bits & kGotIpBit) != 0) {
+            return true;
+        }
+        if ((bits & kFailBit) != 0) {
+            return false;
+        }
+        const uint64_t connectedAt = staConnectedMs_.load();
+        if (wifiConnected_.load() && connectedAt != 0 &&
+            nowMs > connectedAt + kDhcpTimeoutMs) {
+            lastFailTerminal_.store(false);
+            xEventGroupSetBits(eventGroup_, kFailBit);
+            return false;
+        }
+    }
 }
 
 void WifiSta::eventHandler(void* arg, esp_event_base_t base, int32_t id, void* data) {
@@ -208,6 +290,10 @@ void WifiSta::handleEvent(esp_event_base_t base, int32_t id, void* data) {
                 break;
             case WIFI_EVENT_STA_CONNECTED:
                 wifiConnected_ = true;
+                gotIp_ = false;
+                staConnectedMs_.store(static_cast<uint64_t>(esp_timer_get_time() / 1000));
+                reconnectAttempts_.store(0);  // M8-A5（WIFI-01）：关联成功重置风暴计数
+                xEventGroupClearBits(eventGroup_, kFailBit);  // 新一次关联尝试：允许等 GOT_IP
                 ESP_LOGI(kTag, "WIFI CONNECTED");
                 break;
             case WIFI_EVENT_STA_DISCONNECTED: {
@@ -215,14 +301,35 @@ void WifiSta::handleEvent(esp_event_base_t base, int32_t id, void* data) {
                 gotIp_ = false;
                 // 不打印 reason 数值外的敏感信息（§二十六）。
                 const auto* ev = static_cast<wifi_event_sta_disconnected_t*>(data);
-                ESP_LOGW(kTag, "WIFI DISCONNECTED (reason=%d)", ev == nullptr ? -1 : ev->reason);
-                // 断开即重连（有界重试：失败后 waitForIp 侧超时，由 link task 退避）。
+                const int reason = ev == nullptr ? -1 : ev->reason;
+                ESP_LOGW(kTag, "WIFI DISCONNECTED (reason=%d)", reason);
+                xEventGroupClearBits(eventGroup_, kGotIpBit);
+                if (stopped_.load()) {
+                    return;  // M8-A5（WIFI-05）：teardown 窗口，不再自动重连
+                }
+                if (reason > 0 && isTerminalWifiReason(static_cast<uint8_t>(reason))) {
+                    // M8-A5（WIFI-02）：终态原因（凭据错误/AP 未找到等）→ 立即失败
+                    // waitForIp；由 link task 以慢退避重试（等待配置/AP 恢复）。
+                    lastFailTerminal_.store(true);
+                    xEventGroupSetBits(eventGroup_, kFailBit);
+                    return;
+                }
+                lastFailTerminal_.store(false);
+                // M8-A5（WIFI-01）：瞬态断开 → 有界自动重连（≤kMaxAutoReconnectAttempts）；
+                // 连续失败超限 → 置 kFailBit，重连收敛到 link task 退避调度（防风暴）。
+                const uint32_t n = reconnectAttempts_.load();
+                if (n >= kMaxAutoReconnectAttempts) {
+                    ESP_LOGW(kTag, "auto-reconnect exhausted (%u); handing off to link task",
+                             static_cast<unsigned>(n));
+                    xEventGroupSetBits(eventGroup_, kFailBit);
+                    return;
+                }
+                reconnectAttempts_.store(n + 1);
                 const esp_err_t err = esp_wifi_connect();
                 if (err != ESP_OK && err != ESP_ERR_WIFI_NOT_STARTED) {
                     ESP_LOGW(kTag, "auto-reconnect esp_wifi_connect failed: %s",
                              esp_err_to_name(err));
                 }
-                xEventGroupClearBits(eventGroup_, kGotIpBit);
                 break;
             }
             default:
@@ -238,6 +345,7 @@ void WifiSta::handleEvent(esp_event_base_t base, int32_t id, void* data) {
         wifiConnected_ = true;
         gotIp_ = true;
         xEventGroupSetBits(eventGroup_, kGotIpBit);
+        xEventGroupClearBits(eventGroup_, kFailBit);
     }
 }
 

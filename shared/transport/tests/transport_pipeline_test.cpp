@@ -119,7 +119,7 @@ struct Harness {
               },
               initial),
           sink(mgr, [this]() { return a && a->state() != SessionState::kDisconnected; },
-               [this]() { return now; }, [this](uint32_t) {}) {
+               [this]() { return now; }, [this](uint32_t) { return true; }) {  // M8-A5：Sleep 返回 bool
         EndpointConfig cfg;
         cfg.protocol_version = espview::proto::kProtocolVersion;
         cfg.width = 320;

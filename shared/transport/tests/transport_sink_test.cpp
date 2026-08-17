@@ -52,9 +52,10 @@ struct ClockAndSleep {
     uint64_t now = 0;
     std::vector<uint32_t> sleeps;
     uint64_t operator()() { return now; }
-    void operator()(uint32_t ms) {
+    bool operator()(uint32_t ms) {
         sleeps.push_back(ms);
         now += ms;
+        return true;  // M8-A5：Sleep 返回 bool（true=完成，false=被中断）
     }
 };
 
@@ -72,7 +73,7 @@ void runTransportSinkTests() {
         CHECK(mgr.open());
         ClockAndSleep cs;
         TransportSink sink(mgr, []() { return true; },
-                           [&cs]() { return cs.now; }, [&cs](uint32_t ms) { cs(ms); });
+                           [&cs]() { return cs.now; }, [&cs](uint32_t ms) { cs(ms); return true; });
         owned[0]->setSendSequence({SendStatus::kBackpressure, SendStatus::kBackpressure,
                                    SendStatus::kBackpressure, SendStatus::kOk});
         const uint8_t pkt[] = {0xAA, 0xBB};
@@ -93,7 +94,7 @@ void runTransportSinkTests() {
         CHECK(mgr.open());
         ClockAndSleep cs;
         TransportSink sink(mgr, []() { return true; },
-                           [&cs]() { return cs.now; }, [&cs](uint32_t ms) { cs(ms); });
+                           [&cs]() { return cs.now; }, [&cs](uint32_t ms) { cs(ms); return true; });
         owned[0]->setSendSequence({SendStatus::kBackpressure});
         const uint8_t pkt[] = {0x11, 0x22};
         CHECK_EQ(sink.send(pkt, sizeof(pkt)), SendStatus::kBackpressure);
@@ -110,7 +111,7 @@ void runTransportSinkTests() {
         CHECK(mgr.open());
         ClockAndSleep cs;
         TransportSink sink(mgr, []() { return true; },
-                           [&cs]() { return cs.now; }, [&cs](uint32_t ms) { cs(ms); });
+                           [&cs]() { return cs.now; }, [&cs](uint32_t ms) { cs(ms); return true; });
         owned[0]->setSendResult(SendStatus::kBackpressure);  // 永远背压
         const uint8_t pkt[] = {0x01};
         CHECK_EQ(sink.send(pkt, sizeof(pkt)), SendStatus::kBackpressure);
@@ -129,7 +130,7 @@ void runTransportSinkTests() {
         CHECK(mgr.open());
         ClockAndSleep cs;
         TransportSink sink(mgr, []() { return false; },
-                           [&cs]() { return cs.now; }, [&cs](uint32_t ms) { cs(ms); });
+                           [&cs]() { return cs.now; }, [&cs](uint32_t ms) { cs(ms); return true; });
         const uint8_t pkt[] = {0x01};
         CHECK_EQ(sink.send(pkt, sizeof(pkt)), SendStatus::kNotConnected);
         CHECK_EQ(owned[0]->sendCount(), 0u);
@@ -144,7 +145,7 @@ void runTransportSinkTests() {
         CHECK(mgr.open());
         ClockAndSleep cs;
         TransportSink sink(mgr, []() { return true; },
-                           [&cs]() { return cs.now; }, [&cs](uint32_t ms) { cs(ms); });
+                           [&cs]() { return cs.now; }, [&cs](uint32_t ms) { cs(ms); return true; });
         // 模拟 TX 任务正持有发送门（大帧发送中）。
         espview::transport::ITransport* held = mgr.lockTransport();
         CHECK(held != nullptr);
@@ -168,7 +169,7 @@ void runTransportSinkTests() {
         CHECK(mgr.open());
         ClockAndSleep cs;
         TransportSink sink(mgr, []() { return true; },
-                           [&cs]() { return cs.now; }, [&cs](uint32_t ms) { cs(ms); });
+                           [&cs]() { return cs.now; }, [&cs](uint32_t ms) { cs(ms); return true; });
         const uint8_t pkt[] = {0x66, 0x77};
         CHECK_EQ(sink.trySend(pkt, sizeof(pkt)), SendStatus::kOk);
         CHECK_EQ(owned[0]->sendCount(), 1u);
@@ -185,7 +186,7 @@ void runTransportSinkTests() {
         CHECK(mgr.open());
         ClockAndSleep cs;
         TransportSink sink(mgr, []() { return true; },
-                           [&cs]() { return cs.now; }, [&cs](uint32_t ms) { cs(ms); });
+                           [&cs]() { return cs.now; }, [&cs](uint32_t ms) { cs(ms); return true; });
         owned[0]->setSendResult(SendStatus::kBackpressure);
         const uint8_t pkt[] = {0x01, 0x02};
         CHECK_EQ(sink.send(pkt, sizeof(pkt)), SendStatus::kBackpressure);
@@ -211,7 +212,7 @@ void runTransportSinkTests() {
         CHECK(mgr.open());
         ClockAndSleep cs;
         TransportSink sink(mgr, []() { return true; },
-                           [&cs]() { return cs.now; }, [&cs](uint32_t ms) { cs(ms); });
+                           [&cs]() { return cs.now; }, [&cs](uint32_t ms) { cs(ms); return true; });
         owned[0]->setSendResult(SendStatus::kError);
         const uint8_t pkt[] = {0xAA};
         CHECK_EQ(sink.send(pkt, sizeof(pkt)), SendStatus::kError);

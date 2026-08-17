@@ -200,7 +200,8 @@ public:
 
 signals:
     void frameReady(const DisplayFrame& frame);  // 已提交帧（queued 投递 GUI）
-    void statusChanged(WorkerStatus status, const QString& text);
+    // M8-A5（HOSTUART-03）：携带会话 epoch（sessionId_）；GUI 丢弃旧会话信号。
+    void statusChanged(quint64 sessionId, WorkerStatus status, const QString& text);
     void statsChanged(const WorkerStats& stats);
     // M4：诊断条目（timestampMs, severity=proto::Severity, source, message）。
     // 纯基本类型信号，无需额外 metatype 注册；GUI 侧维护最近 50 条。
