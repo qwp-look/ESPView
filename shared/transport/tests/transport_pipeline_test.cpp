@@ -135,19 +135,12 @@ struct Harness {
                 input.resetState();  // 断线/切换：本地安全恢复（与 main.cpp 一致）
             }
         };
-        auto mapSend = [](espview::transport::SendStatus r) -> SendStatus {
-            switch (r) {
-                case espview::transport::SendStatus::kOk: return SendStatus::kOk;
-                case espview::transport::SendStatus::kBackpressure: return SendStatus::kBackpressure;
-                case espview::transport::SendStatus::kError: return SendStatus::kError;
-                case espview::transport::SendStatus::kNotConnected: return SendStatus::kNotConnected;
-            }
-            return SendStatus::kError;
-        };
+        // M8-A3：proto::SendStatus 即 transport::SendStatus 的别名
+        //（protocol_endpoint.h:59），无需再包一层映射（原 mapSend 恒等函数已删）。
         a = std::make_unique<ProtocolEndpoint>(
             cfg,
-            [this, mapSend](const uint8_t* d, size_t n) { return mapSend(sink.send(d, n)); },
-            [this, mapSend](const uint8_t* d, size_t n) { return mapSend(sink.trySend(d, n)); },
+            [this](const uint8_t* d, size_t n) { return sink.send(d, n); },
+            [this](const uint8_t* d, size_t n) { return sink.trySend(d, n); },
             std::move(acb), [this]() { return now; });
 
         mgr.setDataCallback([this](const uint8_t* d, size_t n) { a->onTransportData(d, n); });
@@ -351,6 +344,30 @@ void runTransportPipelineTests() {
         CHECK_EQ(h.sendFullFrame(8), SendResult::kOk);
         CHECK_EQ(h.bCommits.size(), 1u);
         CHECK_EQ(h.bCommits[0].frameId, 8u);
+        h.mgr.close();
+    }
+
+    // ---- C. M8-A3：大帧流式发送期间插入 control traffic ----
+    // TX 任务持发送门流式发大帧时，RX 线程的 PONG/ACK 回复（tryTransmit →
+    // trySend）必须立即返回 kBackpressure，绝不阻塞/等待（否则 RX 线程停滞、
+    // 对端 5s 超时被饿死）。门释放后 control traffic 恢复。
+    {
+        Harness h(TransportType::kTcp);
+        CHECK(h.mgr.open());
+        CHECK(h.handshake());
+        // 模拟"正在流式发送大帧"：主线程持有发送门（等同 sendMessageStreaming
+        // 单包发送期间的门占用窗口）。
+        espview::transport::ITransport* held = h.mgr.lockTransport();
+        CHECK(held != nullptr);
+        const size_t sendsBefore = h.curFake()->sendCount();
+        const uint8_t ctrl[] = {0x01, 0x02};
+        const SendStatus busy = h.sink.trySend(ctrl, sizeof(ctrl));
+        CHECK_EQ(busy, SendStatus::kBackpressure);  // 门忙：单次尽力，立即背压
+        CHECK_EQ(h.curFake()->sendCount(), sendsBefore);  // 未触碰 Transport
+        h.mgr.unlockTransport();
+        // 门释放：control traffic 正常发送。
+        CHECK_EQ(h.sink.trySend(ctrl, sizeof(ctrl)), SendStatus::kOk);
+        CHECK_EQ(h.curFake()->sendCount(), sendsBefore + 1u);
         h.mgr.close();
     }
 

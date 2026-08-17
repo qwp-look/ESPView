@@ -146,8 +146,7 @@ private:
         cfg.device_name = "espview-pc";
 
         auto sink = [&tcp](const uint8_t* d, size_t n) -> proto::SendStatus {
-            return tcp.send(d, n) ? proto::SendStatus::kOk
-                                  : proto::SendStatus::kError;
+            return tcp.send(d, n);  // M8-A3：send 直接返回 canonical SendStatus
         };
 
         proto::ProtocolEndpoint::Callbacks cb;

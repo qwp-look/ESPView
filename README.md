@@ -426,7 +426,8 @@ See [docs/security.md](docs/security.md).
 - No native USB device support (ESP32 USB OTG not used).
 - UART baseline is 115200 8N1; 921600 is experimental-only (unreliable for
   large-frame bursts).
-- UART FULL frame ~13.5 s -- the design assumes dirty-rect PARTIAL updates.
+- UART FULL frame ~13.5 s (115200 baud, 320x240 baseline) -- the design assumes
+  dirty-rect PARTIAL updates; 921600 remains experimental-only.
 - PC TCP server is single-client.
 - 4 MiB flash, single 2 MiB factory app, no OTA.
 - AP outage (router power loss) is deferred and not fully hardware-validated;

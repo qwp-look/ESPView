@@ -76,6 +76,13 @@ public:
     bool switchTo(TransportType type);
     // 重新 open 当前已选类型（open 失败/切换失败后的重试入口）。
     bool reopen();
+    // M8-A3（PC TCP Server accept 路径）：adopt 一个已激活的 Transport。
+    // 与 open()/switchTo() 不同：transport 已由调用方 open（HostTcpTransport
+    // 已 attach accepted socket），本方法只挂回调并设为当前 Transport，
+    // 不调用 open()。要求当前未 open（已 open 返回 false，不做隐式替换），
+    // 且 t->isConnected() 必须为 true（未连接 → 拒绝；M8-A3 C/E）。
+    // 失败时不改变当前状态；成功则 isOpen()==true、current()==type。
+    bool adopt(TransportType type, std::shared_ptr<ITransport> t);
 
     // ---- 查询 ----
     TransportType current() const;

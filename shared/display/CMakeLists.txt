@@ -15,6 +15,7 @@ add_library(espview_display STATIC
 target_include_directories(espview_display PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}
     ${CMAKE_CURRENT_SOURCE_DIR}/../protocol  # remote_display 依赖 message/encoder/endpoint 头
+    ${CMAKE_CURRENT_SOURCE_DIR}/../transport # M8-A3：protocol_endpoint.h 引用 transport::SendStatus
 )
 target_compile_features(espview_display PUBLIC cxx_std_17)
 

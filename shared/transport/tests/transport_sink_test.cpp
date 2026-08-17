@@ -175,5 +175,50 @@ void runTransportSinkTests() {
         mgr.close();
     }
 
+    // ---- 16. M8-A3：WouldBlock ≠ disconnect（kBackpressure 不改变会话/管理器状态）----
+    // TCP 语义：send 超时 = would-block（背压），Transport 仍 connected、管理器
+    // 仍 open；上层按 TxPolicy 整帧丢弃，绝不视为断线（kBackpressure ≠ kNotConnected）。
+    {
+        std::vector<std::shared_ptr<FakeTransport>> owned;
+        FakeSetup setup;
+        TransportManager mgr = makeManager(owned, setup, TransportType::kTcp);
+        CHECK(mgr.open());
+        ClockAndSleep cs;
+        TransportSink sink(mgr, []() { return true; },
+                           [&cs]() { return cs.now; }, [&cs](uint32_t ms) { cs(ms); });
+        owned[0]->setSendResult(SendStatus::kBackpressure);
+        const uint8_t pkt[] = {0x01, 0x02};
+        CHECK_EQ(sink.send(pkt, sizeof(pkt)), SendStatus::kBackpressure);
+        CHECK(mgr.isOpen());
+        CHECK(owned[0]->isConnected());
+        // 未投递任何断开/错误状态（stateLog 仍只有 open 时的 kConnected）。
+        CHECK_EQ(owned[0]->stateLog().size(), 1u);
+        CHECK_EQ(owned[0]->stateLog()[0], ITransport::State::kConnected);
+        // 未连接 ≠ 背压：关闭后 trySend 返回 kNotConnected（区分两种语义；
+        // 阻塞式 send 在未 open 时返回 kError，trySend 的 isOpen 检查给出
+        // 明确的 kNotConnected）。
+        mgr.close();
+        CHECK_EQ(sink.trySend(pkt, sizeof(pkt)), SendStatus::kNotConnected);
+    }
+
+    // ---- 17. M8-A3：send failure 注入（kError）不被重试、不视为背压 ----
+    // paced（UART）：kError 立即终止重试循环（非背压不 sleep）；上层按
+    // Transport 层错误处理（可能触发重连策略），而非整帧背压重试。
+    {
+        std::vector<std::shared_ptr<FakeTransport>> owned;
+        FakeSetup setup;
+        TransportManager mgr = makeManager(owned, setup, TransportType::kUart);
+        CHECK(mgr.open());
+        ClockAndSleep cs;
+        TransportSink sink(mgr, []() { return true; },
+                           [&cs]() { return cs.now; }, [&cs](uint32_t ms) { cs(ms); });
+        owned[0]->setSendResult(SendStatus::kError);
+        const uint8_t pkt[] = {0xAA};
+        CHECK_EQ(sink.send(pkt, sizeof(pkt)), SendStatus::kError);
+        CHECK_EQ(owned[0]->sendCount(), 1u);  // 单次尝试，无背压重试
+        CHECK_EQ(cs.sleeps.size(), 0u);       // 无 UART 式 sleep
+        mgr.close();
+    }
+
     std::printf("[transport_sink] done\n");
 }

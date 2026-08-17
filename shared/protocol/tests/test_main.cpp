@@ -37,6 +37,7 @@ void runSplitStateTests();
 void runTransportManagerTests();
 void runTransportSinkTests();
 void runTransportPipelineTests();
+void runBoundedQueueTests();
 void runOledTests();
 void runOledStatusTests();
 void runPhysicalRendererTests();
@@ -113,6 +114,8 @@ int main() {
     runTransportSinkTests();
     std::printf("[transport_pipeline]\n");
     runTransportPipelineTests();
+    std::printf("[bounded_queue]\n");
+    runBoundedQueueTests();
     std::printf("[oled]\n");
     runOledTests();
     std::printf("[oled_status]\n");

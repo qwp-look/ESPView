@@ -37,8 +37,8 @@
 namespace {
 
 using espview::pc::HostTcpTransport;
-using espview::pc::IPcTransport;
 using espview::pc::TcpListener;
+using espview::transport::ITransport;
 
 using espview::proto::CommittedFrame;
 using espview::proto::DecoderError;
@@ -301,8 +301,8 @@ struct Peer {
             std::lock_guard<std::mutex> lk(rxMutex);
             rxBuf.insert(rxBuf.end(), chunk.begin(), chunk.end());
         });
-        transport.setStateCallback([this](IPcTransport::State s) {
-            if (s == IPcTransport::State::Disconnected || s == IPcTransport::State::Error) {
+        transport.setStateCallback([this](ITransport::State s) {
+            if (s == ITransport::State::kDisconnected || s == ITransport::State::kError) {
                 if (ep) {
                     ep->onTransportDisconnected();
                 }
@@ -358,7 +358,7 @@ bool pumpBoth(Peer& a, Peer& b, uint64_t timeoutMs, const std::function<bool()>&
 
 void initEndpoint(Peer& p, const EndpointConfig& cfg) {
     auto sink = [&p](const uint8_t* d, size_t n) -> SendStatus {
-        return p.transport.send(d, n) ? SendStatus::kOk : SendStatus::kError;
+        return p.transport.send(d, n);  // M8-A3：send 直接返回 canonical SendStatus
     };
     ProtocolEndpoint::Callbacks cb;
     cb.onSessionState = [&p](SessionState s) {
@@ -533,8 +533,8 @@ void runTransportTests() {
     {
         ServerSide srv;
         CHECK_MSG(srv.start(), "server bindListen");
-        HostTcpTransport client;
-        CHECK_MSG(client.open(clientCfg(srv.port)), "client open");
+        HostTcpTransport client(clientCfg(srv.port));  // M8-A3：配置构造注入
+        CHECK_MSG(client.open(), "client open");
         CHECK_MSG(srv.waitAccept(3000), "server acceptOne");
         CHECK(client.isConnected());
         CHECK(srv.accepted.isConnected());
@@ -547,7 +547,7 @@ void runTransportTests() {
 
         // ---- 3. reconnect（§十一：断开 → 重新 accept）----
         srv.acceptAgain();
-        CHECK_MSG(client.open(clientCfg(srv.port)), "client reconnect open");
+        CHECK_MSG(client.open(), "client reconnect open");
         CHECK_MSG(srv.waitAccept(3000), "server re-accept");
 
         // ---- 10. BUSY：已有活跃客户端时 acceptOne 立即返回 false（§九）----
@@ -561,8 +561,8 @@ void runTransportTests() {
     {
         ServerSide srv;
         CHECK(srv.start());
-        HostTcpTransport client;
-        CHECK(client.open(clientCfg(srv.port)));
+        HostTcpTransport client(clientCfg(srv.port));
+        CHECK(client.open());
         CHECK(srv.waitAccept(3000));
 
         RxCollector clientRx;
@@ -572,9 +572,9 @@ void runTransportTests() {
         for (size_t i = 0; i < msg.size(); ++i) {
             msg[i] = static_cast<uint8_t>(i & 0xFF);
         }
-        CHECK(srv.accepted.send(msg.data(), 60));  // 半个包
+        CHECK(srv.accepted.send(msg.data(), 60) == SendStatus::kOk);  // 半个包
         sleepMs(50);
-        CHECK(srv.accepted.send(msg.data() + 60, 40));  // 后半
+        CHECK(srv.accepted.send(msg.data() + 60, 40) == SendStatus::kOk);  // 后半
         CHECK_MSG(clientRx.waitBytes(msg.size(), 3000), "client receives full message");
         const std::vector<uint8_t> got = clientRx.snapshot();
         CHECK_EQ(got.size(), msg.size());
@@ -588,8 +588,8 @@ void runTransportTests() {
     {
         ServerSide srv;
         CHECK(srv.start());
-        HostTcpTransport client;
-        CHECK(client.open(clientCfg(srv.port)));
+        HostTcpTransport client(clientCfg(srv.port));
+        CHECK(client.open());
         CHECK(srv.waitAccept(3000));
 
         RxCollector clientRx;
@@ -601,7 +601,7 @@ void runTransportTests() {
                 blob.push_back(static_cast<uint8_t>(m * 37 + i));
             }
         }
-        CHECK(srv.accepted.send(blob.data(), blob.size()));  // 一次 send 全部
+        CHECK(srv.accepted.send(blob.data(), blob.size()) == SendStatus::kOk);  // 一次 send 全部
         CHECK_MSG(clientRx.waitBytes(blob.size(), 3000), "client receives sticky blob");
         const std::vector<uint8_t> got = clientRx.snapshot();
         CHECK_EQ(got.size(), blob.size());
@@ -615,18 +615,18 @@ void runTransportTests() {
     {
         ServerSide srv;
         CHECK(srv.start());
-        HostTcpTransport client;
-        CHECK(client.open(clientCfg(srv.port)));
+        HostTcpTransport client(clientCfg(srv.port));
+        CHECK(client.open());
         CHECK(srv.waitAccept(3000));
 
         RxCollector serverRx;
         serverRx.wire(srv.accepted);
 
-        std::vector<uint8_t> big(20 + 4096);  // mtu() == 4116
+        std::vector<uint8_t> big(20 + 4096);  // capabilities().mtu == 4116（=20B header+4096 payload）
         for (size_t i = 0; i < big.size(); ++i) {
             big[i] = static_cast<uint8_t>((i * 3 + 7) & 0xFF);
         }
-        CHECK_MSG(client.send(big.data(), big.size()), "sendAll 4116B");
+        CHECK_MSG(client.send(big.data(), big.size()) == SendStatus::kOk, "sendAll 4116B");
         CHECK_MSG(serverRx.waitBytes(big.size(), 3000), "server receives 4116B");
         const std::vector<uint8_t> got = serverRx.snapshot();
         CHECK_EQ(got.size(), big.size());
@@ -640,8 +640,8 @@ void runTransportTests() {
     {
         ServerSide srv;
         CHECK(srv.start());
-        HostTcpTransport client;
-        CHECK(client.open(clientCfg(srv.port)));
+        HostTcpTransport client(clientCfg(srv.port));
+        CHECK(client.open());
         CHECK(srv.waitAccept(3000));
         srv.accepted.close();
         CHECK_MSG(waitUntil(3000, [&] { return !client.isConnected(); }),
@@ -656,21 +656,21 @@ void runTransportTests() {
         CHECK(tmp.start());
         const uint16_t deadPort = tmp.port;
         tmp.shutdown();  // listener 关闭 → 端口不再监听
-        HostTcpTransport c;
-        CHECK_MSG(!c.open(clientCfg(deadPort)), "connect to closed port fails");
+        HostTcpTransport c(clientCfg(deadPort));
+        CHECK_MSG(!c.open(), "connect to closed port fails");
         CHECK(!c.isConnected());
     }
 
     // ---- 9. invalid address（getaddrinfo 失败）----
     // 用非法 IPv4 数值（256.x）：getaddrinfo 无法解析为地址且 DNS 不会命中 → 明确失败。
     {
-        HostTcpTransport c;
         HostTcpTransport::Config cfg;
         cfg.host = "256.256.256.256";
         cfg.port = 8765;
         cfg.connect_timeout_ms = 1000;
-        CHECK_MSG(!c.open(cfg), "invalid address fails");
-        CHECK(!c.isConnected());
+        HostTcpTransport bad(cfg);
+        CHECK_MSG(!bad.open(), "invalid address fails");
+        CHECK(!bad.isConnected());
     }
 
     // ---- 11. M6-D §十七 回归：remote close → setState(Disconnected) 状态回调 ----
@@ -682,11 +682,11 @@ void runTransportTests() {
         CHECK(srv.start());
         std::atomic<int> serverStateCb{-1};  // -1=未收到, 0=Disconnected, 2=Connected
         // 回调必须在 accept 之前挂上（attach 的 Connected 回调在 accept 时触发）。
-        srv.accepted.setStateCallback([&serverStateCb](IPcTransport::State s) {
+        srv.accepted.setStateCallback([&serverStateCb](ITransport::State s) {
             serverStateCb.store(static_cast<int>(s));
         });
-        HostTcpTransport client;
-        CHECK(client.open(clientCfg(srv.port)));
+        HostTcpTransport client(clientCfg(srv.port));
+        CHECK(client.open());
         CHECK(srv.waitAccept(3000));
         CHECK_MSG(waitUntil(3000, [&] { return serverStateCb.load() == 2; }),
                   "attach → Connected state callback");
@@ -704,11 +704,11 @@ void runTransportTests() {
         ServerSide srv;
         CHECK(srv.start());
         std::atomic<int> stateCb{-1};
-        srv.accepted.setStateCallback([&stateCb](IPcTransport::State s) {
+        srv.accepted.setStateCallback([&stateCb](ITransport::State s) {
             stateCb.store(static_cast<int>(s));
         });
-        HostTcpTransport c1;
-        CHECK(c1.open(clientCfg(srv.port)));
+        HostTcpTransport c1(clientCfg(srv.port));
+        CHECK(c1.open());
         CHECK(srv.waitAccept(3000));
         CHECK(waitUntil(3000, [&] { return stateCb.load() == 2; }));
 
@@ -719,8 +719,8 @@ void runTransportTests() {
         // 重新 accept 新客户端：必须回到 Connected 状态回调 + 新会话数据可达
         //（不残留旧会话的 Disconnected 状态，即 stale state cleared）。
         srv.acceptAgain();
-        HostTcpTransport c2;
-        CHECK(c2.open(clientCfg(srv.port)));
+        HostTcpTransport c2(clientCfg(srv.port));
+        CHECK(c2.open());
         CHECK_MSG(srv.waitAccept(3000), "server re-accept new client");
         CHECK_MSG(waitUntil(3000, [&] { return stateCb.load() == 2; }),
                   "re-accept → Connected state callback (stale state cleared)");
@@ -728,7 +728,7 @@ void runTransportTests() {
         RxCollector serverRx;
         serverRx.wire(srv.accepted);
         const uint8_t blob[4] = {0xAA, 0xBB, 0xCC, 0xDD};
-        CHECK_MSG(c2.send(blob, sizeof(blob)), "new session send");
+        CHECK_MSG(c2.send(blob, sizeof(blob)) == SendStatus::kOk, "new session send");
         CHECK_MSG(serverRx.waitBytes(sizeof(blob), 3000), "new session data reaches server");
         c2.close();
         srv.shutdown();
@@ -767,11 +767,11 @@ void runTransportTests() {
             }
         });
 
-        HostTcpTransport client;
+        HostTcpTransport client(clientCfg(port));
         std::atomic<int> stateCb{-1};
         client.setStateCallback(
-            [&stateCb](IPcTransport::State s) { stateCb.store(static_cast<int>(s)); });
-        const bool opened = client.open(clientCfg(port));
+            [&stateCb](ITransport::State s) { stateCb.store(static_cast<int>(s)); });
+        const bool opened = client.open();
         if (!opened) {
             closesocket(ls);  // 解除服务端 accept 阻塞，避免 join 悬挂
         }
@@ -788,7 +788,7 @@ void runTransportTests() {
         const uint8_t blob[4] = {0x11, 0x22, 0x33, 0x44};
         bool sawSendFail = false;
         for (int i = 0; i < 8 && !sawSendFail; ++i) {
-            if (!client.send(blob, sizeof(blob))) {
+            if (client.send(blob, sizeof(blob)) != SendStatus::kOk) {
                 sawSendFail = true;
                 break;
             }
@@ -805,13 +805,13 @@ void runTransportTests() {
     {
         ServerSide srv;
         CHECK(srv.start());
-        HostTcpTransport client;
-        CHECK(client.open(clientCfg(srv.port)));
+        HostTcpTransport client(clientCfg(srv.port));
+        CHECK(client.open());
         CHECK(srv.waitAccept(3000));
         client.close();
         const uint8_t b[4] = {1, 2, 3, 4};
-        CHECK(!client.send(b, sizeof(b)));
-        CHECK(!client.send(b, sizeof(b)));  // 重复调用安全
+        CHECK(client.send(b, sizeof(b)) != SendStatus::kOk);
+        CHECK(client.send(b, sizeof(b)) != SendStatus::kOk);  // 重复调用安全
         srv.shutdown();
     }
 
@@ -820,13 +820,13 @@ void runTransportTests() {
         ServerSide srv;
         CHECK(srv.start());
         for (int cycle = 0; cycle < 3; ++cycle) {
-            HostTcpTransport client;
-            CHECK_MSG(client.open(clientCfg(srv.port)), "reconnect open cycle");
+            HostTcpTransport client(clientCfg(srv.port));
+            CHECK_MSG(client.open(), "reconnect open cycle");
             CHECK_MSG(srv.waitAccept(3000), "server accept cycle");
             CHECK(client.isConnected());
             CHECK(srv.accepted.isConnected());
             const uint8_t b[4] = {static_cast<uint8_t>(cycle), 0xAA, 0xBB, 0xCC};
-            CHECK_MSG(client.send(b, sizeof(b)), "cycle send");
+            CHECK_MSG(client.send(b, sizeof(b)) == SendStatus::kOk, "cycle send");
             client.close();
             CHECK_MSG(waitUntil(3000, [&] { return !srv.accepted.isConnected(); }),
                       "server observes client close");
@@ -836,6 +836,42 @@ void runTransportTests() {
         }
         srv.shutdown();
     }
+    // ---- 16. M8-A3：len > capabilities().mtu → kError（不尝试发送，连接保持）----
+    {
+        ServerSide srv;
+        CHECK(srv.start());
+        HostTcpTransport client(clientCfg(srv.port));
+        CHECK(client.open());
+        CHECK(srv.waitAccept(3000));
+        std::vector<uint8_t> huge(20 + 4096 + 1);  // mtu+1 = 4117
+        CHECK_EQ(client.send(huge.data(), huge.size()), SendStatus::kError);
+        CHECK(client.isConnected());  // 超限拒绝不破坏连接
+        const uint8_t small[4] = {0xAA, 0xBB, 0xCC, 0xDD};
+        CHECK_MSG(client.send(small, sizeof(small)) == SendStatus::kOk, "normal send still OK");
+        client.close();
+        srv.shutdown();
+    }
+
+    // ---- 17. M8-A3：attach 后 open() 幂等（服务端 accept 路径不重连）----
+    {
+        ServerSide srv;
+        CHECK(srv.start());
+        HostTcpTransport client(clientCfg(srv.port));
+        CHECK(client.open());
+        CHECK(srv.waitAccept(3000));
+        CHECK(srv.accepted.isConnected());
+        CHECK_MSG(srv.accepted.open(), "attached transport open() idempotent true");
+        CHECK(srv.accepted.isConnected());  // 未被重连打断
+        RxCollector serverRx;
+        serverRx.wire(srv.accepted);
+        const uint8_t blob[4] = {0xEE, 0xDD, 0xCC, 0xBB};
+        CHECK_MSG(client.send(blob, sizeof(blob)) == SendStatus::kOk, "data still flows");
+        CHECK_MSG(serverRx.waitBytes(sizeof(blob), 3000),
+                  "server receives after idempotent open");
+        client.close();
+        srv.shutdown();
+    }
+
     std::printf("[tcp_transport] transport semantics OK\n");
 }
 
@@ -846,7 +882,7 @@ void runProtocolIntegration() {
     ServerSide srv;
     CHECK_MSG(srv.start(), "server bindListen");
 
-    HostTcpTransport espTransport;
+    HostTcpTransport espTransport(clientCfg(srv.port));  // M8-A3：配置构造注入
     Peer pc(srv.accepted);
     Peer esp(espTransport);
     initEndpoint(pc, pcCfg());
@@ -855,7 +891,7 @@ void runProtocolIntegration() {
     esp.wire();
 
     // ---- 11. connect + HELLO 握手（ESP32 角色主动；PC 角色被动）----
-    CHECK(espTransport.open(clientCfg(srv.port)));
+    CHECK(espTransport.open());
     CHECK_MSG(srv.waitAccept(3000), "server accepts ESP32");
     esp.ep->onTransportConnected();  // ESP32 角色：发起 HELLO
     CHECK_MSG(pumpBoth(esp, pc, 3000,
@@ -935,7 +971,7 @@ void runProtocolIntegration() {
                   "pc session disconnected");
         // server 重新 accept；ESP32 重新连接并走完整握手
         srv.acceptAgain();
-        CHECK_MSG(espTransport.open(clientCfg(srv.port)), "esp reconnect open");
+        CHECK_MSG(espTransport.open(), "esp reconnect open");
         CHECK_MSG(srv.waitAccept(3000), "server re-accept after reconnect");
         esp.ep->onTransportConnected();
         CHECK_MSG(pumpBoth(esp, pc, 3000,

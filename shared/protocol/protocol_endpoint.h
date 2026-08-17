@@ -42,6 +42,7 @@
 #include "message.h"
 #include "protocol.h"
 #include "runtime_stats.h"
+#include "transport.h"  // M8-A3：canonical ITransport / SendStatus（唯一契约，§三十五）
 
 namespace espview {
 namespace proto {
@@ -54,13 +55,8 @@ enum class SessionState : uint8_t {
     kConnected = 3,     // HELLO 互换完成，控制面可用
 };
 
-// ---- Transport 发送结果（共享层不依赖 esp_err_t；适配层负责映射）----
-enum class SendStatus : uint8_t {
-    kOk = 0,
-    kBackpressure = 1,  // Transport 缓冲满（上层整帧丢弃，Transport 不理解帧）
-    kError = 2,         // Transport 层错误
-    kNotConnected = 3,  // Transport 未打开/会话未建立
-};
+// ---- Transport 发送结果（唯一 canonical：引用 transport::SendStatus，§三十五.2）----
+using SendStatus = ::espview::transport::SendStatus;
 
 // ---- sendMessage() 返回值 ----
 enum class SendResult : uint8_t {

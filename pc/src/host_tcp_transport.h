@@ -1,15 +1,21 @@
-// ESPView M6-A — HostTcpTransport（PC 侧 TCP 客户端）+ TcpListener（TCP 服务端）。
+// ESPView M6-A / M8-A3 — HostTcpTransport（PC 侧 TCP 客户端）+ TcpListener（TCP 服务端）。
 //
-// 规范来源：M6-A 任务书 §二/§六/§七/§九/§二十二/§二十三/§二十四/§二十七/§二十八。
+// 规范来源：M6-A 任务书 §二/§六/§七/§九/§二十二/§二十三/§二十四/§二十七/§二十八
+//   + M8-A3（§三十五：直接实现 shared/transport espview::transport::ITransport，
+//   删除 IPcTransport/pc_transport.h）。
 //
 // HostTcpTransport：与 HostUartTransport 同构的 TCP 字节管道（§六）。TCP 是
 //   byte stream（§七）：一次 recv() 可能得到半个/多个 Packet，本类原样转发
 //   dataCallback，不做协议解析。send() 实现 sendAll（§二十三）：循环处理
 //   short write，直到全部发送或 error/timeout/disconnect。
+//   M8-A3：open() 在已 attach（服务端 accept 路径）时幂等返回 true ——
+//   SerialWorker 先 acceptOne 再经 TransportManager::adopt() 建立发送门；
+//   客户端路径（tcp_transport_test）仍走真实 connect。
 //
 // TcpListener：PC = TCP Server（§二），socket/bind/listen/accept；一次只接受
 //   一个 ESP32（§九）：已接受一个连接后，listener 自动关闭 accept 路径，
 //   后续连接被拒绝（第二个客户端收到 ECONNREFUSED，明确 BUSY 语义）。
+//   保持独立类（§二十：HostTcpTransport 不兼任 Listener；reconnect 归 SerialWorker）。
 //
 // 线程模型（§二十二）：
 //   - RX worker 线程：select(rx_timeout) → recv → dataCallback（仅调用期间有效）；
@@ -33,15 +39,19 @@
 #include <winsock2.h>
 #include <ws2tcpip.h>
 
-#include "pc_transport.h"
+#include "transport.h"  // shared/transport：唯一 canonical ITransport
 
 namespace espview {
 namespace pc {
 
 // ---- 客户端 ----
-class HostTcpTransport : public IPcTransport {
+class HostTcpTransport : public espview::transport::ITransport {
 public:
-    struct Config : public PcTransportConfig {
+    using State = espview::transport::ITransport::State;
+    using DataCallback = espview::transport::ITransport::DataCallback;
+    using StateCallback = espview::transport::ITransport::StateCallback;
+
+    struct Config {
         std::string host = "127.0.0.1";
         uint16_t port = 8765;
         uint32_t connect_timeout_ms = 5000;  // 非阻塞 connect + select 超时
@@ -50,19 +60,26 @@ public:
         size_t rx_buf = 4096;                // RX chunk
     };
 
-    HostTcpTransport() = default;
+    HostTcpTransport();  // 默认配置（127.0.0.1:8765）
+    explicit HostTcpTransport(Config cfg);
     ~HostTcpTransport() override;
 
     HostTcpTransport(const HostTcpTransport&) = delete;
     HostTcpTransport& operator=(const HostTcpTransport&) = delete;
 
-    bool open(const PcTransportConfig& cfg) override;
+    // 客户端：连接 cfg_.host:port。服务端：已 attach（acceptOne）后幂等返回 true。
+    // 已连接且未 attach 时返回 false（明确失败）。
+    bool open() override;
     void close() override;
     bool isConnected() const override;
-    bool send(const uint8_t* data, size_t len) override;
+    // kBackpressure = SO_SNDTIMEO 到期（would-block）；kNotConnected = 未连接；
+    // kError = 参数/致命错误（对端关闭等，同时置 Disconnected）。
+    espview::transport::SendStatus send(const uint8_t* data, size_t len) override;
+    const espview::transport::TransportCapabilities& capabilities() const override {
+        return caps_;
+    }
     void setDataCallback(DataCallback cb) override;
     void setStateCallback(StateCallback cb) override;
-    size_t mtu() const override;  // 20B header + 4096 payload
     uint64_t rxBytes() const override { return rxBytes_.load(); }
     uint64_t txBytes() const override { return txBytes_.load(); }
 
@@ -83,14 +100,14 @@ private:
     bool connected_ = false;
     bool attached_ = false;             // attach 模式（服务端 accept）
     std::string peerAddr_;              // 对端 "ip:port"（attach 时 getpeername）
-    Config cfg_{};
-    size_t mtu_ = 0;
+    Config cfg_;
+    espview::transport::TransportCapabilities caps_;
 
     std::thread rxThread_;
     std::atomic<bool> stop_{false};
     DataCallback dataCb_;
     StateCallback stateCb_;
-    State state_ = State::Disconnected;
+    State state_ = State::kDisconnected;
     std::atomic<uint64_t> rxBytes_{0};
     std::atomic<uint64_t> txBytes_{0};
 };

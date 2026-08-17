@@ -17,15 +17,15 @@
 #include <cstdint>
 #include <string>
 #include <vector>
+#include "transport.h"  // M8-A3：TransportKind alias 到 shared/transport::TransportType
 
 namespace espview {
 namespace pc {
 
-// M6-A/M6-D：运行时选择的 Transport 类型（SerialWorker 启动时选择）。
-enum class TransportKind : uint8_t {
-    kUart = 0,
-    kTcp = 1,
-};
+// M6-A/M6-D：运行时选择的 Transport 类型。
+// M8-A3：唯一 canonical 类型（alias 到 shared/transport::TransportType，
+//   新增 backend 只扩展 shared/transport 的枚举，不再维护第二套）。
+using TransportKind = espview::transport::TransportType;
 
 // GUI Apply / ConnectionManager.switchTransport 的统一配置快照。
 struct TransportConfig {

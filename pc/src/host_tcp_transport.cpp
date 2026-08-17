@@ -4,6 +4,7 @@
 
 #include <cstdio>
 #include <cstring>
+#include <utility>
 #include <vector>
 
 #ifdef _MSC_VER
@@ -39,6 +40,14 @@ void ensureWsaStartup() {
 
 // ======================= HostTcpTransport =======================
 
+// 默认配置委托构造（.cpp 中展开 Config{}：嵌套 DMIs 须在封闭类完整后求值）。
+HostTcpTransport::HostTcpTransport() : HostTcpTransport(Config{}) {}
+
+HostTcpTransport::HostTcpTransport(Config cfg) : cfg_(std::move(cfg)) {
+    caps_.mtu = 20u + 4096u;  // kPacketHeaderSize + kMaxPacketPayload
+    caps_.paced = false;      // TCP：依赖 socket send buffer 背压（send() 内部阻塞到超时）
+}
+
 HostTcpTransport::~HostTcpTransport() {
     close();
 }
@@ -55,7 +64,6 @@ bool HostTcpTransport::attach(SOCKET sock, const Config& cfg) {
             return false;
         }
         cfg_ = cfg;
-        mtu_ = 20 + 4096;
         sock_ = sock;
         attached_ = true;
         connected_ = true;
@@ -81,25 +89,27 @@ bool HostTcpTransport::attach(SOCKET sock, const Config& cfg) {
         rxThread_ = std::thread(&HostTcpTransport::rxLoop, this);
     }
     // setState 会再锁 mutex_（回调路径），必须在锁外调用。
-    setState(State::Connected);
+    setState(State::kConnected);
     return true;
 }
 
-bool HostTcpTransport::open(const PcTransportConfig& cfg) {
-    const auto& tcfg = static_cast<const Config&>(cfg);
+bool HostTcpTransport::open() {
     ensureWsaStartup();
     if (!g_wsaOk) {
-        setState(State::Error);
+        setState(State::kError);
         return false;
     }
     {
         std::lock_guard<std::mutex> lk(mutex_);
-        if (connected_ || attached_) {
-            return false;  // 已在运行：明确失败
+        if (attached_) {
+            // M8-A3：服务端 accept 路径 —— 已 attach（socket 已就绪），
+            // 幂等返回 true，不发起新连接（重连策略归 SerialWorker re-accept）。
+            return true;
+        }
+        if (connected_) {
+            return false;  // 客户端路径已在运行：明确失败（不做隐式重开）
         }
     }
-    cfg_ = tcfg;
-    mtu_ = 20 + 4096;
     stop_ = false;
 
     // 解析地址（IPv4/IPv6 均可；默认 127.0.0.1 回环）。
@@ -112,7 +122,7 @@ bool HostTcpTransport::open(const PcTransportConfig& cfg) {
     const std::string portStr = std::to_string(cfg_.port);
     const int gai = getaddrinfo(cfg_.host.c_str(), portStr.c_str(), &hints, &result);
     if (gai != 0) {
-        setState(State::Error);
+        setState(State::kError);
         return false;
     }
 
@@ -157,7 +167,7 @@ bool HostTcpTransport::open(const PcTransportConfig& cfg) {
     }
     freeaddrinfo(result);
     if (sock == INVALID_SOCKET) {
-        setState(State::Error);
+        setState(State::kError);
         return false;
     }
 
@@ -180,7 +190,7 @@ bool HostTcpTransport::open(const PcTransportConfig& cfg) {
         rxThread_ = std::thread(&HostTcpTransport::rxLoop, this);
     }
     // setState 会再锁 mutex_（回调路径），必须在锁外调用。
-    setState(State::Connected);
+    setState(State::kConnected);
     return true;
 }
 
@@ -203,7 +213,7 @@ void HostTcpTransport::close() {
     if (rx.joinable()) {
         rx.join();
     }
-    setState(State::Disconnected);
+    setState(State::kDisconnected);
 }
 
 bool HostTcpTransport::isConnected() const {
@@ -211,19 +221,20 @@ bool HostTcpTransport::isConnected() const {
     return connected_;
 }
 
-bool HostTcpTransport::send(const uint8_t* data, size_t len) {
+espview::transport::SendStatus HostTcpTransport::send(const uint8_t* data, size_t len) {
     if (data == nullptr || len == 0) {
-        return false;
+        return espview::transport::SendStatus::kError;
     }
     bool fatal = false;
+    bool timeout = false;  // SO_SNDTIMEO 到期（would-block = 背压）
     size_t sent = 0;
     {
         std::lock_guard<std::mutex> lk(mutex_);
         if (!connected_ || sock_ == INVALID_SOCKET) {
-            return false;
+            return espview::transport::SendStatus::kNotConnected;
         }
-        if (len > mtu_) {
-            return false;
+        if (len > caps_.mtu) {
+            return espview::transport::SendStatus::kError;
         }
         // sendAll（§二十三）：循环处理 short write。
         // 注意：::send（全局 winsock send）—— 成员函数名 send 会遮蔽同名全局函数。
@@ -240,6 +251,7 @@ bool HostTcpTransport::send(const uint8_t* data, size_t len) {
             }
             const int err = WSAGetLastError();
             if (err == WSAEWOULDBLOCK || err == WSAEINTR) {
+                timeout = true;
                 break;  // SO_SNDTIMEO 到期（非致命；保持现有超时语义）
             }
             fatal = true;  // ECONNRESET/EPIPE 等：致命
@@ -253,13 +265,15 @@ bool HostTcpTransport::send(const uint8_t* data, size_t len) {
         }
     }
     if (fatal) {
-        setState(State::Disconnected);
-        return false;
+        setState(State::kDisconnected);
+        return espview::transport::SendStatus::kError;
     }
     if (sent != len) {
-        return false;
+        // 未完成：SO_SNDTIMEO 到期 = would-block（背压）；其余在上方 fatal 分支。
+        return timeout ? espview::transport::SendStatus::kBackpressure
+                       : espview::transport::SendStatus::kError;
     }
-    return true;
+    return espview::transport::SendStatus::kOk;
 }
 
 void HostTcpTransport::setDataCallback(DataCallback cb) {
@@ -270,11 +284,6 @@ void HostTcpTransport::setDataCallback(DataCallback cb) {
 void HostTcpTransport::setStateCallback(StateCallback cb) {
     std::lock_guard<std::mutex> lk(mutex_);
     stateCb_ = std::move(cb);
-}
-
-size_t HostTcpTransport::mtu() const {
-    std::lock_guard<std::mutex> lk(mutex_);
-    return mtu_;
 }
 
 void HostTcpTransport::setState(State s) {
@@ -334,7 +343,7 @@ void HostTcpTransport::rxLoop() {
                 std::lock_guard<std::mutex> lk(mutex_);
                 connected_ = false;
             }
-            setState(State::Disconnected);  // M6-C：传输级断开必须通知 Worker（否则 pumpLoop 永不返回）
+            setState(State::kDisconnected);  // M6-C：传输级断开必须通知 Worker（否则 pumpLoop 永不返回）
             continue;
         }
         if (sel == 0) {
@@ -360,7 +369,7 @@ void HostTcpTransport::rxLoop() {
             std::lock_guard<std::mutex> lk(mutex_);
             connected_ = false;
         }
-        setState(State::Disconnected);
+        setState(State::kDisconnected);
     }
     // 通知 close()：RX 线程已退出（close 在 join 后清理）。
 }
@@ -532,4 +541,3 @@ std::string HostTcpTransport::peerAddress() const {
 
 }  // namespace pc
 }  // namespace espview
-

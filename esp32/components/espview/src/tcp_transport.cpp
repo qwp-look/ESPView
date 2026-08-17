@@ -1,4 +1,4 @@
-// ESPView M6-A — TcpTransport 实现（见 tcp_transport.hpp）。
+// ESPView M6-A / M8-A3 — TcpTransport 实现（见 tcp_transport.hpp）。
 
 #include "espview/tcp_transport.hpp"
 
@@ -18,48 +18,27 @@ const char* kTag = "espview_tcp";
 constexpr size_t kLinkTaskStackWords = 4096;
 constexpr size_t kRxTaskStackWords = 4096;
 constexpr TickType_t kMutexTakeTicks = pdMS_TO_TICKS(500);
+// M8-A3：RX join 预算。open() 校验 rx_timeout_ms ≤ 1000，保证 select 周期
+// （+调度余量）必在此预算内退出；仍超时 → 泄漏防护（不 deinit/不删除原语）。
 constexpr TickType_t kTaskJoinTicks = pdMS_TO_TICKS(1500);
 constexpr UBaseType_t kLinkTaskPriority = 6;
 constexpr UBaseType_t kRxTaskPriority = 7;
 
-// 简单 RAII 锁（FreeRTOS mutex）。
-class ScopedLock {
-public:
-    explicit ScopedLock(SemaphoreHandle_t m) : m_(m) {
-        if (m_ != nullptr) {
-            xSemaphoreTake(m_, portMAX_DELAY);
-        }
-    }
-    ~ScopedLock() {
-        if (m_ != nullptr) {
-            xSemaphoreGive(m_);
-        }
-    }
-    ScopedLock(const ScopedLock&) = delete;
-    ScopedLock& operator=(const ScopedLock&) = delete;
-
-private:
-    SemaphoreHandle_t m_;
-};
-
-const char* stateName(ITransport::State s) {
-    switch (s) {
-        case ITransport::State::Disconnected:
-            return "Disconnected";
-        case ITransport::State::Connecting:
-            return "Connecting";
-        case ITransport::State::Connected:
-            return "Connected";
-        case ITransport::State::Error:
-            return "Error";
-    }
-    return "?";
-}
-
 }  // namespace
+
+TcpTransport::TcpTransport(TcpTransportConfig cfg)
+    : TransportBase(kTag), cfg_(std::move(cfg)) {
+    caps_.mtu = 20u + 4096u;  // Packet Header(20) + 最大 payload(4096)
+    caps_.paced = false;      // TCP：依赖 send() 自身背压（socket send buffer）
+}
 
 TcpTransport::~TcpTransport() {
     close();
+    if (leaked_) {
+        // link/RX 任务未退出：全部同步原语保留存活（泄漏，避免 UAF）。
+        ESP_LOGE(kTag, "TCP semaphores kept alive (task join timeout)");
+        return;
+    }
     if (sockMutex_ != nullptr) {
         vSemaphoreDelete(sockMutex_);
     }
@@ -74,19 +53,28 @@ TcpTransport::~TcpTransport() {
     }
 }
 
-esp_err_t TcpTransport::open(const TransportConfig& cfg) {
-    const auto* tcfg = static_cast<const TcpTransportConfig*>(&cfg);
-    if (tcfg->server_ip == nullptr || tcfg->server_ip[0] == '\0' || tcfg->server_port == 0 ||
-        tcfg->rx_buf < 512 || tcfg->rx_buf > 16384) {
-        setState(State::Error);
-        return ESP_ERR_INVALID_ARG;
+bool TcpTransport::open() {
+    // 参数校验（Kconfig 范围 + M8-A3 join/超时安全约束）：
+    //   - connect_timeout_ms ≥ 100：waitForIp(0) 为 portMAX_DELAY（永等），
+    //     close() 的 link join 预算按 connect_timeout 计算，必须覆盖；
+    //   - rx_timeout_ms ≤ 1000：RX select 周期必须在 kTaskJoinTicks(1500) 内退出；
+    //   - send_timeout_ms > 0：SO_SNDTIMEO=0 表示无限阻塞 send（发送路径无界）。
+    if (cfg_.server_ip == nullptr || cfg_.server_ip[0] == '\0' || cfg_.server_port == 0 ||
+        cfg_.rx_buf < 512 || cfg_.rx_buf > 16384 || cfg_.connect_timeout_ms < 100 ||
+        cfg_.rx_timeout_ms > 1000 || cfg_.send_timeout_ms == 0) {
+        setState(State::kError);
+        return false;
+    }
+    if (leaked_) {
+        // M8-A3（B M1）：泄漏后不可 reopen —— link/RX 任务可能仍存活，对象被
+        // 自持保活（同步原语与 Wi-Fi 驱动保留）。重开需先销毁对象（泄漏）。
+        ESP_LOGE(kTag, "open rejected: tasks leaked (object pinned alive)");
+        setState(State::kError);
+        return false;
     }
 
     if (sockMutex_ == nullptr) {
         sockMutex_ = xSemaphoreCreateMutex();
-    }
-    if (stateMutex_ == nullptr) {
-        stateMutex_ = xSemaphoreCreateMutex();
     }
     if (linkWake_ == nullptr) {
         linkWake_ = xSemaphoreCreateBinary();
@@ -94,24 +82,24 @@ esp_err_t TcpTransport::open(const TransportConfig& cfg) {
     if (taskExit_ == nullptr) {
         taskExit_ = xSemaphoreCreateCounting(4, 0);
     }
-    if (sockMutex_ == nullptr || stateMutex_ == nullptr || linkWake_ == nullptr ||
-        taskExit_ == nullptr) {
-        setState(State::Error);
-        return ESP_ERR_NO_MEM;
+    if (!ensureStateMutex()) {
+        setState(State::kError);
+        return false;
     }
-
-    cfg_ = *tcfg;
-    mtu_ = 20 + 4096;  // Packet Header(20) + 最大 payload(4096)
+    if (sockMutex_ == nullptr || linkWake_ == nullptr || taskExit_ == nullptr) {
+        setState(State::kError);
+        return false;
+    }
 
     {
         ScopedLock lock(stateMutex_);
         if (running_) {
-            return ESP_ERR_INVALID_STATE;  // 重复 open 明确报错
+            return false;  // 重复 open 明确报错
         }
         running_ = true;
     }
 
-    setState(State::Connecting);
+    setState(State::kConnecting);
 
     // Wi-Fi STA 初始化（凭据来自 Kconfig/未跟踪 sdkconfig；失败即 Error）。
     // M7-G：adopt 模式跳过 —— 驱动由 WifiProvisioning 持有（含凭据 + GOT_IP），
@@ -119,13 +107,13 @@ esp_err_t TcpTransport::open(const TransportConfig& cfg) {
     if (!cfg_.adopt_existing_wifi) {
         const esp_err_t werr = wifi_.init(cfg_.wifi);
         if (werr != ESP_OK) {
-            setState(State::Error);
+            setState(State::kError);
             {
                 ScopedLock lock(stateMutex_);
                 running_ = false;  // CS-5：open 失败完全回滚（close() 幂等兜底）
             }
             wifi_.deinit();  // 幂等：确保半初始化的 Wi-Fi 也释放
-            return werr;
+            return false;
         }
     }
 
@@ -133,7 +121,7 @@ esp_err_t TcpTransport::open(const TransportConfig& cfg) {
                                         this, kLinkTaskPriority, &linkTask_);
     if (terr != pdPASS) {
         ESP_LOGE(kTag, "xTaskCreate(link) failed");
-        setState(State::Error);
+        setState(State::kError);
         {
             ScopedLock lock(stateMutex_);
             running_ = false;  // CS-5：open 失败完全回滚
@@ -141,13 +129,13 @@ esp_err_t TcpTransport::open(const TransportConfig& cfg) {
         if (!cfg_.adopt_existing_wifi) {
             wifi_.deinit();  // 回滚已初始化的 Wi-Fi（TransportManager close() 兜底安全）
         }
-        return ESP_ERR_NO_MEM;
+        return false;
     }
     ESP_LOGI(kTag, "open: target=%s:%u timeout=%u delay=%u", cfg_.server_ip,
              static_cast<unsigned>(cfg_.server_port),
              static_cast<unsigned>(cfg_.connect_timeout_ms),
              static_cast<unsigned>(cfg_.reconnect_delay_ms));
-    return ESP_OK;
+    return true;
 }
 
 void TcpTransport::close() {
@@ -155,7 +143,6 @@ void TcpTransport::close() {
         return;  // 从未 open
     }
     TaskHandle_t link = nullptr;
-    TaskHandle_t rx = nullptr;
     {
         ScopedLock lock(stateMutex_);
         if (!running_) {
@@ -163,19 +150,17 @@ void TcpTransport::close() {
         }
         running_ = false;
         link = linkTask_;
-        rx = rxTask_;
     }
 
     // 唤醒 link 任务（可能在等待通知/退避中）→ 等待 link 退出；link 退出前会
     // shutdown+close socket（RX select 立即返回）并唤醒 RX 任务退出。
-    if (linkWake_ != nullptr) {
-        xSemaphoreGive(linkWake_);
-    }
-    bool linkGone = false;
+    notifyLink();
+    bool linkGone = (link == nullptr);
     if (link != nullptr && taskExit_ != nullptr) {
         // link 任务可能在 wifi_.waitForIp()（最长 connect_timeout）中：
         // join 预算必须覆盖 connect_timeout + reconnect_delay，否则 close() 与
-        // wifi_.deinit() 会与仍在跑的任务竞态。
+        // wifi_.deinit() 会与仍在跑的任务竞态。Kconfig 允许两项各 60000ms →
+        // close() 最坏约 122s（有界；正常路径远小于此，M8-A3 B M3）。
         const TickType_t linkJoinTicks =
             pdMS_TO_TICKS(cfg_.connect_timeout_ms + cfg_.reconnect_delay_ms + 2000u);
         linkGone = xSemaphoreTake(taskExit_, linkJoinTicks) == pdTRUE;
@@ -185,16 +170,45 @@ void TcpTransport::close() {
     }
 
     // link 可能在退出前启动了 RX：重新读取并等待 RX 退出。
+    TaskHandle_t rx = nullptr;
     {
         ScopedLock lock(stateMutex_);
         rx = rxTask_;
     }
-    bool rxGone = false;
+    bool rxGone = (rx == nullptr);
     if (rx != nullptr && taskExit_ != nullptr) {
         rxGone = xSemaphoreTake(taskExit_, kTaskJoinTicks) == pdTRUE;
         if (!rxGone) {
             ESP_LOGW(kTag, "RX task did not exit in time");
         }
+    }
+
+    // M8-A3（审计 H1/M1 / B2）：join 超时 → 任务仍存活。此时不得 deinit Wi-Fi、
+    // 不得清理任务句柄、析构不得删除同步原语（清理即 UAF）。标记泄漏、清回调 +
+    // 状态落定（泄漏后不可 reopen，B M2）并经自持 shared_ptr 保活（对象与任务
+    // 同寿命）；这是降级路径（正常路径 join 必成功）。
+    if (!linkGone || !rxGone) {
+        leaked_ = true;
+        {
+            ScopedLock lock(stateMutex_);
+            dataCb_ = nullptr;
+            stateCb_ = nullptr;
+            state_ = State::kError;
+        }
+#if defined(__cpp_exceptions) && __cpp_exceptions
+        try {
+            selfRef_ = shared_from_this();  // 从 close 调用者的引用续命
+        } catch (const std::bad_weak_ptr&) {
+            // close() 在析构路径调用且任务未退出：无法保活（违反
+            // close-before-destroy 契约 + 泄漏双故障），保守记录。
+            ESP_LOGE(kTag, "leak while destructing: cannot pin object");
+        }
+#else
+        // -fno-exceptions：bad_weak_ptr 会 terminate，不能尝试续命，仅记录。
+        ESP_LOGE(kTag, "leak while destructing: cannot pin object");
+#endif
+        ESP_LOGE(kTag, "task join timeout; leaking TCP/Wi-Fi resources (UAF guard)");
+        return;
     }
 
     {
@@ -205,7 +219,7 @@ void TcpTransport::close() {
     if (!cfg_.adopt_existing_wifi) {
         wifi_.deinit();  // M7-G：adopt 模式下驱动归 WifiProvisioning 所有，不卸载
     }
-    setState(State::Disconnected);
+    setState(State::kDisconnected);
     ESP_LOGI(kTag, "closed");
 }
 
@@ -214,23 +228,23 @@ bool TcpTransport::isConnected() const {
     return connected_;
 }
 
-esp_err_t TcpTransport::send(const uint8_t* data, size_t len) {
+espview::transport::SendStatus TcpTransport::send(const uint8_t* data, size_t len) {
     if (data == nullptr || len == 0) {
-        return ESP_ERR_INVALID_ARG;
+        return espview::transport::SendStatus::kError;
     }
     if (sockMutex_ == nullptr) {
-        return ESP_ERR_INVALID_STATE;  // 从未 open
+        return espview::transport::SendStatus::kNotConnected;  // 从未 open
     }
     if (xSemaphoreTake(sockMutex_, kMutexTakeTicks) != pdTRUE) {
-        return ESP_ERR_TIMEOUT;
+        return espview::transport::SendStatus::kBackpressure;  // 门忙：would-block
     }
     if (!connected_ || sock_ < 0) {
         xSemaphoreGive(sockMutex_);
-        return ESP_ERR_INVALID_STATE;
+        return espview::transport::SendStatus::kNotConnected;
     }
-    if (len > mtu_) {
+    if (len > caps_.mtu) {
         xSemaphoreGive(sockMutex_);
-        return ESP_ERR_INVALID_ARG;
+        return espview::transport::SendStatus::kError;
     }
 
     // sendAll（§二十三）：循环处理 short write，直到全部发送或 error/timeout。
@@ -265,41 +279,10 @@ esp_err_t TcpTransport::send(const uint8_t* data, size_t len) {
     }
     xSemaphoreGive(sockMutex_);
 
-    if (fatal && linkWake_ != nullptr) {
-        xSemaphoreGive(linkWake_);
+    if (fatal) {
+        notifyLink();
     }
-    return result;
-}
-
-void TcpTransport::setDataCallback(DataCallback cb) {
-    ScopedLock lock(stateMutex_);
-    dataCb_ = std::move(cb);
-}
-
-void TcpTransport::setStateCallback(StateCallback cb) {
-    ScopedLock lock(stateMutex_);
-    stateCb_ = std::move(cb);
-}
-
-size_t TcpTransport::mtu() const {
-    ScopedLock lock(stateMutex_);
-    return mtu_;
-}
-
-void TcpTransport::setState(State s) {
-    StateCallback cb;
-    {
-        ScopedLock lock(stateMutex_);
-        if (state_ == s) {
-            return;
-        }
-        state_ = s;
-        cb = stateCb_;
-    }
-    ESP_LOGI(kTag, "state -> %s", stateName(s));
-    if (cb) {
-        cb(s);
-    }
+    return mapSend(result);
 }
 
 void TcpTransport::linkTaskEntry(void* arg) {
@@ -318,7 +301,7 @@ void TcpTransport::linkLoop() {
         }
 
         // ---- 阶段 1：Wi-Fi 连接 + GOT_IP ----
-        setState(State::Connecting);
+        setState(State::kConnecting);
         // M7-G：adopt 模式跳过 Wi-Fi 阶段 —— 驱动由 WifiProvisioning 持有且已
         // 取得 GOT_IP（handoff 触发点）；Wi-Fi 掉线由 provisioning 自行重连，
         // 本阶段在 IP 恢复前表现为 TCP connect 失败并退避重试。
@@ -347,14 +330,18 @@ void TcpTransport::linkLoop() {
             xSemaphoreTake(linkWake_, pdMS_TO_TICKS(cfg_.reconnect_delay_ms));
             continue;
         }
+        bool closeNow = false;
         {
             ScopedLock lock(stateMutex_);
-            if (!running_) {
-                // close() 已请求：丢弃刚建立的连接。
-                lwip_shutdown(fd, SHUT_RDWR);
-                lwip_close(fd);
-                break;
-            }
+            closeNow = !running_;  // close() 已请求：丢弃刚建立的连接
+        }
+        if (closeNow) {
+            // fd 尚未移交 sock_（本地变量）：直接关闭；锁统一归 sockMutex_
+            // （M8-A3：勿在 stateMutex_ 下关 fd）。
+            ScopedLock lock(sockMutex_);
+            lwip_shutdown(fd, SHUT_RDWR);
+            lwip_close(fd);
+            break;
         }
         {
             ScopedLock lock(sockMutex_);
@@ -362,7 +349,18 @@ void TcpTransport::linkLoop() {
             connected_ = true;
         }
         startRxTask();
-        setState(State::Connected);
+        {
+            // M8-A3（B M8）：发布 kConnected 前再查一次 running_ —— close() 可在
+            // 连接建立窗口内置位，防止关闭期间出现 spurious Connected→Disconnected。
+            ScopedLock lock(stateMutex_);
+            closeNow = !running_;
+        }
+        if (closeNow) {
+            ScopedLock lock(sockMutex_);
+            closeSocketLocked();
+            break;
+        }
+        setState(State::kConnected);
         wasConnected = true;
         ESP_LOGI(kTag, "TCP CONNECTED (reconnect=%u)",
                  static_cast<unsigned>(reconnectCount_.load(std::memory_order_relaxed)));
@@ -390,12 +388,7 @@ void TcpTransport::linkLoop() {
         // ---- 断开/关闭：清理 fd（link 独占 fd 生命周期）----
         {
             ScopedLock lock(sockMutex_);
-            if (sock_ >= 0) {
-                lwip_shutdown(sock_, SHUT_RDWR);
-                lwip_close(sock_);
-                sock_ = -1;
-            }
-            connected_ = false;
+            closeSocketLocked();
         }
         {
             ScopedLock lock(stateMutex_);
@@ -405,7 +398,7 @@ void TcpTransport::linkLoop() {
             break;
         }
         if (wasConnected) {
-            setState(State::Disconnected);
+            setState(State::kDisconnected);
             wasConnected = false;
             reconnectCount_.fetch_add(1, std::memory_order_relaxed);
             ESP_LOGW(kTag, "TCP DISCONNECTED; reconnecting in %u ms",
@@ -417,21 +410,17 @@ void TcpTransport::linkLoop() {
     // ---- link 退出路径：关闭 socket，唤醒 RX 退出 ----
     {
         ScopedLock lock(sockMutex_);
-        if (sock_ >= 0) {
-            lwip_shutdown(sock_, SHUT_RDWR);
-            lwip_close(sock_);
-            sock_ = -1;
-        }
-        connected_ = false;
+        closeSocketLocked();
     }
-    TaskHandle_t rx = nullptr;
     {
+        // M8-A3（B3）：锁内清 linkTask_ + notify RX —— RX 任务退出路径在同一锁下
+        // 清 rxTask_ 后再 vTaskDelete，杜绝对已删除 TCB 的 notify（stale TCB）。
         ScopedLock lock(stateMutex_);
         running_ = false;
-        rx = rxTask_;
-    }
-    if (rx != nullptr) {
-        xTaskNotifyGive(rx);
+        linkTask_ = nullptr;
+        if (rxTask_ != nullptr) {
+            xTaskNotifyGive(rxTask_);
+        }
     }
     if (taskExit_ != nullptr) {
         xSemaphoreGive(taskExit_);
@@ -448,6 +437,11 @@ void TcpTransport::rxLoop() {
     uint8_t* buf = static_cast<uint8_t*>(pvPortMalloc(cfg_.rx_buf));
     if (buf == nullptr) {
         ESP_LOGE(kTag, "rx buffer alloc failed");
+        {
+            // M8-A3（B3）：退出前锁内清句柄（close 同锁 notify，避免 stale TCB）。
+            ScopedLock lock(stateMutex_);
+            rxTask_ = nullptr;
+        }
         if (taskExit_ != nullptr) {
             xSemaphoreGive(taskExit_);
         }
@@ -487,9 +481,7 @@ void TcpTransport::rxLoop() {
                 continue;
             }
             // fd 错误（可能已被 close）：交给 link 任务处理。
-            if (linkWake_ != nullptr) {
-                xSemaphoreGive(linkWake_);
-            }
+            notifyLink();
             vTaskDelay(pdMS_TO_TICKS(50));
             continue;
         }
@@ -520,13 +512,16 @@ void TcpTransport::rxLoop() {
             ScopedLock lock(sockMutex_);
             connected_ = false;  // link 任务看到后清理 fd 并重连
         }
-        if (linkWake_ != nullptr) {
-            xSemaphoreGive(linkWake_);
-        }
+        notifyLink();
         vTaskDelay(pdMS_TO_TICKS(50));
     }
 
     vPortFree(buf);
+    {
+        // M8-A3（B3）：退出前锁内清句柄（close 同锁 notify，避免 stale TCB）。
+        ScopedLock lock(stateMutex_);
+        rxTask_ = nullptr;
+    }
     if (taskExit_ != nullptr) {
         xSemaphoreGive(taskExit_);
     }
@@ -612,14 +607,33 @@ void TcpTransport::startRxTask() {
     if (existing != nullptr) {
         return;  // 已在运行（重连复用同一 RX 任务）
     }
-    TaskHandle_t rx = nullptr;
-    if (xTaskCreate(rxTaskEntry, "espview_tcp_rx", kRxTaskStackWords, this, kRxTaskPriority,
-                    &rx) != pdPASS) {
+    // M8-A3（B3）：直接写入 rxTask_ —— RX 优先级高于 link，任务可能先于后续
+    // 赋值退出；滞后赋值会让 link 持有 stale TCB（与 UartTransport 同策略）。
+    const BaseType_t rc = xTaskCreate(rxTaskEntry, "espview_tcp_rx", kRxTaskStackWords, this,
+                                      kRxTaskPriority, &rxTask_);
+    if (rc != pdPASS) {
         ESP_LOGE(kTag, "xTaskCreate(rx) failed");
+        {
+            ScopedLock lock(stateMutex_);
+            rxTask_ = nullptr;
+        }
         return;
     }
-    ScopedLock lock(stateMutex_);
-    rxTask_ = rx;
+}
+
+void TcpTransport::closeSocketLocked() {
+    if (sock_ >= 0) {
+        lwip_shutdown(sock_, SHUT_RDWR);
+        lwip_close(sock_);
+        sock_ = -1;
+    }
+    connected_ = false;
+}
+
+void TcpTransport::notifyLink() {
+    if (linkWake_ != nullptr) {
+        xSemaphoreGive(linkWake_);
+    }
 }
 
 }  // namespace espview

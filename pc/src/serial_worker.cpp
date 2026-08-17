@@ -2,6 +2,7 @@
 
 #include "serial_worker.h"
 
+#include <algorithm>
 #include <chrono>
 #include <cstdio>
 #include <optional>
@@ -30,10 +31,12 @@ SerialWorker::SerialWorker(QObject* parent) : QObject(parent) {}
 
 SerialWorker::~SerialWorker() {
     stop();
+    clearWifiQueue();  // M8-A3（J M1）：析构清理残留命令（含未发送的密码副本，AF.4）
 }
 
 void SerialWorker::start(const QString& port, quint32 baud, bool noReset) {
     stop();  // 幂等：先清理残留
+    clearWifiQueue();  // M8-A3（J M2）：新会话不携带旧 Wi-Fi 命令（含密码副本，AF.4）
     kind_ = TransportKind::kUart;
     port_ = port;
     baud_ = baud;
@@ -41,20 +44,21 @@ void SerialWorker::start(const QString& port, quint32 baud, bool noReset) {
     stop_.store(false);
     {
         std::lock_guard<std::mutex> lk(tstateMutex_);
-        transportState_ = IPcTransport::State::Disconnected;
+        transportState_ = espview::transport::ITransport::State::kDisconnected;
     }
     thread_ = std::thread([this]() { runLoop(); });
 }
 
 void SerialWorker::startTcp(uint16_t port, const QString& bind) {
     stop();  // 幂等：先清理残留
+    clearWifiQueue();  // M8-A3（J M2）：新会话不携带旧 Wi-Fi 命令（含密码副本，AF.4）
     kind_ = TransportKind::kTcp;
     tcpPort_ = port;
     tcpBind_ = bind;
     stop_.store(false);
     {
         std::lock_guard<std::mutex> lk(tstateMutex_);
-        transportState_ = IPcTransport::State::Disconnected;
+        transportState_ = espview::transport::ITransport::State::kDisconnected;
     }
     thread_ = std::thread([this]() { runLoop(); });
 }
@@ -75,6 +79,7 @@ bool SerialWorker::switchTransport(const TransportConfig& cfg) {
     {
         std::lock_guard<std::mutex> lk(rxMutex_);
         rxBuf_.clear();
+        (void)rxBuf_.takeDropped();  // 切换：溢出计数清零（新会话重新计数）
     }
     // 3) 会话级统计清零（切换后 GUI 从新会话重新计数，stress 可按会话验收）。
     resetSessionCounters();
@@ -102,6 +107,7 @@ TransportConfig SerialWorker::currentConfig() const {
 void SerialWorker::clearInputQueue() {
     std::lock_guard<std::mutex> lk(inputMutex_);
     inputQueue_.clear();
+    (void)inputQueue_.takeDropped();  // 切换：丢弃计数清零
 }
 
 void SerialWorker::resetSessionCounters() {
@@ -174,9 +180,17 @@ void SerialWorker::emitStats() {
     if (ep_) {
         const proto::SessionStats& s = ep_->stats();
         // Connection
-        st.transportState = static_cast<uint8_t>(transportState_);
+        {
+            // M8-A3：transportState_ 由 Transport 内部线程写（tstateMutex_ 保护），
+            // emitStats 在 Worker 线程读 —— 必须同锁读（消除无锁读竞态）。
+            std::lock_guard<std::mutex> lk(tstateMutex_);
+            st.transportState = static_cast<uint8_t>(transportState_);
+        }
         st.sessionState = static_cast<uint8_t>(ep_->state());
-        st.transportConnected = transport_ != nullptr && transport_->isConnected();
+        // M8-A3：Transport 统计经 TransportManager 诊断快照（值语义，线程安全）。
+        const espview::transport::TransportDiagSnapshot snap =
+            mgr_ ? mgr_->diagSnapshot() : espview::transport::TransportDiagSnapshot{};
+        st.transportConnected = snap.connected;
         st.reconnectCount = reconnectCount_;
         // Display
         st.committedFrames = committedFrames_;
@@ -190,8 +204,10 @@ void SerialWorker::emitStats() {
         st.lastFrameId = lastFrameId_;
         st.lastFrameType = lastFrameType_;
         // Protocol
-        st.rxBytes = transport_ ? transport_->rxBytes() : 0;
-        st.txBytes = transport_ ? transport_->txBytes() : 0;
+        st.rxBytes = snap.rxBytes;
+        st.txBytes = snap.txBytes;
+        // M8-A3：rxBuf_ 溢出丢弃字节数（诊断；队列 bound 证据）。
+        st.rxOverflowDropped = rxOverflowDropped_;
         st.rxMessages = s.rxMessages;
         st.txMessages = s.txMessages;
         st.packetsRx = s.packetsRx;
@@ -244,15 +260,22 @@ void SerialWorker::emitStats() {
 void SerialWorker::runLoop() {
     sessionId_ = ++sessionCounter_;  // P1-2：新传输会话 epoch（跨线程读安全）
     threadAlive_.store(true);
-    // ---- 激活 Transport（M6-A：UART / TCP 二选一；上层协议完全透明）----
-    // 必须在 sink / 回调桥接之前：它们引用 transport_。
-    if (kind_ == TransportKind::kTcp) {
-        tcp_ = std::make_unique<HostTcpTransport>();
-        transport_ = tcp_.get();
-    } else {
-        uart_ = std::make_unique<HostUartTransport>();
-        transport_ = uart_.get();
-    }
+    // ---- TransportManager（M8-A3）：UART 经工厂创建（每次 open 新建）；----
+    // TCP 走 accept → adopt（不重复 open）。上层协议完全不知道 Transport 类型。
+    espview::transport::TransportManager::TransportFactory factory =
+        [this](espview::transport::TransportType t)
+            -> std::shared_ptr<espview::transport::ITransport> {
+            if (t != espview::transport::TransportType::kUart) {
+                return nullptr;  // TCP：由 acceptOne → adopt 提供（不使用工厂）
+            }
+            HostUartTransport::Config ucfg;
+            ucfg.port = port_.toStdString();
+            ucfg.baud = baud_;
+            ucfg.read_timeout_ms = 50;
+            ucfg.reset_on_open = !noReset_;  // 复位 ESP32 → 确定性 boot HELLO + FULL 重同步
+            return std::make_shared<HostUartTransport>(ucfg);
+        };
+    mgr_ = std::make_unique<espview::transport::TransportManager>(factory, kind_);
 
     // ---- Endpoint 回调（全部在 Worker 线程内触发）----
     proto::EndpointConfig cfg;
@@ -264,9 +287,22 @@ void SerialWorker::runLoop() {
     cfg.mode_mask = 0b1111;  // M7-C2：WINDOW | DEVICE | MIRROR | SPLIT
     cfg.device_name = "espview-pc";
 
+    // M8-A3：TransportSink 统一收口（paced/unpaced + 发送门 + 背压重试）。
+    // alive：会话 DISCONNECTED 时放弃发送（与 ESP32 侧 transportSink 一致）。
+    // sleep：UART pacing 重试间隔（waitMs 可被 stop() 中断）。
+    sink_ = std::make_unique<espview::transport::TransportSink>(
+        *mgr_,
+        [this]() { return ep_ != nullptr && ep_->state() != proto::SessionState::kDisconnected; },
+        [this]() { return steadyMs(); },
+        [this](uint32_t ms) { waitMs(ms); });
+
+    // PacketSink（正常帧流：阻塞式，paced 时按 TxPolicy 重试）。
     auto sink = [this](const uint8_t* d, size_t n) -> proto::SendStatus {
-        return transport_ && transport_->send(d, n) ? proto::SendStatus::kOk
-                                                    : proto::SendStatus::kError;
+        return sink_ != nullptr ? sink_->send(d, n) : proto::SendStatus::kError;
+    };
+    // TrySink（PONG/ACK/PING/ACK 重试专用：单次尽力，绝不阻塞 RX/会话线程）。
+    auto trySink = [this](const uint8_t* d, size_t n) -> proto::SendStatus {
+        return sink_ != nullptr ? sink_->trySend(d, n) : proto::SendStatus::kError;
     };
 
     proto::ProtocolEndpoint::Callbacks cb;
@@ -413,24 +449,24 @@ void SerialWorker::runLoop() {
         }
     };
 
-    ep_ = std::make_unique<proto::ProtocolEndpoint>(cfg, sink, cb, steadyMs);
+    ep_ = std::make_unique<proto::ProtocolEndpoint>(cfg, sink, trySink, cb, steadyMs);
 
     // ---- Transport 回调桥接（Transport 类型无关，§十八）----
-    transport_->setDataCallback([this](const uint8_t* data, size_t len) {
+    mgr_->setDataCallback([this](const uint8_t* data, size_t len) {
         std::lock_guard<std::mutex> lk(rxMutex_);
-        rxBuf_.insert(rxBuf_.end(), data, data + len);
+        rxBuf_.append(data, len);  // M8-A3：有界（64KB，drop-newest）
     });
-    transport_->setStateCallback([this](IPcTransport::State s) {
+    mgr_->setStateCallback([this](espview::transport::ITransport::State s) {
         {
             std::lock_guard<std::mutex> lk(tstateMutex_);
             transportState_ = s;
         }
         // Worker 线程外（Transport RX/内部线程）回调：诊断条目只在状态变化时发。
-        if (s == IPcTransport::State::Connected) {
+        if (s == espview::transport::ITransport::State::kConnected) {
             pushDiag(proto::Severity::kInfo, "transport", "transport connected");
-        } else if (s == IPcTransport::State::Disconnected) {
+        } else if (s == espview::transport::ITransport::State::kDisconnected) {
             pushDiag(proto::Severity::kWarning, "transport", "transport disconnected");
-        } else if (s == IPcTransport::State::Error) {
+        } else if (s == espview::transport::ITransport::State::kError) {
             pushDiag(proto::Severity::kError, "transport", "transport error");
         }
     });
@@ -443,15 +479,15 @@ void SerialWorker::runLoop() {
     }
 
     // ---- 收尾：close + join RX 线程 + 关 listener + 清会话（此后无任何 signal）----
-    if (transport_) {
-        transport_->close();
+    if (mgr_) {
+        mgr_->close();
     }
     listener_.close();
     ep_->onTransportDisconnected();
     emitStatus(WorkerStatus::Disconnected, "Stopped");
     ep_.reset();
-    transport_ = nullptr;
-    uart_.reset();
+    sink_.reset();
+    mgr_.reset();
     tcp_.reset();
     threadAlive_.store(false);  // M6-D：收尾完成，Worker 线程即将退出
 }
@@ -461,13 +497,9 @@ void SerialWorker::runLoopUart() {
         emitStatus(WorkerStatus::Connecting,
                    QString("Opening %1 @ %2 ...").arg(port_).arg(baud_));
 
-        HostUartTransport::Config tcfg;
-        tcfg.port = port_.toStdString();
-        tcfg.baud = baud_;
-        tcfg.read_timeout_ms = 50;
-        tcfg.reset_on_open = !noReset_;  // 复位 ESP32 → 确定性 boot HELLO + FULL 重同步
-
-        if (!transport_->open(tcfg)) {
+        // M8-A3：经 TransportManager 打开（工厂创建 HostUartTransport + open；
+        // open 内部状态回调 Connecting/Connected 已转发到 transportState_）。
+        if (!mgr_->open()) {
             ++reconnectCount_;
             emitStatus(WorkerStatus::Error, "Open failed — retrying in 1.5s");
             pushDiag(proto::Severity::kError, "transport", "open failed — retrying");
@@ -476,10 +508,6 @@ void SerialWorker::runLoopUart() {
                 break;
             }
             continue;
-        }
-        {
-            std::lock_guard<std::mutex> lk(tstateMutex_);
-            transportState_ = IPcTransport::State::Connected;
         }
         emitStatus(WorkerStatus::Connecting, "Waiting for HELLO");
         pumpLoop(nowMs());
@@ -491,7 +519,7 @@ void SerialWorker::runLoopUart() {
         emitStatus(WorkerStatus::Disconnected, "Link lost — reconnecting in 1.5s");
         pushDiag(proto::Severity::kWarning, "transport", "link lost — reconnecting");
         ep_->onTransportDisconnected();
-        transport_->close();
+        mgr_->close();
         if (!waitMs(1500)) {
             break;
         }
@@ -522,10 +550,9 @@ void SerialWorker::runLoopTcp() {
         emitStatus(WorkerStatus::Connecting,
                    QString("TCP %1:%2 — waiting for ESP32").arg(tcpBind_).arg(tcpPort_));
 
-        HostTcpTransport::Config tcfg;
-        tcfg.rx_timeout_ms = 100;
-        tcfg.send_timeout_ms = 5000;
-
+        // M8-A3：每次 accept 使用全新 HostTcpTransport（复用状态残留清零）；
+        // acceptOne 成功（attach）后 adopt 进 TransportManager 建立发送门。
+        tcp_ = std::make_shared<HostTcpTransport>();
         if (!listener_.acceptOne(*tcp_)) {
             if (stop_.load()) {
                 break;
@@ -534,14 +561,32 @@ void SerialWorker::runLoopTcp() {
             emitStatus(WorkerStatus::Error, "TCP accept failed — retrying");
             pushDiag(proto::Severity::kWarning, "transport", "TCP accept failed — retrying");
             tcp_->close();
+            tcp_.reset();
             if (!waitMs(1000)) {
                 break;
             }
             continue;
         }
+        if (!mgr_->adopt(TransportKind::kTcp, tcp_)) {
+            ++reconnectCount_;
+            emitStatus(WorkerStatus::Error, "TCP adopt failed — retrying");
+            pushDiag(proto::Severity::kError, "transport", "TCP adopt failed — retrying");
+            tcp_->close();
+            tcp_.reset();
+            if (!waitMs(1000)) {
+                break;
+            }
+            continue;
+        }
+        pushDiag(proto::Severity::kInfo, "transport", "transport connected");
         {
+            // M8-A3（C/E）：条件置位 —— adopt 窗口内若对端已断开（accept 后立即
+            // close），不得覆盖为 Connected（否则 pumpLoop 永不退出）。adopt 已
+            // 校验 t->isConnected()，此处仅防御窗口竞态。
             std::lock_guard<std::mutex> lk(tstateMutex_);
-            transportState_ = IPcTransport::State::Connected;
+            transportState_ = tcp_->isConnected()
+                                  ? espview::transport::ITransport::State::kConnected
+                                  : espview::transport::ITransport::State::kDisconnected;
         }
         emitStatus(WorkerStatus::Connecting, "TCP client connected — waiting for HELLO");
         pumpLoop(nowMs());
@@ -553,7 +598,8 @@ void SerialWorker::runLoopTcp() {
         emitStatus(WorkerStatus::Disconnected, "TCP link lost — waiting for reconnect");
         pushDiag(proto::Severity::kWarning, "transport", "TCP link lost — waiting for reconnect");
         ep_->onTransportDisconnected();
-        tcp_->close();  // 关闭已 accept 的 socket；listener 保持监听（§十一 re-accept）
+        mgr_->close();  // 关闭已 accept 的 socket；listener 保持监听（§十一 re-accept）
+        tcp_.reset();
         if (!waitMs(1000)) {
             break;
         }
@@ -575,13 +621,13 @@ void SerialWorker::pumpLoop(uint64_t openAtMs) {
             ep_->onTransportConnected();
         }
 
-        IPcTransport::State ts;
+        espview::transport::ITransport::State ts;
         {
             std::lock_guard<std::mutex> lk(tstateMutex_);
             ts = transportState_;
         }
-        if (ts == IPcTransport::State::Disconnected ||
-            ts == IPcTransport::State::Error) {
+        if (ts == espview::transport::ITransport::State::kDisconnected ||
+            ts == espview::transport::ITransport::State::kError) {
             return;  // 断开/错误 → runLoop 负责重连
         }
 
@@ -603,8 +649,9 @@ void SerialWorker::drainAndTick() {
     std::vector<uint8_t> chunk;
     {
         std::lock_guard<std::mutex> lk(rxMutex_);
+        rxOverflowDropped_ += rxBuf_.takeDropped();  // M8-A3：溢出计数（诊断）
         if (!rxBuf_.empty()) {
-            chunk.swap(rxBuf_);
+            chunk = rxBuf_.takeAll();
         }
     }
     if (!chunk.empty() && ep_) {
@@ -617,17 +664,18 @@ void SerialWorker::drainAndTick() {
 
 void SerialWorker::sendInput(const espview::input::InputEvent& ev) {
     std::lock_guard<std::mutex> lk(inputMutex_);
-    inputQueue_.push_back(ev);
+    inputQueue_.push(ev, false);  // M8-A3：有界 256，drop-newest（丢新计数在 drain 汇入）
 }
 
 void SerialWorker::drainInputQueue() {
     std::vector<espview::input::InputEvent> queue;
     {
         std::lock_guard<std::mutex> lk(inputMutex_);
+        inputDropped_ += inputQueue_.takeDropped();  // 队列溢出（drop-newest）
         if (inputQueue_.empty()) {
             return;
         }
-        queue.swap(inputQueue_);
+        queue = inputQueue_.takeAll();
     }
     if (!ep_) {
         inputDropped_ += queue.size();
@@ -658,12 +706,13 @@ void SerialWorker::drainInputQueue() {
 
 void SerialWorker::sendDisplayMode(uint8_t mode) {
     std::lock_guard<std::mutex> lk(modeMutex_);
-    displayModeQueue_.push_back(mode);
+    displayModeQueue_.push(mode, true);  // M8-A3：有界 8，latest-wins（满时丢最旧）
 }
 
 void SerialWorker::clearDisplayModeQueue() {
     std::lock_guard<std::mutex> lk(modeMutex_);
     displayModeQueue_.clear();
+    (void)displayModeQueue_.takeDropped();  // 会话切换：丢弃计数清零
 }
 
 // ---- M7-D3：Wi-Fi 命令队列 ----
@@ -673,7 +722,7 @@ void SerialWorker::sendWifiScanRequest(uint8_t maxEntries) {
     cmd.kind = 0;  // scan
     cmd.maxEntries = maxEntries;
     std::lock_guard<std::mutex> lk(wifiMutex_);
-    wifiQueue_.push_back(std::move(cmd));
+    pushWifiLocked(std::move(cmd));
 }
 
 void SerialWorker::sendWifiConfig(const std::string& ssid, const std::string& password,
@@ -685,14 +734,28 @@ void SerialWorker::sendWifiConfig(const std::string& ssid, const std::string& pa
     cmd.serverIp = serverIp;
     cmd.serverPort = serverPort;
     std::lock_guard<std::mutex> lk(wifiMutex_);
-    wifiQueue_.push_back(std::move(cmd));
+    pushWifiLocked(std::move(cmd));
 }
 
 void SerialWorker::sendWifiClear() {
     WifiCommand cmd;
     cmd.kind = 2;  // clear
     std::lock_guard<std::mutex> lk(wifiMutex_);
-    wifiQueue_.push_back(std::move(cmd));
+    pushWifiLocked(std::move(cmd));
+}
+
+bool SerialWorker::pushWifiLocked(WifiCommand&& cmd) {
+    // M8-A3（C/F）：latest-wins（有界 4）—— 满时丢最旧；被丢项若含密码先清零
+    // （AF.4 凭据红线）。丢弃计数由 BoundedQueue 单点累计（drop 回调内驱逐），
+    // drain 时经 takeDropped() 汇入 wifiDropped_（避免跨线程计数竞争）。
+    return wifiQueue_.push(std::move(cmd), true,
+                           [this](WifiCommand& old) { zeroWifiPassword(old); });
+}
+
+void SerialWorker::zeroWifiPassword(WifiCommand& cmd) {
+    if (!cmd.password.empty()) {
+        std::fill(cmd.password.begin(), cmd.password.end(), '\0');
+    }
 }
 
 bool SerialWorker::lastCapabilities(espview::proto::CapabilitiesInfo& out) const {
@@ -706,25 +769,28 @@ bool SerialWorker::lastCapabilities(espview::proto::CapabilitiesInfo& out) const
 
 void SerialWorker::clearWifiQueue() {
     std::lock_guard<std::mutex> lk(wifiMutex_);
-    for (WifiCommand& cmd : wifiQueue_) {
-        if (!cmd.password.empty()) {
-            std::fill(cmd.password.begin(), cmd.password.end(), '\0');
-        }
+    std::vector<WifiCommand> q = wifiQueue_.takeAll();
+    (void)wifiQueue_.takeDropped();  // 会话切换：丢弃计数清零
+    for (WifiCommand& cmd : q) {
+        zeroWifiPassword(cmd);
     }
-    wifiQueue_.clear();
 }
 
 void SerialWorker::drainWifiQueue() {
     std::vector<WifiCommand> queue;
     {
         std::lock_guard<std::mutex> lk(wifiMutex_);
+        wifiDropped_ += wifiQueue_.takeDropped();  // M8-A3：队列溢出（latest-wins）
         if (wifiQueue_.empty()) {
             return;
         }
-        queue.swap(wifiQueue_);
+        queue = wifiQueue_.takeAll();
     }
     if (!ep_) {
         wifiDropped_ += queue.size();
+        for (WifiCommand& cmd : queue) {
+            zeroWifiPassword(cmd);  // M8-A3（J M2）：未发送也要清零密码副本（AF.4）
+        }
         return;
     }
     for (WifiCommand& cmd : queue) {
@@ -743,7 +809,7 @@ void SerialWorker::drainWifiQueue() {
                     pushDiag(proto::Severity::kError, "wifi",
                              "WIFI_CONFIG rejected: credentials are UART-bootstrap only");
                     if (!cmd.password.empty()) {
-                        std::fill(cmd.password.begin(), cmd.password.end(), '\0');
+                        zeroWifiPassword(cmd);
                     }
                     continue;
                 }
@@ -765,7 +831,7 @@ void SerialWorker::drainWifiQueue() {
         }
         // 安全（AF.4）：发送/丢弃后立即清零密码副本（不进入任何持久化路径）。
         if (!cmd.password.empty()) {
-            std::fill(cmd.password.begin(), cmd.password.end(), '\0');
+            zeroWifiPassword(cmd);
         }
     }
 }
@@ -774,10 +840,11 @@ void SerialWorker::drainDisplayModeQueue() {
     std::vector<uint8_t> queue;
     {
         std::lock_guard<std::mutex> lk(modeMutex_);
+        modeDropped_ += displayModeQueue_.takeDropped();  // M8-A3：队列溢出（latest-wins）
         if (displayModeQueue_.empty()) {
             return;
         }
-        queue.swap(displayModeQueue_);
+        queue = displayModeQueue_.takeAll();
     }
     if (!ep_) {
         modeDropped_ += queue.size();

@@ -5,7 +5,7 @@
 //
 // 线程模型：SerialWorker 本身是 QObject（GUI 线程亲和），内部持有一条
 // std::thread 执行 runLoop()。Worker 线程独占：
-//   IPcTransport（UART: HostUartTransport / TCP: HostTcpTransport）
+//   TransportManager（shared/transport；UART 经工厂创建，TCP 经 accept → adopt）
 //   + ProtocolEndpoint（内部含 StreamDecoder + FrameAssembler）。
 // Transport 是编译期/启动时选择的（start() = UART，startTcp() = TCP Server）；
 // 上层 ProtocolEndpoint / DisplayFrame 完全不知道 Transport 类型（§十八）。
@@ -39,15 +39,17 @@
 #include <QObject>
 #include <QString>
 
+#include "bounded_queue.h"  // M8-A3：BoundedQueue/BoundedByteBuffer（队列 bound）
 #include "display_frame.h"
 #include "host_tcp_transport.h"
 #include "input_event.h"
 #include "message.h"  // proto::CapabilitiesInfo（M7-D1 能力上行，纯 C++17）
 #include "physical_preview_state.h"  // pc::PhysicalPreviewState（M7-D2 预览快照，纯 C++17）
-#include "pc_transport.h"
 #include "runtime_stats.h"  // proto::Severity / proto::DiagnosticsRing（M4 诊断）
 #include "serial_transport.h"
 #include "transport_config.h"
+#include "transport_manager.h"  // M8-A3：shared/transport TransportManager（发送门）
+#include "transport_sink.h"     // M8-A3：TransportSink（paced/unpaced 统一收口）
 
 namespace espview {
 namespace proto {
@@ -98,6 +100,9 @@ struct WorkerStats {
     uint64_t crcErrors = 0;
     uint64_t seqGaps = 0;
     uint64_t sessionErrors = 0;       // 会话/协议错误（SessionError）
+    // M8-A3：Transport RX → Worker 有界缓冲（64KB）溢出丢弃字节数（诊断；
+    // 队列 bound 证据；GUI 不展示，供测试/日志审计）。
+    uint64_t rxOverflowDropped = 0;
 
     // ---- Heartbeat（spec §五/§六；RTT 无测量 ≠ 0ms）----
     uint64_t pingSent = 0;
@@ -239,10 +244,14 @@ private:
 
     // ---- 仅 Worker 线程访问（runLoop/pumpLoop 及其回调）----
     std::unique_ptr<proto::ProtocolEndpoint> ep_;
-    std::unique_ptr<HostUartTransport> uart_;  // kind_==kUart 时持有
-    std::unique_ptr<HostTcpTransport> tcp_;    // kind_==kTcp 时持有
+    // M8-A3：shared TransportManager（生命周期/active backend/发送门/capabilities）。
+    // UART 经工厂创建（每次 open 新建）；TCP 走 accept → adopt（不重复 open）。
+    std::unique_ptr<espview::transport::TransportManager> mgr_;
+    std::unique_ptr<espview::transport::TransportSink> sink_;
+    // TCP accept 目标（worker 线程）：acceptOne 需要具体类型；adopt 后与
+    // mgr_ 共享同一对象（peerAddress/诊断用）。
+    std::shared_ptr<HostTcpTransport> tcp_;
     TcpListener listener_;                     // TCP Server listener（worker 线程）
-    IPcTransport* transport_ = nullptr;        // 指向当前激活 Transport（worker 线程）
     DisplayFrame currentFrame_;   // onFrameBegin/onFrameRect/onFrameCommit 累积
     uint64_t committedFrames_ = 0;
     uint64_t discardedFrames_ = 0;
@@ -265,10 +274,14 @@ private:
     proto::DiagnosticsRing diag_;
 
     // ---- Transport RX 线程 → Worker 线程 ----
+    // M8-A3（审计 F）：rxBuf_ 有界（64KB，drop-newest，溢出计数）；
+    // 原无界 vector 可被慢 drain 无限撑大。
     std::mutex rxMutex_;
-    std::vector<uint8_t> rxBuf_;
+    espview::transport::BoundedByteBuffer rxBuf_{64u * 1024u};
+    uint64_t rxOverflowDropped_ = 0;  // rxBuf_ 溢出丢弃字节数（诊断）
     std::mutex tstateMutex_;
-    IPcTransport::State transportState_ = IPcTransport::State::Disconnected;
+    espview::transport::ITransport::State transportState_ =
+        espview::transport::ITransport::State::kDisconnected;
 
     // ---- 跨线程（GUI 可调用 start/stop / sendInput）----
     std::atomic<uint64_t> sessionCounter_{0};  // 每次 runLoop 入口递增
@@ -284,14 +297,16 @@ private:
     QString tcpBind_ = QStringLiteral("0.0.0.0");
 
     // 输入队列（GUI → Worker；互斥保护）。
+    // M8-A3（审计 F）：有界 256，drop-newest（丢新，溢出计数）。
     std::mutex inputMutex_;
-    std::vector<espview::input::InputEvent> inputQueue_;
+    espview::transport::BoundedQueue<espview::input::InputEvent> inputQueue_{256};
     uint64_t inputSent_ = 0;
     uint64_t inputDropped_ = 0;
 
     // Display Mode 队列（GUI → Worker；互斥保护，与输入队列独立）。
+    // M8-A3（审计 F）：有界 8，latest-wins（丢最旧，保留最新 8 个）。
     std::mutex modeMutex_;
-    std::vector<uint8_t> displayModeQueue_;
+    espview::transport::BoundedQueue<uint8_t> displayModeQueue_{8};
     uint64_t modeSent_ = 0;
     uint64_t modeDropped_ = 0;
 
@@ -306,13 +321,20 @@ private:
         uint16_t serverPort = 0;  // config：1..65535
     };
     std::mutex wifiMutex_;
-    std::vector<WifiCommand> wifiQueue_;
+    // M8-A3（审计 F）：有界 4，latest-wins；丢弃最旧项时先清零其密码副本
+    // （AF.4 凭据红线）—— 见 pushWifiLocked()。
+    espview::transport::BoundedQueue<WifiCommand> wifiQueue_{4};
     uint64_t wifiSent_ = 0;
     uint64_t wifiDropped_ = 0;
     // 最近一次成功发送的 ACK_REQ 控制消息类型（0=无；0x03 SET_MODE / 0x06
     // WIFI_SCAN_REQ / 0x08 WIFI_CONFIG）。与 endpoint 单槽 pending ACK 对应：
     // 最近发送者即等待 ACK 者（有序字节流保证先到先 ACK）。
     uint8_t pendingAckKind_ = 0;
+
+    // M8-A3：Wi-Fi 命令入队辅助（已持 wifiMutex_）。latest-wins：满时丢最旧，
+    // 被丢项若含密码先清零（AF.4）。返回 false = 入队失败（理论不可达）。
+    bool pushWifiLocked(WifiCommand&& cmd);
+    static void zeroWifiPassword(WifiCommand& cmd);  // 密码副本清零（AF.4）
 
     // M7-D2：Physical Preview 快照（仅 Worker 线程访问；去重/过期/会话语义
     // 在模型内，GUI 只消费副本）。

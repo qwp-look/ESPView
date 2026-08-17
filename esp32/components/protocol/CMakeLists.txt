@@ -11,6 +11,7 @@ idf_component_register(
         "${CMAKE_CURRENT_LIST_DIR}/../../../shared/protocol/protocol_endpoint.cpp"
         "${CMAKE_CURRENT_LIST_DIR}/../../../shared/protocol/runtime_stats.cpp"
     INCLUDE_DIRS "${CMAKE_CURRENT_LIST_DIR}/../../../shared/protocol"
+        "${CMAKE_CURRENT_LIST_DIR}/../../../shared/transport"
 )
 
 # 编译要求：IDF 默认 -Wall -Werror；C++ 标准至少 C++17。

@@ -40,7 +40,6 @@
 #include "espview/wifi_provisioning.hpp"
 #include "transport_manager.h"           // shared/transport：TransportManager
 #include "transport_sink.h"              // shared/transport：TransportSink（paced/unpaced 统一收口）
-#include "espview/transport_manager.hpp" // ESP32 UART/TCP adapter（旧 ITransport -> 新 ITransport）
 #include "encoder.h"  // IMessagePayloadSource（StreamingSender）
 #include "input_codec.h"
 #include "input_manager.h"
@@ -119,7 +118,7 @@ espview::transport::TransportManager g_mgr(
         -> std::shared_ptr<espview::transport::ITransport> {
         if (t == espview::transport::TransportType::kUart) {
             ::espview::UartTransportConfig cfg;  // menuconfig 默认值（CONFIG_ESPVIEW_UART_*）
-            return std::make_shared<espview::transport::Esp32UartAdapter>(cfg);
+            return std::make_shared<UartTransport>(cfg);
         }
         ::espview::TcpTransportConfig cfg;
         if (g_handoffActive) {
@@ -133,7 +132,7 @@ espview::transport::TransportManager g_mgr(
                 ESP_LOGE(kTag, "handoff target missing; TCP unavailable");
                 return nullptr;
             }
-            return std::make_shared<espview::transport::Esp32TcpAdapter>(cfg);
+            return std::make_shared<TcpTransport>(cfg);
         }
 #if CONFIG_ESPVIEW_TRANSPORT_TCP
         cfg.server_ip = CONFIG_ESPVIEW_TCP_SERVER_IP;
@@ -150,7 +149,7 @@ espview::transport::TransportManager g_mgr(
             ESP_LOGE(kTag, "Wi-Fi SSID not configured; TCP unavailable (menuconfig / local sdkconfig)");
             return nullptr;
         }
-        return std::make_shared<espview::transport::Esp32TcpAdapter>(cfg);
+        return std::make_shared<TcpTransport>(cfg);
 #else
         // 非 handoff 且非 TCP 构建：TCP 不可用（与旧行为一致：switchTo 失败）。
         ESP_LOGE(kTag, "TCP transport not available (CONFIG_ESPVIEW_TRANSPORT_TCP=n)");
@@ -758,7 +757,8 @@ void updateFlushWaitFromTransport() {
 // → kTcpConnected(7)（TCP 会话 CONNECTED 后经 TCP 上报）；连接超时/失败 →
 // 回退 UART bootstrap + kError/kServerUnreachable（凭据保留，向导可重试/
 // CLEAR）。全部在会话任务上下文执行（非阻塞；switchTo 的 close-join 最坏
-// 有界 ~15s，仅发生在故障回退路径）。
+// 有界：Kconfig 上限下约 122s（connect_timeout + reconnect_delay + 余量，
+// M8-A3 B M3），仅发生在故障回退路径）。
 void abortTcpHandoff();  // 前向声明（beginTcpHandoff 的失败回退路径引用）
 void beginTcpHandoff(const WifiProvStatus& st, uint64_t nowMs) {
     if (st.serverIp == 0 || st.serverPort == 0) {
@@ -1083,26 +1083,16 @@ void statsLoop(void*) {
 // ---- Transport 发送适配（M1-3B：paced sink）----
 // UART TX ring buffer（8KB）远小于 153KB 级帧：直接返回背压会导致整帧丢弃。
 // TestPattern 是 test-only 应用（无 UI 线程），允许按 UART 排空速率逐包重试
-// （Transport 语义不变：仍返回 ESP_ERR_TIMEOUT 表示缓冲满；重试是应用层策略）。
+// （Transport 语义不变：kBackpressure = would-block；重试是应用层策略）。
 // 会话 DISCONNECTED（对端断线/超时）时立即放弃，不向虚空继续发送。
-// M6-C：shared/transport SendStatus → proto::SendStatus 显式映射
-// （两端接口同构但类型不同；禁止依赖数值相等）。
-SendStatus mapTransportSend(espview::transport::SendStatus r) {
-    switch (r) {
-        case espview::transport::SendStatus::kOk: return SendStatus::kOk;
-        case espview::transport::SendStatus::kBackpressure: return SendStatus::kBackpressure;
-        case espview::transport::SendStatus::kError: return SendStatus::kError;
-        case espview::transport::SendStatus::kNotConnected: return SendStatus::kNotConnected;
-    }
-    return SendStatus::kError;
-}
-
+// M8-A3：proto::SendStatus 与 transport::SendStatus 已是同一类型（using 引用），
+// 不再需要显式映射（原 mapTransportSend 已删除）。
 SendStatus transportSink(const uint8_t* data, size_t len) {
 #if CONFIG_ESPVIEW_TEST_TRANSPORT_SWITCH
     g_sinkEntryMs.store(monotonicMs());
     g_sinkActive.store(true);
 #endif
-    const SendStatus r = mapTransportSend(g_sink.send(data, len));
+    const SendStatus r = g_sink.send(data, len);
 #if CONFIG_ESPVIEW_TEST_TRANSPORT_SWITCH
     g_sinkActive.store(false);
     g_sinkExitMs.store(monotonicMs());
@@ -1122,7 +1112,7 @@ SendStatus trySink(const uint8_t* data, size_t len) {
     g_sinkEntryMs.store(monotonicMs());
     g_sinkActive.store(true);
 #endif
-    const SendStatus r = mapTransportSend(g_sink.trySend(data, len));
+    const SendStatus r = g_sink.trySend(data, len);
 #if CONFIG_ESPVIEW_TEST_TRANSPORT_SWITCH
     g_sinkActive.store(false);
     g_sinkExitMs.store(monotonicMs());
@@ -1315,7 +1305,7 @@ extern "C" void app_main() {
     }
     ESP_LOGI(kTag, "transport open OK: type=%d mtu=%zu",
              static_cast<int>(g_mgr.current()),
-             g_mgr.transport() != nullptr ? g_mgr.transport()->mtu() : 0);
+             g_mgr.capabilities().mtu);  // M8-A3：mtu 经 capabilities() 读取（原 transport()->mtu() 已删除）
     logBootStage("transport_open_after");
 #if CONFIG_ESPVIEW_APP_LVGL
     updateFlushWaitFromTransport();

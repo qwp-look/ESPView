@@ -480,7 +480,7 @@ void initEndpoint(Harness& h) {
     cfg.device_name = "espview-pc-input";
 
     auto sink = [&h](const uint8_t* d, size_t n) -> SendStatus {
-        return h.transport.send(d, n) ? SendStatus::kOk : SendStatus::kError;
+        return h.transport.send(d, n);  // M8-A3：send 直接返回 canonical SendStatus
     };
 
     ProtocolEndpoint::Callbacks cb;
@@ -539,7 +539,7 @@ void initEndpoint(Harness& h) {
 void wireTransport(Harness& h) {
     h.transport.setDataCallback([&h](const uint8_t* d, size_t n) { h.queue.push(d, n); });
     h.transport.setStateCallback([&h](HostUartTransport::State s) {
-        if (s == HostUartTransport::State::Disconnected || s == HostUartTransport::State::Error) {
+        if (s == HostUartTransport::State::kDisconnected || s == HostUartTransport::State::kError) {
             if (h.ep) {
                 h.ep->onTransportDisconnected();
             }
@@ -554,9 +554,10 @@ bool openPort(Harness& h, bool resetPulse) {
     cfg.baud = h.args.baud;
     cfg.read_timeout_ms = 50;
     cfg.reset_on_open = resetPulse;
+    h.transport.setConfig(cfg);  // M8-A3：canonical open() 无参；配置经 setConfig 注入
     h.resetSessionFlags();
     h.openMs = nowMs();
-    return h.transport.open(cfg);
+    return h.transport.open();
 }
 
 void closePort(Harness& h) {

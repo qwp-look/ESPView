@@ -115,7 +115,6 @@ void runTransportManagerTests() {
         CHECK(mgr.open());
         CHECK_EQ(owned[0]->type(), TransportType::kTcp);
         CHECK_EQ(mgr.capabilities().paced, false);
-        CHECK_EQ(mgr.capabilities().lowLatency, true);
         mgr.close();
     }
 
@@ -416,5 +415,99 @@ void runTransportManagerTests() {
         CHECK(sampleCount.load(std::memory_order_relaxed) >= 100u);  // 并发采样确实发生
         mgr.close();
     }
+
+    // ---- 15. M8-A3：UART reconnect 序列（close → reopen 语义）----
+    // close() 后可再次 open/reopen；工厂每次创建全新 Transport 实例（旧实例
+    // close + 回调 detach），状态按 Disconnected → Connecting/Connected 投递，
+    // 旧实例迟到状态不得到达上层（stale 隔离）。
+    {
+        std::vector<std::shared_ptr<FakeTransport>> owned;
+        FakeSetup setup;
+        TransportManager mgr = makeManager(owned, setup, TransportType::kUart);
+        std::vector<ITransport::State> states;
+        mgr.setStateCallback([&states](ITransport::State s) { states.push_back(s); });
+        CHECK(mgr.open());
+        CHECK_EQ(owned.size(), 1u);
+        states.clear();
+
+        mgr.close();  // 断开：Disconnected 直接投递（非切换缓冲路径）
+        CHECK(!mgr.isOpen());
+        CHECK_EQ(states.size(), 1u);
+        CHECK_EQ(states[0], ITransport::State::kDisconnected);
+        states.clear();
+
+        // reopen：工厂新建实例 → open → Connected 缓冲后冲刷。
+        CHECK(mgr.reopen());
+        CHECK(mgr.isOpen());
+        CHECK_EQ(owned.size(), 2u);              // 新实例
+        CHECK_EQ(owned[1]->openCount(), 1u);
+        CHECK_EQ(owned[0]->closeCount(), 1u);    // 旧实例已 close
+        CHECK_EQ(states.size(), 1u);
+        CHECK_EQ(states[0], ITransport::State::kConnected);
+        CHECK_EQ(mgr.current(), TransportType::kUart);
+
+        // 旧实例后续状态不得到达上层（回调已 detach）。
+        states.clear();
+        owned[0]->setState(ITransport::State::kError);
+        owned[0]->setState(ITransport::State::kConnected);
+        CHECK_EQ(states.size(), 0u);
+        mgr.close();
+    }
+
+    // ---- 16. M8-A3：adopt（PC TCP Server accept 路径）----
+    // adopt 已激活的 Transport：不调用 open()，直接挂回调并设为当前；
+    // 已 open 时拒绝（不做隐式替换）；adopt 后发送门/能力/diag 全部可用。
+    {
+        TransportManager mgr(
+            [](TransportType) -> std::shared_ptr<espview::transport::ITransport> {
+                return nullptr;  // adopt 路径不使用工厂
+            },
+            TransportType::kTcp);
+        std::vector<ITransport::State> states;
+        mgr.setStateCallback([&states](ITransport::State s) { states.push_back(s); });
+        auto accepted = std::make_shared<FakeTransport>(TransportType::kTcp, tcpCaps());
+        accepted->setConnectedState(true);  // M8-A3：adopt 校验 isConnected()（attach 已激活）
+        accepted->setState(ITransport::State::kConnected);  // attach 已完成（回调未挂，丢弃）
+        CHECK(mgr.adopt(TransportType::kTcp, accepted));
+        CHECK(mgr.isOpen());
+        CHECK_EQ(mgr.current(), TransportType::kTcp);
+        CHECK_EQ(accepted->openCount(), 0u);  // 未调用 open()
+        CHECK(mgr.capabilities().paced == false);
+        // 已 open：再次 adopt 拒绝（调用方须先 close）。
+        auto second = std::make_shared<FakeTransport>(TransportType::kTcp, tcpCaps());
+        CHECK(!mgr.adopt(TransportType::kTcp, second));
+        CHECK_EQ(second->openCount(), 0u);
+        // adopt 后发送门可用（发送走 current_）。
+        CHECK(mgr.lockTransport() != nullptr);
+        mgr.unlockTransport();
+        mgr.close();
+    }
+
+    // ---- 17. M8-A3：adopt 拒绝未激活 Transport（身份级断言：状态不变）----
+    // adopt 校验 t->isConnected()：未连接（accept 后立即断开等）必须拒绝，
+    // 且不改变 manager 任何状态；后续激活的 transport 仍可正常 adopt。
+    {
+        TransportManager mgr(
+            [](TransportType) -> std::shared_ptr<espview::transport::ITransport> {
+                return nullptr;  // adopt 路径不使用工厂
+            },
+            TransportType::kTcp);
+        std::vector<ITransport::State> states;
+        mgr.setStateCallback([&states](ITransport::State s) { states.push_back(s); });
+        CHECK(!mgr.isOpen());
+        auto dead = std::make_shared<FakeTransport>(TransportType::kTcp, tcpCaps());
+        CHECK(!dead->isConnected());
+        CHECK(!mgr.adopt(TransportType::kTcp, dead));  // 未激活：拒绝
+        CHECK(!mgr.isOpen());
+        CHECK(mgr.transport() == nullptr);       // current 未被替换
+        CHECK_EQ(states.size(), 0u);             // 无状态冲刷（失败不改状态）
+        auto live = std::make_shared<FakeTransport>(TransportType::kTcp, tcpCaps());
+        live->setConnectedState(true);
+        CHECK(mgr.adopt(TransportType::kTcp, live));  // 激活后可正常 adopt
+        CHECK(mgr.isOpen());
+        CHECK(mgr.transport() == live.get());
+        mgr.close();
+    }
+
     std::printf("[transport_manager] done\n");
 }

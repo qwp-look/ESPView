@@ -387,7 +387,7 @@ void initEndpoint(Harness& h) {
     auto sink = [&h](const uint8_t* d, size_t n) -> SendStatus {
         ++h.txPackets;
         h.txBytes += n;
-        return h.transport.send(d, n) ? SendStatus::kOk : SendStatus::kError;
+        return h.transport.send(d, n);  // M8-A3：send 直接返回 canonical SendStatus
     };
 
     ProtocolEndpoint::Callbacks cb;
@@ -441,7 +441,7 @@ void initEndpoint(Harness& h) {
 void wireTransport(Harness& h) {
     h.transport.setDataCallback([&h](const uint8_t* d, size_t n) { h.hook.process(d, n, h.queue); });
     h.transport.setStateCallback([&h](HostUartTransport::State s) {
-        if (s == HostUartTransport::State::Disconnected || s == HostUartTransport::State::Error) {
+        if (s == HostUartTransport::State::kDisconnected || s == HostUartTransport::State::kError) {
             if (h.ep) {
                 h.ep->onTransportDisconnected();
             }
@@ -457,9 +457,10 @@ bool openPort(Harness& h, bool resetPulse) {
     cfg.baud = h.args.baud;
     cfg.read_timeout_ms = h.args.readTimeoutMs;
     cfg.reset_on_open = resetPulse;
+    h.transport.setConfig(cfg);  // M8-A3：canonical open() 无参；配置经 setConfig 注入
     h.resetSessionFlags();
     h.openMs = nowMs();
-    return h.transport.open(cfg);
+    return h.transport.open();
 }
 
 void closePort(Harness& h) {
@@ -1052,4 +1053,3 @@ int main(int argc, char** argv) {
     printStats(h, nowMs() - t0, pass);
     return pass ? 0 : 1;
 }
-

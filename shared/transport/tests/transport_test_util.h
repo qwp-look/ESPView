@@ -1,4 +1,4 @@
-// ESPView M6-C — 测试专用 FakeTransport（仅 host 测试使用，禁止引入生产组件）。
+// ESPView M6-C / M8-A3 — 测试专用 FakeTransport（仅 host 测试使用，禁止引入生产组件）。
 //
 // 可配置：能力、open 成败、send 固定结果/结果序列、MTU。
 // 可观测：open/close/send 计数、累计发送字节、状态日志、RX 注入。
@@ -7,8 +7,8 @@
 #pragma once
 
 #include <cstddef>
-#include <memory>
 #include <cstdint>
+#include <memory>
 #include <vector>
 
 #include "transport.h"
@@ -24,10 +24,6 @@ public:
         if (caps_.mtu == 0) {
             caps_.mtu = 4096;
         }
-        if (caps_.preferredPacketSize == 0) {
-            caps_.preferredPacketSize = caps_.mtu;
-        }
-        caps_.orderedReliableStream = true;
     }
 
     // ---- 配置 ----
@@ -42,6 +38,10 @@ public:
     void clearApInfo() { apInfoValid_ = false; }
     // 按序返回（队列用完后回落到 fixedSendResult_）。
     void setSendSequence(std::vector<SendStatus> seq) { sendSeq_ = std::move(seq); }
+
+    // M8-A3（adopt 测试）：模拟"已激活但未经 open()"的 Transport（PC TCP
+    // accept 路径：attach 后 isConnected()==true、openCount()==0）。
+    void setConnectedState(bool c) { connectedOverride_ = c; }
 
     // ---- 观测 ----
     TransportType type() const { return type_; }
@@ -64,9 +64,12 @@ public:
     }
     void close() override {
         ++closeCount_;
+        connectedOverride_ = false;
         setState(State::kDisconnected);
     }
-    bool isConnected() const override { return openResult_ && closeCount_ == 0 && openCount_ > 0; }
+    bool isConnected() const override {
+        return connectedOverride_ || (openResult_ && closeCount_ == 0 && openCount_ > 0);
+    }
     SendStatus send(const uint8_t* data, size_t len) override {
         ++sendCount_;
         sentBytes_ += len;
@@ -81,7 +84,6 @@ public:
     void setDataCallback(DataCallback cb) override { dataCb_ = std::move(cb); }
     void setStateCallback(StateCallback cb) override { stateCb_ = std::move(cb); }
     const TransportCapabilities& capabilities() const override { return caps_; }
-    size_t mtu() const override { return caps_.mtu; }
     uint64_t reconnectCount() const override { return reconnectCount_; }
     uint64_t txBytes() const override { return sentBytes_; }
     uint64_t rxBytes() const override { return rxBytes_; }
@@ -115,6 +117,7 @@ private:
     SendStatus fixedSendResult_ = SendStatus::kOk;
     std::vector<SendStatus> sendSeq_;
 
+    bool connectedOverride_ = false;  // M8-A3：adopt 测试的"已激活"覆盖
     size_t openCount_ = 0;
     size_t closeCount_ = 0;
     size_t sendCount_ = 0;
@@ -135,8 +138,6 @@ private:
 inline TransportCapabilities uartCaps(size_t mtu = 8192) {
     TransportCapabilities c;
     c.mtu = mtu;
-    c.preferredPacketSize = 4096;
-    c.lowLatency = false;
     c.paced = true;
     return c;
 }
@@ -145,8 +146,6 @@ inline TransportCapabilities uartCaps(size_t mtu = 8192) {
 inline TransportCapabilities tcpCaps() {
     TransportCapabilities c;
     c.mtu = 20 + 4096;
-    c.preferredPacketSize = 4116;
-    c.lowLatency = true;
     c.paced = false;
     return c;
 }

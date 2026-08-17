@@ -1,19 +1,20 @@
-// ESPView — HostUartTransport（PC 侧，M1-3B）
+// ESPView — HostUartTransport（PC 侧，M1-3B / M8-A3 收敛到 canonical ITransport）。
 //
-// 规范来源：docs/DESIGN.md E/F/I 节（ITransport 同构接口 + PC 线程模型）。
-// 职责（与 ESP32 UartTransport 同构）：open / close / send / isConnected /
-//   dataCallback / stateCallback / mtu()。不理解 Packet/Message/Frame，
-//   HELLO/会话/帧组装全部属于上层（ProtocolEndpoint）。
+// 规范来源：docs/DESIGN.md E/F/I 节 + M8-A3（§三十五：直接实现 shared/transport
+//   espview::transport::ITransport，删除 IPcTransport/pc_transport.h）。
+// 职责：open / close / send / isConnected / dataCallback / stateCallback /
+//   capabilities()。不理解 Packet/Message/Frame，HELLO/会话/帧组装全部属于上层
+//   （ProtocolEndpoint）。
 //
 // 平台：Windows + Win32 COM API（CreateFile/DCB/COMMTIMEOUTS），C++17，无 Qt。
 //
 // 线程模型：
 //   - RX worker 线程：ReadFile（短超时 50ms）→ dataCallback（回调仅在调用期间有效）。
 //     每次 ReadFile 返回的字节数即为真实 UART read size（允许半包/多包任意切分）。
-//   - send()：任意调用线程同步 WriteFile（互斥保护），发送短控制包为主。
+//   - send()：任意调用线程同步 WriteFile（M8-A3：整个 WriteFile 循环持锁，close
+//     在锁内置 INVALID —— 消除句柄竞争）。
 //   - close()：置停止标志 → 等待 RX worker 退出（ReadFile 50ms 超时保证及时退出）
-//     → CloseHandle。避免 CancelIo/关闭竞态（ERROR_OPERATION_ABORTED 只在
-//     显式 CancelIoEx 或句柄被强制关闭时出现；本实现通过短超时 + join 规避）。
+//     → 锁内置句柄 INVALID 后 CloseHandle。
 //   - 回调生命周期：dataCallback/stateCallback 由 setXxxCallback 设置，仅在
 //     open 期间有效；close() 完成后不会再有回调触发。
 //
@@ -33,19 +34,18 @@
 
 #include <windows.h>
 
-#include "pc_transport.h"
+#include "transport.h"  // shared/transport：唯一 canonical ITransport
 
 namespace espview {
 namespace pc {
 
-class HostUartTransport : public IPcTransport {
+class HostUartTransport : public espview::transport::ITransport {
 public:
-    // 与 IPcTransport::State 同一类型（枚举值对齐；别名保持既有调用兼容）。
-    using State = IPcTransport::State;
-    using DataCallback = IPcTransport::DataCallback;
-    using StateCallback = IPcTransport::StateCallback;
+    using State = espview::transport::ITransport::State;
+    using DataCallback = espview::transport::ITransport::DataCallback;
+    using StateCallback = espview::transport::ITransport::StateCallback;
 
-    struct Config : public PcTransportConfig {
+    struct Config {
         std::string port = "COM3";
         uint32_t baud = 115200;
         uint8_t data_bits = 8;
@@ -60,27 +60,42 @@ public:
         bool reset_on_open = false;
     };
 
-    HostUartTransport() = default;
-    ~HostUartTransport();
+    HostUartTransport();  // 默认配置（COM3/115200）
+    explicit HostUartTransport(Config cfg);
+    ~HostUartTransport() override;
 
     HostUartTransport(const HostUartTransport&) = delete;
     HostUartTransport& operator=(const HostUartTransport&) = delete;
 
-    // 打开并配置串口（cfg 必须是 HostUartTransport::Config）。失败返回 false 并进入 Error 状态。
-    bool open(const PcTransportConfig& cfg) override;
+    // 打开并配置串口（配置在构造时注入）。失败返回 false 并进入 Error 状态。
+    // 已 open 未 close 时返回 false（明确失败，不做隐式重开）；close() 后可重开。
+    bool open() override;
+    // M8-A3（测试/诊断工具专用）：close() 后、再次 open() 前更新配置
+    // （com3_frame_test 的 reconnect 场景需在重开时跳过复位脉冲）。
+    // 生产路径（SerialWorker 工厂）每次构造新实例注入配置，无需本方法；
+    // open 期间调用行为未定义（调用方必须已 close）。
+    void setConfig(const Config& cfg) {
+        if (!opened_) {  // M8-A3：open 期间禁止改配置（避免与 driver 配置竞态）
+            cfg_ = cfg;
+        }
+    }
     // 幂等关闭；close() 返回后不再触发任何回调。
     void close() override;
     bool isConnected() const override;
-    // 完整发送 len 字节。false = 未连接 / 写入失败 / 超时。
-    bool send(const uint8_t* data, size_t len) override;
-    size_t mtu() const override;  // 20B header + 4096 payload
+    // 完整发送 len 字节（Transport 内部处理 short write）。
+    // kBackpressure = 写入超时（would-block）；kNotConnected = 未连接；
+    // kError = 参数/写入失败。
+    espview::transport::SendStatus send(const uint8_t* data, size_t len) override;
+    const espview::transport::TransportCapabilities& capabilities() const override {
+        return caps_;
+    }
 
     void setDataCallback(DataCallback cb) override;
     void setStateCallback(StateCallback cb) override;
 
     // ---- 诊断统计（M1-3B 验收：partial read / sticky packet 证据）----
-    uint64_t rxBytes() const;
-    uint64_t txBytes() const;
+    uint64_t rxBytes() const override;
+    uint64_t txBytes() const override;
     uint64_t readCount() const;                 // ReadFile 成功次数
     std::vector<size_t> lastReadSizes(size_t max) const;  // 最近 max 次 read size
 
@@ -89,6 +104,12 @@ private:
     void setState(State s);
     void applyResetPulse(HANDLE h);
 
+    Config cfg_;
+    espview::transport::TransportCapabilities caps_;
+
+    // sendMutex_：M8-A3 —— 保护"句柄有效性 + 整个 WriteFile 循环"，close 在锁内
+    // 置 INVALID，彻底消除 send/close 句柄竞争（原实现锁外 WriteFile 与 close 竞态）。
+    std::mutex sendMutex_;
     HANDLE handle_ = INVALID_HANDLE_VALUE;
     std::thread rxThread_;
     std::atomic<bool> stopRequested_{false};
@@ -106,9 +127,8 @@ private:
     mutable std::mutex readSizesMutex_;
     std::vector<size_t> readSizes_;
 
-    State state_ = State::Disconnected;
+    State state_ = State::kDisconnected;
     mutable std::mutex stateMutex_;
-    size_t mtu_ = 0;
 };
 
 }  // namespace pc

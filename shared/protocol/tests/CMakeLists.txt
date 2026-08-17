@@ -34,6 +34,7 @@ add_executable(espview_protocol_tests
     ../../transport/tests/transport_manager_test.cpp
     ../../transport/tests/transport_sink_test.cpp
     ../../transport/tests/transport_pipeline_test.cpp
+    ../../transport/tests/bounded_queue_test.cpp
     ../../oled/tests/oled_test.cpp
     ../../oled/tests/oled_status_test.cpp
     ../../oled/tests/physical_renderer_test.cpp

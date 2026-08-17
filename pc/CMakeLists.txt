@@ -16,6 +16,9 @@ add_subdirectory(../shared/input input_build)
 # M7-C3：shared/display（DisplayUiState / PhysicalStatus / SplitState 纯模型，
 # 零平台依赖；GUI 目标链接后复用同一份源码）。
 add_subdirectory(../shared/display display_build)
+# M8-A3：shared/transport（TransportManager / TransportSink / BoundedQueue ——
+# 唯一 canonical transport 契约；PC backend 直接实现它，已删除 IPcTransport）。
+add_subdirectory(../shared/transport transport_build)
 
 # ------------------------------------------------------------
 # M1-3B：com3_frame_test（真实 COM3 全模式验收工具，无 Qt）
@@ -25,7 +28,7 @@ add_executable(com3_frame_test
     src/com3_frame_test.cpp
 )
 target_include_directories(com3_frame_test PRIVATE src)
-target_link_libraries(com3_frame_test PRIVATE espview_protocol)
+target_link_libraries(com3_frame_test PRIVATE espview_protocol espview_transport)
 
 if(MINGW OR MSYS)
     target_link_libraries(com3_frame_test PRIVATE kernel32)
@@ -93,6 +96,7 @@ if(ESPVIEW_BUILD_QT_GUI)
         espview_protocol
         espview_input
         espview_display
+        espview_transport
         Qt6::Widgets
         Qt6::SerialPort
     )
@@ -151,7 +155,7 @@ add_executable(input_send_test
     src/input_send_test.cpp
 )
 target_include_directories(input_send_test PRIVATE src)
-target_link_libraries(input_send_test PRIVATE espview_protocol espview_input)
+target_link_libraries(input_send_test PRIVATE espview_protocol espview_input espview_transport)
 
 if(MINGW OR MSYS)
     target_link_libraries(input_send_test PRIVATE kernel32)
@@ -167,7 +171,7 @@ add_executable(wifi_provision_probe
     src/wifi_provision_probe.cpp
 )
 target_include_directories(wifi_provision_probe PRIVATE src)
-target_link_libraries(wifi_provision_probe PRIVATE espview_protocol)
+target_link_libraries(wifi_provision_probe PRIVATE espview_protocol espview_transport)
 
 if(MINGW OR MSYS)
     target_link_libraries(wifi_provision_probe PRIVATE kernel32)
@@ -211,7 +215,7 @@ add_executable(tcp_transport_test
     src/tcp_transport_test.cpp
 )
 target_include_directories(tcp_transport_test PRIVATE src ../shared/protocol/tests)
-target_link_libraries(tcp_transport_test PRIVATE espview_protocol)
+target_link_libraries(tcp_transport_test PRIVATE espview_protocol espview_transport)
 
 if(MINGW OR MSYS)
     target_link_libraries(tcp_transport_test PRIVATE ws2_32 kernel32)
@@ -230,6 +234,7 @@ add_executable(transport_config_test
     src/transport_config_test.cpp
 )
 target_include_directories(transport_config_test PRIVATE src ../shared/protocol/tests)
+target_link_libraries(transport_config_test PRIVATE espview_transport)
 if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
     target_compile_options(transport_config_test PRIVATE -Wall -Wextra -Wpedantic)
 endif()

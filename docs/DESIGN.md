@@ -72,6 +72,36 @@
 > timing 最差 |Δ|≈1.9%（≤±15% 准则）；MinGW trap-UBSAN 3 轮（2 轮 0 失败，1 轮 4 个
 > CHECK 计数失败——根因为测试编排层 lost-wakeup，非实现缺陷，无 UB trap）；MSVC ASan 0 报告。
 > 详见 AN 章。
+> **修订记录（M8-A3, 2026-08-17）**：Transport 抽象层语义冻结（software contract；
+> wire protocol 零改动：`protocol.h`/`crc32.*` 相对 fe0add7 保持 0 diff，`encoder.h`
+> 仅 `value()` reader 非 wire）。唯一 canonical 契约 = `shared/transport/transport.h`
+> 的 `espview::transport::ITransport`：删除 legacy `espview::ITransport`（ESP32）与
+> `IPcTransport`（PC）两套旧接口及 adapter 层；`proto::SendStatus` 经 using 引用
+> `transport::SendStatus`（kOk/kBackpressure/kError/kNotConnected，背压≠断线）；
+> capabilities 收敛为 {mtu, paced}（删除 preferredPacketSize / lowLatency /
+> orderedReliableStream 死字段与 mtu() 虚函数）；TransportManager 新增 `adopt()`
+> （PC TCP accept 路径）+ 回调生命周期契约（diagSnapshot 为 M7-B 引入，M8-A3 沿用）；
+> PC SerialWorker 4 类
+> 跨线程队列有界化（rxBuf 64KB / input 256 / displayMode 8 / wifi 4，drop-newest
+> 或 latest-wins + 溢出计数 + Wi-Fi 密码副本清零）；ESP32 UART/TCP backend 收敛到
+> TransportBase 骨架（close join 超时 UAF 防护：泄漏保留 driver/同步原语）；
+> PC send/close 句柄竞争修复（sendMutex_ 整个 WriteFile 循环持锁）。host 388,065
+> checks / 0 failures；PC 全目标构建 + transport_config_test 97 / tcp_transport_test
+> 126 / com3_frame_test --selftest-queue PASS。详见 AO 章。
+>
+> **M8-A3 修复轮（12 位 reviewer 复核后，2026-08-17）**：B1 ESP32
+> `components/protocol/CMakeLists.txt` 补 `shared/transport` INCLUDE_DIRS（连锁
+> display/testpattern/lvgl_port 编译断链）；B2 泄漏路径对象寿命（close 泄漏时
+> 经 `shared_from_this()` 自持 shared_ptr 保活，对象与任务同寿命）；B3 UART/TCP
+> RX/link 任务退出前锁内清句柄（杜绝 stale TCB notify）；M1 open() 拒绝泄漏后
+> reopen；M2 泄漏路径清 data/state 回调 + 状态落定；M5 UART RX 锁内取 port 副本；
+> M7 从未 open 的 close 不上报伪 Disconnected；M8 发布 kConnected 前复查 running_
+> （防 spurious）；C/E adopt() 校验 t->isConnected() + PC adopt 条件置位
+> transportState_；F/K BoundedQueue capacity=0 拒绝 + 驱逐计数单点（drop 回调）；
+> J 析构/start 清 Wi-Fi 队列 + drain 未发送密码清零 + emitStats 锁读 transportState_；
+> K 补 adopt 失败 / len>mtu / attach-open 幂等 / capacity=0 测试；L T.3/T.4/L/X
+> 历史注解 + 修订记录措辞修正。host 388,088 checks / 0 failures；ctest 2/2；
+> bench guards 行不变；PC 全目标构建 + 97/140 checks；wire 红线 0 diff。
 
 ---
 
@@ -196,25 +226,51 @@ public:
 - **v0.1 只实现编译期模式**（`ESPVIEW_DEFAULT_MODE` 配置）；运行时 `setMode()` 接口保留、M6 实现。
 - **LVGL flush_cb 固定经 `DisplayManager::active()` 转发**（不直接绑后端）；模式切换后需全屏置脏触发一次重绘。这样 Application 与 LVGL 配置零改动。
 
-### 3. ITransport（ESP32 与 PC 各有一份实现，接口同构）
+### 3. ITransport（M8-A3 收敛为唯一 canonical 契约）
+
+> M8-A3 修订：原 ESP32 `espview::ITransport` 与 PC `IPcTransport` 两套同构接口
+> 及 adapter 层已删除，全部 backend 直接实现 `shared/transport/transport.h`
+> 的唯一 canonical `espview::transport::ITransport`（§三十五 / AO 章冻结）。
 
 ```cpp
+namespace espview::transport {
+
+enum class SendStatus : uint8_t {   // 发送结果（唯一 canonical）
+    kOk = 0,           // 全部 len 字节已完整进入 Transport TX 缓冲
+    kBackpressure = 1, // would-block（缓冲满/发送超时/门忙），≠ kNotConnected
+    kError = 2,        // Transport 层错误（driver 失败、参数非法、len > mtu）
+    kNotConnected = 3, // 未打开/已断开：发送被拒绝，不是背压
+};
+
+struct TransportCapabilities {
+    size_t mtu = 0;   // 单次 send 硬上限（len > mtu → kError，backend 不尝试发送）
+    bool paced = false; // true=UART/CDC：上层按 wire 速率节流/背压重试；
+                        // false=TCP：依赖 send() 自身背压（socket send buffer）
+};
+
 class ITransport {
 public:
-    enum class State { Disconnected, Connecting, Connected, Error };
+    enum class State : uint8_t { kDisconnected, kConnecting, kConnected, kError };
     using DataCallback = std::function<void(const uint8_t* data, size_t len)>;
     using StateCallback = std::function<void(State state)>;
-    virtual esp_err_t open(const TransportConfig& cfg) = 0;
-    virtual void close() = 0;
-    virtual bool isConnected() const = 0;
-    virtual esp_err_t send(const uint8_t* data, size_t len) = 0;  // 完整发送
-    virtual void setDataCallback(DataCallback cb) = 0;            // 收包回调
-    virtual void setStateCallback(StateCallback cb) = 0;          // 连接状态回调
-    virtual size_t mtu() const = 0;
+    virtual bool open() = 0;                  // 工厂已注入配置；重复 open（未 close）→ false
+    virtual void close() = 0;                 // 同步；返回后无任何回调；幂等
+    virtual bool isConnected() const = 0;     // Transport/driver 可用（≠ 对端已连接）
+    virtual SendStatus send(const uint8_t* data, size_t len) = 0;  // 完整发送
+    virtual void setDataCallback(DataCallback cb) = 0;             // 收包回调
+    virtual void setStateCallback(StateCallback cb) = 0;           // 连接状态回调
+    virtual const TransportCapabilities& capabilities() const = 0; // {mtu, paced}
+    virtual uint64_t reconnectCount() const { return 0; }  // 只读统计（诊断）
+    virtual uint64_t txBytes() const { return 0; }
+    virtual uint64_t rxBytes() const { return 0; }
+    virtual bool wifiApInfo(int8_t* rssi, uint8_t* channel) const { return false; }
 };
+
+}  // namespace espview::transport
 ```
 
-> M0 不实现任何 Transport；UartTransport / UsbTransport / TcpTransport 全部留到 M1 之后。状态回调驱动 E 节连接状态机。
+> `proto::SendStatus` 经 `using` 引用本层 `SendStatus`（§三十五.2），两端共享同一
+> 类型，不再维护两套枚举。生命周期/回调/线程契约与状态转移见 AO 章。
 
 ### 4. InputManager（ESP32 侧）
 
@@ -808,7 +864,10 @@ ESPView/
 
 - `VirtualScreenWidget`：继承 `QWidget`，`paintEvent` 绘制 QImage（缩放 + 等比），捕获 `mousePress/Move/Release/Wheel`、`keyPress/Release`。
 - `ConnectionManager`：管理 Worker 线程生命周期、串口打开/关闭、断线重连、HELLO 握手。
-- `SerialTransport`：封装 `QSerialPort`，暴露 `ITransport` 同构接口，便于未来换 TcpTransport。
+- `SerialTransport`（M8-A3 已收敛）：原计划 QSerialPort 封装；现状为
+  `HostUartTransport`（pc/src/serial_transport.{h,cpp}，Win32 COM API），
+  直接实现 canonical `espview::transport::ITransport`（唯一契约，AO 章），
+  与 HostTcpTransport 同构，对上层 Transport 类型透明。
 - `FrameAssembler`：按 Message（CHUNKED 续片）重组、按 Frame（BEGIN/RECT/END）组装；`frameId` 落后/跳变 → 丢弃整帧；只在收到完整 FRAME_END 后提交一次重绘。
 - `StatusModel`：QAbstractListModel 或简单 struct，展示 COM 口、波特率、分辨率、像素格式、FPS、RX/TX 字节、延迟。
 - CMake 需 `find_package(Qt6 COMPONENTS Widgets SerialPort)`；本机用 MSYS2 MinGW Qt 6.11.1：`-DCMAKE_PREFIX_PATH=C:/msys64/mingw64`，运行时把 `C:\msys64\mingw64\bin` 加入 PATH。
@@ -848,6 +907,9 @@ ESPView/
 | M7-E | Power-Aware Wi-Fi Provisioning（OLED suspend/resume + ScanTransaction + preview 挂起 + A/B/C 实验 harness；wire format 未修改） | ✅ 完成（2026-08-16；host 384,438+192 checks / 0 failures；详见 AJ 章） |
 | M7-F | Hardware Path Diagnosis + Wi-Fi Provisioning 生产化（F1 判别探针 / F2 事务硬化 / F3 wizard 硬化 / F4 per-profile sdkconfig 隔离 / F5 证据矩阵；wire format 未修改） | ✅ 完成（2026-08-16；判别实验 uart_hw 45s 无掉线 vs RF 固件 boot 期掉线；详见 AK 章） |
 | M7-G | 发布前最终化套件（G1 provisioning/TCP handoff 硬化、G2 向导最终化、G3 Display UI 最终化、G4 README、G5 用户文档、G6 工具链/check_docs、G7 i18n、G8/G9 文档、G10 审计、G11 验收；wire format 零改动） | ✅ 完成（2026-08-16；host 384,531 checks / 0 failures；A/B 硬件 PASS、C/D 受 RF-ON 扫描期 CH340 掉线阻塞 → AL.3/AL.13） |
+| M8-A1 | 共享协议实现硬化（仅 shared/protocol；wire format 冻结零改动）：T1 LE 字节序助手合并 / T2 流式 Encoder 1MiB 上限 + 零堆分配热路径 / T3 半包超时改 tick() 驱动 / T4 会话并发最小加固 + 非阻塞 tryTransmit / T5 ACK_REQ 白名单 / T6 测试扩展 / T7 协议基准 | ✅ 完成（2026-08-16；host 386,307+ checks / 0 failures；详见 I/E/J 节 + 修订记录） |
+| M8-A2 | ProtocolEndpoint 并发硬化（仅 shared/protocol；wire format 零改动）：会话纪元 stale ACK/延迟控制识别、Deferred Control 两单槽、失败发送 seq 回退、原子转换 + failSession 幂等、8 个逐包计数器原子化、Callbacks 生命周期契约 + testHooks、确定性并发测试 R1-R6/CASE 1-10、死代码删除 | ✅ 完成（2026-08-16/17；host ≈387,17x checks / 0 failures；Gate lost-wakeup 根因已修复；bench alloc_count=0；MinGW trap-UBSAN / MSVC ASan 0 报告；详见 AN 章） |
+| M8-A3 | Transport 抽象层语义冻结（software contract；wire protocol 零改动）：唯一 canonical ITransport + SendStatus + capabilities {mtu,paced}；删除 legacy ITransport/IPcTransport/adapter 层；TransportManager adopt() + diagSnapshot；PC 4 类跨线程队列有界化；ESP32 TransportBase 骨架 + close join UAF 防护；PC send/close 句柄竞争修复 | ✅ 完成（2026-08-17；host 388,065 checks / 0 failures；bench guards 行不变；PC 全目标构建 + 97/126 checks；ESP32 改动需 CI/reviewer 复核；详见 AO 章） |
 | M6(未来) | 真实 LCD (DEVICE/MIRROR)、触摸（INPUT_TOUCH）、TinyUSB、运行时 DisplayMode | 未开始 |
 
 ### M2 前置架构冻结（M1-3D 检查）
@@ -906,9 +968,11 @@ M2 不负责：LVGL、真实 LCD、Mirror、触摸、Wi-Fi、高 FPS、复杂 UI
 
 9. M5-B（LVGL Input Device，wire format 未修改）：`shared/input/lvgl_adapter.{h,cpp}`（`LvglInputAdapter`，纯 C++17 无 LVGL 依赖：pointer 状态缓存 + 点击保持窗口 + key ring buffer + wheel accumulator + 统计）+ `shared/input/hid_lvgl_keymap.{h,cpp}`（HID usage → LVGL key code）+ `esp32/components/lvgl_port/src/lvgl_indev.cpp`（POINTER / KEYPAD / ENCODER 三个 `lv_indev_drv_t` read_cb）+ `esp32/components/lvgl_port/src/lvgl_app.cpp`（交互 demo UI：Button A/B + Counter + Keyboard/Mouse 标签 + group 导航）+ `esp32/main`（InputManager → LvglInputAdapter 接线 + `inp3` 统计行）+ host 单测 `shared/protocol/tests/lvgl_adapter_test.cpp`（§19 十五项 + 点击保持/集成扩展）。
 
-10. M6-A（Wi-Fi STA + TCP Transport，wire format 未修改）：`esp32/components/espview/include/espview/wifi_sta.hpp` + `src/wifi_sta.cpp`（STA 初始化/连接/GOT_IP/自动重连，凭据仅经 Kconfig 注入）+ `include/espview/tcp_transport.hpp` + `src/tcp_transport.cpp`（link 任务 + RX 任务 + sendAll，ITransport 同构）+ `esp32/components/espview/Kconfig`（ESPVIEW_TRANSPORT choice + TCP/Wi-Fi 配置，Wi-Fi 凭据默认空、只在本机未跟踪 sdkconfig 填写）+ `esp32/main/main.cpp`（编译期 Transport 选择，上层完全透明）+ PC 侧 `pc/src/pc_transport.h`（IPcTransport 抽象）+ `pc/src/host_tcp_transport.{h,cpp}`（HostTcpTransport 客户端 + TcpListener 服务端，WinSock2）+ `pc/src/serial_transport.{h,cpp}`（HostUartTransport 收敛到 IPcTransport）+ `pc/src/serial_worker.{h,cpp}`（TransportKind kUart/kTcp，TCP Server 模式：bindListen → acceptOne → pump → re-accept）+ `pc/src/connection_manager` / `main.cpp`（--transport uart|tcp --tcp-bind --tcp-port CLI）+ host loopback 测试 `pc/src/tcp_transport_test.cpp`（§二十八 1-19）。
+10. M6-A（Wi-Fi STA + TCP Transport，wire format 未修改；**M8-A3 已收敛**：接口现状见 P.12，本条目为历史记录）：`esp32/components/espview/include/espview/wifi_sta.hpp` + `src/wifi_sta.cpp`（STA 初始化/连接/GOT_IP/自动重连，凭据仅经 Kconfig 注入）+ `include/espview/tcp_transport.hpp` + `src/tcp_transport.cpp`（link 任务 + RX 任务 + sendAll）+ `esp32/components/espview/Kconfig`（ESPVIEW_TRANSPORT choice + TCP/Wi-Fi 配置，Wi-Fi 凭据默认空、只在本机未跟踪 sdkconfig 填写）+ `esp32/main/main.cpp`（编译期 Transport 选择，上层完全透明）+ PC 侧 `pc/src/pc_transport.h`（IPcTransport 抽象，M8-A3 已删除）+ `pc/src/host_tcp_transport.{h,cpp}`（HostTcpTransport 客户端 + TcpListener 服务端，WinSock2）+ `pc/src/serial_transport.{h,cpp}`（HostUartTransport）+ `pc/src/serial_worker.{h,cpp}`（TransportKind kUart/kTcp，TCP Server 模式：bindListen → acceptOne → pump → re-accept）+ `pc/src/connection_manager` / `main.cpp`（--transport uart|tcp --tcp-bind --tcp-port CLI）+ host loopback 测试 `pc/src/tcp_transport_test.cpp`（§二十八 1-19）。
 
 11. M7-A（独立 OLED 状态显示，wire format 未修改）：`shared/oled/`（`oled_fb` 1KB 页式 fb + 8×8 字体、`oled_cmd` SSD1306/SH1106 命令序列与上传分段生成，纯 C++17 零平台依赖）+ `esp32/components/oled/`（`oled_i2c` v6.0.2 新 I2C 驱动 `driver/i2c_master.h` 封装、`oled_controller` 控制器解析、`status_ui` 状态页渲染、`oled_display` 低优先级任务 + 有界错误恢复、Kconfig 默认 n）+ `esp32/main`（`oledStatusSnapshot` provider + 启停接线 + `oled` 诊断行，全部 `#if CONFIG_ESPVIEW_OLED_ENABLE` 保护）+ host 单测 `shared/oled/tests/oled_test.cpp`（1,553 checks）+ `scripts/pc_oled_monitor.py`（被动串口监控 `oled` 诊断行）。
+
+12. M8-A3（Transport 抽象层语义冻结，M8-A3；software contract，wire protocol 零改动）：`shared/transport/`（`transport.h` 唯一 canonical ITransport/SendStatus/TransportCapabilities{mtu,paced}/TxPolicy + `transport_manager.{h,cpp}` factory/open/close/switchTo/reopen/**adopt**/发送门/diagSnapshot + `transport_sink.{h,cpp}` paced 重试/unpaced 单次 + `bounded_queue.h` BoundedQueue/BoundedByteBuffer）+ `shared/protocol/protocol_endpoint.h`（`using SendStatus = transport::SendStatus`，删除本地枚举）+ ESP32 `esp32/components/espview/`（`transport_base.{hpp,cpp}` 共享骨架 + `uart_transport`/`tcp_transport` 直接实现 canonical；`transport.hpp`/`transport_manager.hpp` 适配层已删除；close join 超时泄漏防护 UAF）+ PC `pc/src/`（`serial_transport`/`host_tcp_transport` 直接实现 canonical；`pc_transport.h` 已删除；SerialWorker 经 TransportManager + TransportSink + 4 类有界队列 rxBuf 64KB/input 256/displayMode 8/wifi 4）+ host 单测（transport_manager_test 新增 adopt/reopen 用例、transport_sink_test 背压≠断线/kError 不重试、transport_pipeline_test 大帧流式发送期间 control trySend 背压、bounded_queue_test）+ `pc/src/tcp_transport_test.cpp` / `transport_config_test.cpp` / `com3_frame_test --selftest-queue` 回归。详见 AO 章。
 
 下一步（M6）：真实 LCD（DEVICE/MIRROR）、触摸（INPUT_TOUCH）、TinyUSB、运行时 DisplayMode；输入侧扩展项：GUI 层 MouseMove 节流/合并在发端调优、ESP32 输入防抖、输入宏/录制/回放、游戏手柄、修饰键在 LVGL 侧的合成（当前为 capability limitation，见 S.7）。ESP32 侧 `IDisplay` / `RemoteDisplay` 属于 M2/M5 范围，本设计已为其预留接口（D 节）。
 
@@ -1080,7 +1144,7 @@ InputManager / RemoteDisplay`；TCP 不新增任何 Message / Packet / CRC 变�
 
 - PC = TCP Server（监听 `0.0.0.0:8765`，CLI `--tcp-bind` / `--tcp-port` 可改）；ESP32 = Wi-Fi STA + TCP Client（`CONFIG_ESPVIEW_TCP_SERVER_IP` / `CONFIG_ESPVIEW_TCP_SERVER_PORT`）。
 - 编译期 Transport 选择（Kconfig `ESPVIEW_TRANSPORT` choice，默认 UART）：`ESPVIEW_TRANSPORT_UART` / `ESPVIEW_TRANSPORT_TCP`；`esp32/main` 只面对 `ITransport`，应用（LVGL / TestPattern）完全不知道 Transport 类型。
-- 接口为未来 runtime switching 预留（ESP32 `ITransport` 与 PC `IPcTransport` 同构），M6-A 不实现运行时切换。
+- 接口为未来 runtime switching 预留（ESP32 `ITransport` 与 PC `IPcTransport` 同构，**M8-A3 已收敛**：两套接口已删除，唯一 canonical 见 AO 章），M6-A 不实现运行时切换。
 
 ### T.2 状态分离（任务书 §四）
 
@@ -1091,6 +1155,10 @@ InputManager / RemoteDisplay`；TCP 不新增任何 Message / Packet / CRC 变�
 
 ### T.3 ESP32 侧组件
 
+> **M8-A3 已收敛**：TcpTransport/UartTransport 直接实现 canonical
+> `espview::transport::ITransport`（shared/transport/transport.h）；legacy
+> `espview::ITransport` / 适配层已删除，现状见 AO 章。以下为历史结构描述。
+
 - `esp32/components/espview`：
   - `WifiSta`（wifi_sta.hpp/cpp）：`esp_netif_init` / `esp_event_loop_create_default` / `esp_netif_create_default_wifi_sta` / `esp_wifi_init`（`WIFI_INIT_CONFIG_DEFAULT`）/ `esp_wifi_set_mode(STA)` / `esp_wifi_set_config` / `esp_wifi_start`；事件 handler 只更新标志 + 唤醒等待者；日志只打印 SSID 长度，**绝不打印 SSID/密码**。
   - `TcpTransport`（tcp_transport.hpp/cpp，`ITransport` 同构）：link 任务（Wi-Fi 等待 → connect → 启动 RX 任务 → 断开退避重连）+ RX 任务（select 200ms 轮询 → recv → dataCallback）+ `send()` sendAll（处理 short write；SO_SNDTIMEO 限时；EAGAIN→超时，致命错误→断开并唤醒 link）+ `close()`（置停止 → 唤醒 link → join → 关 fd）；所有 fd 关闭在 `sockMutex_` 内（shutdown + close），无 double close / use-after-close / deadlock（§二十二）。
@@ -1099,7 +1167,12 @@ InputManager / RemoteDisplay`；TCP 不新增任何 Message / Packet / CRC 变�
 
 ### T.4 PC 侧组件
 
-- `pc/src/pc_transport.h`：`IPcTransport` 抽象（open / close / send / isConnected / dataCallback / stateCallback / mtu / rxBytes / txBytes）；`HostUartTransport`（M1-3B）与 `HostTcpTransport`（M6-A）为同构实现，`WorkerStats` / `DisplayFrame` / 输入队列对 Transport 类型透明。
+> **M8-A3 已收敛**：`IPcTransport` / `pc_transport.h` 已删除；`HostUartTransport` /
+> `HostTcpTransport` 直接实现 canonical `espview::transport::ITransport`，现状见 AO 章。
+
+- `pc/src/host_tcp_transport.{h,cpp}` 与 `pc/src/serial_transport.{h,cpp}`：同构实现
+  canonical ITransport（open / close / send / isConnected / dataCallback / stateCallback /
+  capabilities()）；`WorkerStats` / `DisplayFrame` / 输入队列对 Transport 类型透明。
 - `pc/src/host_tcp_transport.{h,cpp}`：WinSock2（`WSAStartup` 一次性引用计数初始化）：
   - `HostTcpTransport`：客户端（getaddrinfo → 非阻塞 connect + select 超时 → 阻塞模式 + `SO_SNDTIMEO` + `TCP_NODELAY`；RX 线程 select(100ms) → recv → dataCallback；`send()` sendAll；`close()` shutdown 唤醒 + join）。
   - `TcpListener`：服务端（socket / bind / listen / acceptOne）；**单客户端**（§九）：已有活跃连接时 `acceptOne` 返回 BUSY；前一个客户端断开后自动允许重新 accept（§十一 PC 重连路径）；`cancel()` 只置标志（worker 线程随后 close），避免跨线程 closesocket/select 竞态；bind 失败报告 WinSock error（§二十七），不自动修改 Windows Firewall。
@@ -1251,13 +1324,20 @@ InputManager / RemoteDisplay`；TCP 不新增任何 Message / Packet / CRC 变�
 
 - 目标（任务书 §一）：Application / LVGL / RemoteDisplay / ProtocolEndpoint 完全不感知当前是 UART 还是 TCP；
   Transport 决定自身能力，Protocol 不决定 Transport。禁止 `if (uart) / if (tcp)` 泄漏到 Protocol / RemoteDisplay。
-- 新增 `shared/transport`：`ITransport`（open/close/isConnected/send/mtu + data/state 回调）、`TransportCapabilities`
-  （`paced` 布尔：UART=true / TCP=false）、`TransportManager`（factory 创建、open/close/switchTo/reopen、
-  switch 窗口内状态缓冲后重放、`lockTransport()/tryLockTransport()` 发送门串行化）、`TransportSink`
-  （paced → 背压重试至 30s 预算；unpaced → 单次尝试，send 内部 sendAll 已按 socket 背压）。
-- ESP32 侧适配：`esp32/components/espview/src/{uart_transport,tcp_transport,transport_manager}.cpp`
-  （Esp32UartAdapter / Esp32TcpAdapter + uartCaps/tcpCaps/mapState/mapSend）；`main.cpp` 编译期 initial 选择
+- 新增 `shared/transport`（M8-A3 收敛后）：唯一 canonical `ITransport`
+  （open/close/isConnected/send + data/state 回调 + `capabilities()`，无 mtu() 虚函数）、
+  `TransportCapabilities`（`{mtu, paced}`：UART=true / TCP=false）、`TransportManager`
+  （factory 创建、open/close/switchTo/reopen/**adopt**（PC TCP accept）、switch 窗口内状态缓冲后
+  重放、`lockTransport()/tryLockTransport()` 发送门串行化、diagSnapshot）、`TransportSink`
+  （paced → 背压重试至 30s 预算；unpaced → 单次尝试，send 内部 sendAll 已按 socket 背压）、
+  `BoundedQueue`/`BoundedByteBuffer`（PC 跨线程队列容量治理）。
+- ESP32 侧：`esp32/components/espview/src/{uart_transport,tcp_transport,transport_base}.cpp`
+  直接实现 canonical ITransport（TransportBase 共享骨架：回调锁内替换/锁外投递、mapSend
+  唯一映射、close join 超时泄漏防护；legacy adapter 层已删除）；`main.cpp` 编译期 initial 选择
   （menuconfig `ESPVIEW_TRANSPORT_TCP`），运行时经 `g_mgr.switchTo()` 切换。
+- PC 侧：`HostUartTransport`/`HostTcpTransport` 直接实现 canonical ITransport
+  （原 `IPcTransport`/`pc_transport.h` 已删除）；SerialWorker 经 TransportManager 统一
+  创建/打开/adopt 与发送门。
 
 ### V.2 Runtime Switch 语义（safe switch，非热插拔）
 
@@ -1507,8 +1587,9 @@ InputManager / RemoteDisplay`；TCP 不新增任何 Message / Packet / CRC 变�
 
 - socket 生命周期：open → socket(AF_INET, SOCK_STREAM) → connect（带超时）→ send/recv；
   close → shutdown(WR) → closesocket；RX 线程 select 超时定期检查关闭标志，不忙等。
-- wifiApInfo()（M6-E 新增）：经 esp_wifi_sta_get_ap_info 读取 rssi/primary channel，由
-  TcpTransport 转发、Esp32TcpAdapter 覆写 ITransport::wifiApInfo，仅供诊断行（非 wire）。
+- wifiApInfo()（M6-E 新增；M8-A3 已收敛）：经 esp_wifi_sta_get_ap_info 读取
+  rssi/primary channel，由 TcpTransport 直接实现 ITransport::wifiApInfo（原
+  Esp32TcpAdapter 适配层已删除），仅供诊断行（非 wire）。
 - reconnect/backoff：对端断开后指数退避重连（上限截断），期间保持 Wi-Fi STA 连接；
   PC server 恢复后自动重连 → HELLO → FULL resync，无手工干预。
 - 已知边界：AP 断电（router 掉电）场景 deferred（见 X.15）；当前验证覆盖 TCP 断开/重连/
@@ -1545,9 +1626,10 @@ InputManager / RemoteDisplay`；TCP 不新增任何 Message / Packet / CRC 变�
 
 - ITransport 新增 4 个非纯虚默认访问器（非 wire 字段，纯诊断，默认 0/false）：
   reconnectCount() / txBytes() / rxBytes() / wifiApInfo(rssi*, channel*)。
-- ESP32 侧：WifiSta::apInfo（esp_wifi_sta_get_ap_info）+ TcpTransport::wifiApInfo 转发 +
-  Esp32TcpAdapter 覆写。PC HostTcpTransport 统计（tx/rx bytes、reconnect count）由 M6-E
-  扩展测试覆盖（SO_LINGER 立即 RST 后 send 失败路径等）。
+- ESP32 侧：WifiSta::apInfo（esp_wifi_sta_get_ap_info）+ TcpTransport::wifiApInfo
+  直接实现（M8-A3 已收敛：原 Esp32TcpAdapter 适配层已删除）。PC HostTcpTransport 统计
+  （tx/rx bytes、reconnect count）由 M6-E 扩展测试覆盖（SO_LINGER 立即 RST 后 send
+  失败路径等）。
 
 ### X.6 ESP32 诊断行 trx（任务书 §22/§二十三；非 wire 格式）
 
@@ -3573,3 +3655,152 @@ G11 验收清单（本日全部执行，工作树含 M7-G 全部 13 个提交）
   （seqBefore+sentCount）；drain 失败不清槽。既有测试断言无冲突（全部匹配场景）。
 - 与 M8-A1 文档的差异：I 节 M8-A1 线程归属表由本节 AN.1/AN.3/AN.7 扩充；
   E 节协议语义与 J 节基准不变。
+
+---
+
+## AO. M8-A3 Transport Abstraction Semantics（2026-08-17 冻结）
+
+> 本阶段是 **software contract** 冻结：`shared/transport` 成为两端唯一的 canonical
+> transport 契约；wire protocol（`protocol.h` / `crc32.*` / packet / message /
+> encoder / decoder / frame_assembler）零改动（相对 fe0add7 的 protocol.h / crc32.*
+> 为 0 diff）。新增/收敛全部在 Transport 抽象层（shared/transport + ESP32 backend +
+> PC backend），不触碰 PhysicalRenderer / LVGL / OLED / Qt Display UI（M8-A4 范围外）。
+
+### AO.1 唯一 canonical ITransport
+
+- 契约文件：`shared/transport/transport.h`（`espview::transport::ITransport`）。
+  ESP32（UART/TCP）与 PC（UART/TCP）及未来 UsbTransport 全部直接实现本接口；
+  不再有 legacy `espview::ITransport`（ESP32）、`IPcTransport`（PC）与 adapter 层
+  （Esp32UartAdapter / Esp32TcpAdapter 已删除）。
+- 接口：`open()/close()/isConnected()/send()/setDataCallback()/setStateCallback()/
+  capabilities()` + 只读统计 `reconnectCount()/txBytes()/rxBytes()/wifiApInfo()`。
+  `open()` 无参数（配置经工厂/构造函数注入）；重复 open（未 close）返回 false，
+  不做隐式重开；close() 后可重新 open（reopen 语义）。
+- `proto::SendStatus` 经 `using` 引用 `transport::SendStatus`（protocol_endpoint.h），
+  两端共享同一类型，禁止再维护第二套枚举。
+
+### AO.2 SendStatus 四值与背压 ≠ 断线
+
+- `kOk`：全部 len 字节已完整进入 Transport TX 缓冲（backend 内部处理 short write）。
+- `kBackpressure`：would-block（缓冲满 / 发送超时 / 门忙）——**会话仍存活**，
+  仅本次发送未完成；paced 传输由 TransportSink 按 TxPolicy 重试，unpaced 由上层
+  整帧丢弃（Transport 不理解帧）。
+- `kError`：Transport 层错误（driver 失败、参数非法、len > mtu）。
+- `kNotConnected`：Transport 未打开/未建立/已断开——发送被拒绝，不是背压。
+- 冻结规则：`kBackpressure` 不得改变 Manager/会话状态（不投递 Disconnected/Error）；
+  上层只按 `TxPolicy`（由 capabilities 推导，`txPolicyFor()`）决定重试或丢弃。
+  测试：transport_sink_test #16（WouldBlock ≠ disconnect）。
+
+### AO.3 capabilities 收敛为 {mtu, paced}
+
+- 删除死字段：`preferredPacketSize` / `lowLatency` / `orderedReliableStream`；
+  删除 `mtu()` 虚函数（消除双来源），mtu 只经 `capabilities().mtu` 读取。
+- `mtu`：单次 send 硬上限；len > mtu → kError（backend 不尝试发送）。
+  informational 上限：encoder 固定按 MAX_PACKET_PAYLOAD(4096) 分包，不读 mtu。
+- `paced`：true = UART/CDC（上层必须按 wire 速率节流/背压重试）；
+  false = TCP（依赖 send() 自身背压，socket send buffer）。默认 false；
+  UART backend 显式置 true。
+- 上层只消费抽象结果（capabilities → txPolicyFor），禁止 if(uart)/if(tcp)
+  泄漏到 Protocol / RemoteDisplay。
+
+### AO.4 TransportSink
+
+- `TransportSink`（shared/transport/transport_sink.{h,cpp}）：paced 传输的发送门
+  + 背压重试（`txPolicyFor()` 的 retryIntervalMs / maxWaitMs / retryOnBackpressure），
+  unpaced 单次尝试（send 内部已按 socket 背压阻塞到超时）。
+- 发送前检查会话存活（alive 回调）：会话 DISCONNECTED 时立即放弃，不向虚空发送。
+- 与 ESP32 `main.cpp` 的 `transportSink`/`trySink` 同一语义；PC SerialWorker 与
+  ESP32 两端都经 TransportSink 收口。
+
+### AO.5 trySink（控制面公平性）
+
+- `trySend()`：单次尽力，绝不阻塞/等待；发送门忙 → 立即 `kBackpressure`
+  （大帧流式发送窗口期间，RX 线程的 PONG/ACK 回复走 tryTransmit → trySend，
+  不会被饿死，也不阻塞 RX 线程）。
+- 未 open / 已 close → `kNotConnected`；`kError` 不重试、不 sleep。
+- 测试：transport_pipeline_test #C（大帧流式发送期间 control traffic 立即背压，
+  门释放后恢复）、transport_sink_test #17（kError 不重试）。
+
+### AO.6 TransportManager 职责
+
+- 生命周期：factory 创建 backend（注入配置）→ open/close/switchTo/reopen/adopt；
+  持有当前 backend（`current_`）、发送门（`lockTransport()/tryLockTransport()`）
+  与状态回调缓冲重放（switch 窗口内 stale 状态隔离）。
+- `adopt(type, t)`（M8-A3 新增，PC TCP accept 路径）：transport 已由调用方激活
+  （HostTcpTransport 已 attach accepted socket），本方法只挂回调并设为当前，
+  不调用 open()；已 open 时返回 false（不做隐式替换）；失败不改变当前状态。
+- `diagSnapshot()`：值语义的 Transport 诊断快照（connected / rxBytes / txBytes /
+  reconnectCount），线程安全；PC emitStats 与 ESP32 OLED 状态页经它读取，
+  不再直接调用 backend 指针（UAF/竞争防护）。
+- 回调生命周期：Manager 在 open/adopt 时 attach，在 close/switch 时 detach；
+  backend 迟到状态经 pending 缓冲 + takePending/flushStates 冲刷，stale 不达上层。
+
+### AO.7 backend 职责
+
+- 只做字节管道：open/close/send/isConnected/state 上报/能力报告；不理解
+  Packet/Message/Frame/CRC/HELLO（§六）；HELLO/会话全部属于 Protocol 层。
+- ESP32：`TransportBase` 共享骨架（回调锁内替换/锁外投递、mapSend 唯一映射
+  esp_err_t → SendStatus、stateName 诊断、ScopedLock、惰性创建同步原语）；
+  `UartTransport`（paced=true）与 `TcpTransport`（paced=false）派生实现。
+- PC：`HostUartTransport`（paced=true）与 `HostTcpTransport`（paced=false）
+  直接实现 canonical；`TcpListener` 独立类（不兼任 Transport；reconnect 归
+  SerialWorker re-accept）。
+
+### AO.8 回调生命周期契约
+
+- data/state 回调在 Transport 内部线程同步调用；回调指针/引用仅在调用期间有效，
+  禁止缓存。
+- 回调内禁止重入本对象的 open/close/send/setXxxCallback（backend 串行化保护下
+  可能死锁）。
+- close() 同步返回后保证：不再触发任何 data/state 回调、不再使用任何
+  driver/socket 资源；幂等（重复 close 无副作用）。
+- setXxxCallback 在 open 前设置、close 后不得使用。
+
+### AO.9 状态转移
+
+- `kDisconnected → kConnecting → kConnected`（open 流程）；`kConnected →
+  kDisconnected`（断开/close）；任意状态 → `kError`（打开失败/致命错误，
+  由上层决定重连策略）。
+- 状态只描述 Transport/driver 自身可用性，≠ 对端已连接（会话状态由
+  ProtocolEndpoint SessionState 独立维护，HELLO 完成才算会话 kConnected）。
+- Manager 重放顺序：Disconnected → Connecting/Connected；旧会话的 seq/frame/
+  ACK/partial base/input state 不跨 Transport 携带（safe switch，非热插拔）。
+
+### AO.10 队列所有权（有界化）
+
+- 4 类跨线程队列全部有界（PC SerialWorker）：
+  - `rxBuf_`（Transport RX → Worker）：BoundedByteBuffer 64KB，drop-newest，
+    溢出计数 `rxOverflowDropped_`（诊断）。
+  - `inputQueue_`（GUI → Worker）：BoundedQueue 256，drop-newest，溢出计数。
+  - `displayModeQueue_`（GUI → Worker）：BoundedQueue 8，latest-wins。
+  - `wifiQueue_`（GUI → Worker）：BoundedQueue 4，latest-wins；丢弃最旧项时
+    先清零其密码副本（AF.4 凭据红线）。
+- 队列语义不变量：非线程安全（调用方自己的 mutex 下使用）；容量固定；
+  takeDropped 清零；BoundedQueue 只用于跨线程容量治理，禁止进入
+  协议/transport 每包热路径。
+
+### AO.11 运行时切换
+
+- 与 M6-C / V 节一致：`switchTo(type)` = safe switch（disconnect → 会话重置 →
+  新 Transport → HELLO → FULL resync），非热插拔；M8-A3 只收敛契约与生命周期，
+  不改变切换语义；PC 侧 UART/TCP 经 TransportManager 统一 open/adopt。
+
+### AO.12 重连所有权
+
+- ESP32：`TcpTransport` link 任务负责重连（退避 + FULL resync）；`UartTransport`
+  由上层（ProtocolEndpoint tick / main 会话循环）驱动 reopen。
+- PC：UART 由 SerialWorker `runLoopUart` 负责 open → pump → close → 重试；
+  TCP 由 `runLoopTcp` 负责 listen → acceptOne → adopt → pump → close（listener
+  保持监听，§十一 re-accept）；每次 accept 使用全新 backend（复用状态残留清零）。
+- close join 预算（审计 R3/H1）：UART RX 任务 500ms、TCP link/RX 任务 1500ms；
+  超时即**泄漏**（保留 driver/socket 同步原语存活，析构跳过删除），杜绝
+  use-after-free；open() 校验 rx_timeout_ms ≤ 1000 / connect_timeout_ms ≥ 100 /
+  send_timeout_ms > 0，保证 join 预算覆盖实际退出窗口。
+
+### AO.13 USB 边界（预留）
+
+- `TransportType::kUsb = 2` 已预留（S3 USB CDC；TinyUSB FIFO 背压 → paced=true，
+  CDC 语义），本阶段无实现、无 factory 分支——仅架构预留；新增 backend 时
+  只扩展 shared/transport 的枚举与 factory，不改协议。
+- PC 侧：USB CDC（CH340/CP210x/S3 原生 CDC）在 OS 层呈现为 COM 端口 —— PC 侧
+  无需新 Transport，复用 `HostUartTransport`（COM 字节管道语义不变；M8-A3）。

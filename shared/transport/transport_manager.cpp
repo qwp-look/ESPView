@@ -48,7 +48,7 @@ void TransportManager::close() {
             old = std::move(current_);
             open_ = false;
         }
-        // 锁外 close：switching_=true → Disconnected 缓冲，不直接回调（防死锁）
+        // 锁外 close：不置 switching_——backend 的 Disconnected 经回调同步投递（锁已释放，无死锁）。
     }
     if (old != nullptr) {
         old->close();
@@ -104,6 +104,55 @@ bool TransportManager::reopen() {
     takePending(pending);
     flushStates(pending);
     return ok;
+}
+
+bool TransportManager::adopt(TransportType type, std::shared_ptr<ITransport> t) {
+    if (t == nullptr) {
+        setLastError("adopt null transport");
+        return false;
+    }
+    if (!t->isConnected()) {
+        // M8-A3（C/E）：adopt 只接受已激活的 Transport（PC TCP accept 路径
+        // attach 已建立连接）。未连接（accept 后立即断开等）→ 拒绝且不改状态，
+        // 调用方保持重试（re-accept）。
+        setLastError("adopt: transport not connected");
+        return false;
+    }
+    std::vector<ITransport::State> pending;
+    bool alreadyOpen = false;
+    {
+        std::lock_guard<std::mutex> tx(txMutex_);
+        {
+            std::lock_guard<std::mutex> st(stateMutex_);
+            alreadyOpen = open_;
+        }
+        if (alreadyOpen) {
+            // 已 open：拒绝（不做隐式替换）。错误记录推迟到锁外——
+            // setLastError() 需要 stateMutex_，不能在持锁时调用（非递归 mutex）。
+        } else {
+            switching_.store(true);
+            closeLocked();   // 保险：清掉任何残留 transport（正常为空）
+            clearPending();  // 丢弃残留 stale 状态
+            {
+                std::lock_guard<std::mutex> st(stateMutex_);
+                currentType_ = type;
+            }
+            attachCallbacks(*t);
+            {
+                std::lock_guard<std::mutex> st(stateMutex_);
+                current_ = std::move(t);
+                open_ = true;
+            }
+            switching_.store(false);
+        }
+    }
+    if (alreadyOpen) {
+        setLastError("adopt: already open");
+        return false;
+    }
+    takePending(pending);
+    flushStates(pending);
+    return true;
 }
 
 TransportType TransportManager::current() const {
@@ -275,13 +324,18 @@ void TransportManager::clearPending() {
 
 bool TransportManager::createAndOpenLocked() {
     std::shared_ptr<ITransport> t;
+    const char* factoryErr = nullptr;
     {
         std::lock_guard<std::mutex> st(stateMutex_);
         if (factory_ == nullptr) {
-            setLastError("factory not set");
-            return false;
+            factoryErr = "factory not set";
+        } else {
+            t = factory_(currentType_);
         }
-        t = factory_(currentType_);
+    }
+    if (factoryErr != nullptr) {
+        setLastError(factoryErr);
+        return false;
     }
     if (t == nullptr) {
         setLastError("factory returned null");

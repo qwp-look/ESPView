@@ -12,7 +12,7 @@ add_library(espview_protocol STATIC
     protocol_endpoint.cpp
     runtime_stats.cpp
 )
-target_include_directories(espview_protocol PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
+target_include_directories(espview_protocol PUBLIC ${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_CURRENT_SOURCE_DIR}/../transport)  # M8-A3：protocol_endpoint 引用 transport::SendStatus
 target_compile_features(espview_protocol PUBLIC cxx_std_17)
 
 if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
