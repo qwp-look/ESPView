@@ -16,7 +16,10 @@ namespace {
 
 const char* kTag = "espview_wifi";
 
-constexpr UBaseType_t kWifiEventTaskPriority = 8;  // esp_event 默认任务优先级
+// esp_event 默认任务优先级由 ESP-IDF 决定（esp_task.h ESP_TASKD_EVENT_PRIO =
+// configMAX_PRIORITIES - 5；经典 ESP32 configMAX_PRIORITIES=25 → 优先级 20）。
+// 本常量仅供文档参考，未用于创建任务（事件处理运行在 esp_event 系统任务内）。
+constexpr UBaseType_t kWifiEventTaskPriority = 20;
 
 // M8-A5（WIFI-01）：事件 handler 内瞬态断开的连续自动重连上限（有界防风暴）。
 // 超过后置 kFailBit —— 重连收敛到 link task 的 ReconnectPolicy 退避调度。

@@ -14,6 +14,7 @@
 | [architecture-overview.md](architecture-overview.md) | 高层架构速览（显示权威、双传输、输入逆链路） |
 | [getting-started.md](getting-started.md) | 从零到跑通：构建、烧录、连接、四种显示模式 |
 | [hardware.md](hardware.md) | 硬件要求与接线（ESP32 板、CH340、OLED I2C） |
+| [RESOURCE_BUDGET.md](RESOURCE_BUDGET.md) | 资源预算：Flash / RAM / Heap / 任务栈（M8-A7，全部数字带来源） |
 | [uart.md](uart.md) | UART 链路：115200 8N1 baseline、端口与波特率 |
 | [wifi.md](wifi.md) | Wi-Fi / TCP 模式与 provisioning（凭据 RAM-only） |
 | [display-modes.md](display-modes.md) | VirtualOnly / PhysicalOnly / Mirror / Split 四种显示模式 |

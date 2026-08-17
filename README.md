@@ -461,6 +461,7 @@ See [docs/security.md](docs/security.md).
 | [docs/architecture-overview.md](docs/architecture-overview.md) | System architecture at a glance |
 | [docs/getting-started.md](docs/getting-started.md) | First steps end-to-end |
 | [docs/hardware.md](docs/hardware.md) | Hardware requirements and wiring |
+| [docs/RESOURCE_BUDGET.md](docs/RESOURCE_BUDGET.md) | Resource budget: flash / RAM / heap / tasks (M8-A7) |
 | [docs/uart.md](docs/uart.md) | UART transport, baud rates, troubleshooting |
 | [docs/wifi.md](docs/wifi.md) | Wi-Fi/TCP transport and provisioning |
 | [docs/display-modes.md](docs/display-modes.md) | The four display modes |
