@@ -14,7 +14,7 @@ Checks (all local, no build / no hardware):
        - real Wi-Fi credential patterns: password=, WIFI_PASSWORD,
          CONFIG_ESPVIEW_WIFI_PASSWORD/SSID=, real private IPs (in scripts)
        - "已验证 / verified" claims with no findable evidence
-  4. esp32/sdkconfig* must never be tracked by git.
+  4. esp32/sdkconfig* must never be tracked by git (whitelisted sdkconfig.defaults / sdkconfig.defaults.esp32 / sdkconfig.defaults.esp32s3 excepted).
   5. docs cross-link validation: every markdown link in README.md and
      docs/**/*.md with a relative file target must resolve to an existing
      file or directory (http(s)://, mailto:, and #anchor-only skipped).
@@ -271,9 +271,12 @@ class Checker:
                 capture_output=True, text=True, timeout=30).stdout
         except Exception:
             return
+        allowed = {"sdkconfig.defaults",
+                  "sdkconfig.defaults.esp32",
+                  "sdkconfig.defaults.esp32s3"}
         for line in out.splitlines():
-            if line.strip() and not line.strip().endswith(
-                    "sdkconfig.defaults"):
+            name = os.path.basename(line.strip())
+            if line.strip() and name not in allowed:
                 self.report(os.path.join(REPO_ROOT, "esp32"), 0,
                             "tracked file must not exist: %s" % line)
 

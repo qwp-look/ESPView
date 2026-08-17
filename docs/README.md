@@ -28,6 +28,7 @@
 | [changelog.md](changelog.md) | 按里程碑的变更记录 |
 | [faq.md](faq.md) | 常见问题汇总 |
 | [scripts/README.md](../scripts/README.md) | 构建/烧录/验证脚本与硬件 harness 参考（位于 scripts/，一并收录到索引） |
+| [examples/README.md](../examples/README.md) | 可运行示例索引（host / UART / TCP / Wi-Fi / 显示模式 / 输入 / OLED / benchmark；标注 Hardware required） |
 
 ## 阅读路径
 

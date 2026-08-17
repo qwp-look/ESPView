@@ -479,6 +479,15 @@ See [docs/security.md](docs/security.md).
 | [scripts/README.md](scripts/README.md) | Build/flash scripts reference |
 | [examples/quickstart.md](examples/quickstart.md) | Quick-start walkthrough (copy-paste commands) |
 | [examples/sdkconfig.wifi-tcp.defaults.example](examples/sdkconfig.wifi-tcp.defaults.example) | Wi-Fi + TCP sdkconfig snippet (placeholders only) |
+| [examples/README.md](examples/README.md) | Runnable examples index (host / UART / TCP / Wi-Fi / display / input / OLED / benchmark) |
+| [examples/host-verification.md](examples/host-verification.md) | Host-only verification example (no hardware) |
+| [examples/benchmark.md](examples/benchmark.md) | Benchmark example (no hardware) |
+| [examples/uart.md](examples/uart.md) | UART 115200 end-to-end example (hardware) |
+| [examples/tcp.md](examples/tcp.md) | Wi-Fi + TCP end-to-end example (hardware) |
+| [examples/wifi-provisioning.md](examples/wifi-provisioning.md) | Wi-Fi Wizard provisioning example (hardware) |
+| [examples/display-modes.md](examples/display-modes.md) | Display modes example |
+| [examples/input.md](examples/input.md) | HID input reverse-link example (hardware) |
+| [examples/oled.md](examples/oled.md) | OLED wiring + verification example (hardware) |
 
 ## Project status and roadmap
 
