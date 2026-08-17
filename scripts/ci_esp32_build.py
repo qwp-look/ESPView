@@ -22,6 +22,10 @@ PROFILES = (
     "g1_a", "g1_b", "g1_c", "g1_d",
 )
 
+# M8-A7（A7-5）：target 白名单单一来源 = espview_profiles.TARGETS
+# （脚本目录在 sys.path，与 espview_profile_sdkconfig.py 同模式）。
+from espview_profiles import TARGETS
+
 ARTIFACTS = (
     "espview_esp32.bin",
     "bootloader/bootloader.bin",
@@ -43,12 +47,16 @@ def sha256_file(path):
     return digest.hexdigest()
 
 
-def build(repo_root, profile):
+def build(repo_root, profile, target="esp32"):
     esp32_dir = os.path.join(repo_root, "esp32")
     scripts_dir = os.path.join(repo_root, "scripts")
     build_dir = os.path.join(esp32_dir, "build", profile)
     sdkconfig_path = os.path.join(build_dir, "sdkconfig")
-    seed_defaults = os.path.join(esp32_dir, "sdkconfig.defaults")
+    # M8-A7（A7-7）：target-specific seed defaults（存在时优先）；profile 与
+    # target 正交。esp32s3 的 defaults 由 A7-7 提供。
+    seed_defaults = os.path.join(esp32_dir, "sdkconfig.defaults.%s" % target)
+    if not os.path.isfile(seed_defaults):
+        seed_defaults = os.path.join(esp32_dir, "sdkconfig.defaults")
     python = sys.executable
     sdkconfig_manager = os.path.join(scripts_dir, "espview_profile_sdkconfig.py")
 
@@ -58,12 +66,15 @@ def build(repo_root, profile):
         return 1
 
     rc = run([python, sdkconfig_manager, "--apply", profile,
-              "--sdkconfig", sdkconfig_path, "--seed-defaults", seed_defaults])
+              "--sdkconfig", sdkconfig_path, "--seed-defaults", seed_defaults,
+              "--target", target])
     if rc != 0:
         print("[ci_esp32_build] ERROR: sdkconfig apply failed", file=sys.stderr)
         return 1
 
     idf = shutil.which("idf.py") or "idf.py"
+    # M8-A7（A7-5）：目录布局仍为 build/<profile>（与 esp32-ci.yml 一致）；
+    # target 轴目录（build/<target>/<profile>）由 A7-7 连同 collector 一起落地。
     rc = run([idf, "-B", os.path.join("build", profile),
               "-D", "SDKCONFIG=%s" % sdkconfig_path, "build"], cwd=esp32_dir)
     if rc != 0:
@@ -90,6 +101,8 @@ def main(argv=None):
                      "(credential-safe: never prints sdkconfig contents)."))
     parser.add_argument("--profile", required=True, choices=PROFILES,
                         help="ESPView profile to build (whitelisted).")
+    parser.add_argument("--target", default="esp32", choices=TARGETS,
+                        help="IDF target (default: esp32).")
     parser.add_argument("--repo-root", default=os.getcwd(),
                         help="ESPView repository root (default: current directory).")
     args = parser.parse_args(argv)
@@ -101,7 +114,7 @@ def main(argv=None):
               file=sys.stderr)
         return 2
 
-    return build(repo_root, args.profile)
+    return build(repo_root, args.profile, args.target)
 
 
 if __name__ == "__main__":

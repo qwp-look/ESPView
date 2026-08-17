@@ -22,6 +22,15 @@ from __future__ import annotations
 # Six profile attributes, in fixed order (machine-parseable output uses them).
 ATTR_NAMES = ("transport", "oled", "test_switch", "console", "wifi", "display")
 
+# M8-A7（A7-5）：支持的 IDF target（profile 与 target 正交；见 DESIGN AS.2 D8）。
+# 新增 target 必须先加入本白名单；profile 键不绑定 target。
+TARGETS = ("esp32", "esp32s3")
+
+
+def validate_target(name):
+    """Return True if name is a whitelisted IDF target."""
+    return name in TARGETS
+
 # Kconfig choice groups: setting one member to "y" unsets the other members.
 CHOICE_GROUPS = (
     ("CONFIG_ESPVIEW_TRANSPORT_UART", "CONFIG_ESPVIEW_TRANSPORT_TCP"),
@@ -201,5 +210,5 @@ def validate_table():
 
 if __name__ == "__main__":
     validate_table()
-    print("espview_profiles: table OK (%d profiles, %d aliases)"
-          % (len(PROFILES), len(ALIASES)))
+    print("espview_profiles: table OK (%d profiles, %d aliases, %d targets)"
+          % (len(PROFILES), len(ALIASES), len(TARGETS)))

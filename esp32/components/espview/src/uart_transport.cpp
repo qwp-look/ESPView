@@ -2,6 +2,8 @@
 
 #include "espview/uart_transport.hpp"
 
+#include "target_info/target_info.hpp"
+
 #include <cstddef>
 #include <utility>
 
@@ -55,6 +57,13 @@ bool UartTransport::open() {
     // 参数校验（与 Kconfig 取值范围一致）。
     if (cfg_.port < UART_NUM_0 || cfg_.port >= UART_NUM_MAX || cfg_.baud_rate <= 0 ||
         cfg_.rx_buffer_size == 0 || cfg_.tx_buffer_size == 0) {
+        setState(State::kError);
+        return false;
+    }
+    // M8-A7：GPIO 按 target 上限校验（target_info；-1 = driver 默认允许）。
+    if (!target::uartGpioValid(cfg_.tx_pin) || !target::uartGpioValid(cfg_.rx_pin)) {
+        ESP_LOGE(kTag, "open rejected: GPIO out of target range (tx=%d rx=%d max=%d)",
+                 cfg_.tx_pin, cfg_.rx_pin, target::kMaxGpio);
         setState(State::kError);
         return false;
     }

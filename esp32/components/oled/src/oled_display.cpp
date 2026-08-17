@@ -16,6 +16,8 @@
 //     流量=0，仅休眠），绝不关闭/重建 I2C bus；挂起中 stop() 仍安全退出。
 #include "oled/oled_display.hpp"
 
+#include "target_info/target_info.hpp"
+
 #include <algorithm>
 #include <cstdint>
 #include <cstring>
@@ -98,6 +100,13 @@ bool OledDisplay::start() {
     }
     if (!validateOledConfig(cfg_, 2u)) {
         ESP_LOGE(kTag, "start: invalid config");
+        return false;
+    }
+    // M8-A7：GPIO 按 target 上限校验（shared validateOledConfig 无 target 知识）。
+    if (!espview::target::gpioValid(cfg_.sdaGpio) ||
+        !espview::target::gpioValid(cfg_.sclGpio)) {
+        ESP_LOGE(kTag, "start: GPIO out of target range (sda=%d scl=%d max=%d)",
+                 cfg_.sdaGpio, cfg_.sclGpio, espview::target::kMaxGpio);
         return false;
     }
 

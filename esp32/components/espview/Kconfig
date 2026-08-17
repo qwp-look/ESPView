@@ -23,13 +23,21 @@ config ESPVIEW_UART_PORT
 
 config ESPVIEW_UART_TX_GPIO
     int "Protocol UART TX GPIO number (-1 = keep driver default)"
+    default 43 if IDF_TARGET_ESP32S3
     default 1
-    range -1 39
+    range -1 48
+    help
+        M8-A7：range 覆盖经典 ESP32（0..39，34..39 仅输入）与 ESP32-S3
+        （0..48，46 仅输入）；初始化期按 target 校验（target_info 组件）。
+        classic ESP32 默认 1（板载 CH340 路径）；ESP32-S3 默认 43（UART0）。
 
 config ESPVIEW_UART_RX_GPIO
     int "Protocol UART RX GPIO number (-1 = keep driver default)"
+    default 44 if IDF_TARGET_ESP32S3
     default 3
-    range -1 39
+    range -1 48
+    help
+        M8-A7：同上；classic ESP32 默认 3；ESP32-S3 默认 44（UART0）。
 
 config ESPVIEW_UART_BAUD
     int "Protocol UART baud rate"

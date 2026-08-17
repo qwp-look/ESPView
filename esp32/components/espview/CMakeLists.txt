@@ -28,6 +28,7 @@ idf_component_register(
     PRIV_REQUIRES
         esp_timer
         esp_pm
+        target_info  # M8-A7：compile-time target traits（仅 src/ 引用）
 )
 
 # 编译要求：IDF 默认 -Wall -Werror（无 warning 验收）；C++ 标准至少 C++17。
