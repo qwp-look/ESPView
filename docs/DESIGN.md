@@ -4381,3 +4381,55 @@ AR.9 首跑 CI 修复记录（2026-08-17，M8-A6 首个 checkpoint 推送后的�
    的确定性 alloc gate 仍为硬失败；严格 >25% 时间门槛保留给同机运行
    （scripts/run_bench.bat / run_bench.sh）。
 
+## AS. M8-A7 审计记录与债务清单（2026-08-17）
+
+M8-A7 开始前，三路并行只读审计（A1：README/docs/DESIGN/examples；A2：resource/
+target/profile/build；A3：CI/hygiene/architecture）对 HEAD f6c843a 形成债务清单。
+本章记录审计结论与修复映射；每章修复按 A7-x commit 落地（见 §AT / changelog）。
+
+### AS.1 审计结论
+
+- 文档时效：README/DESIGN/changelog/testing 存在 2–4 个里程碑的过期声明（M0-M7-G
+  banner、HEAD `faa4c194`/`c48efcd`、M7-G “in progress”、384,965 checks 等），
+  与 DESIGN AR.8（393,661 checks）不一致。
+- 文档一致性：README 固件大小 0x1037F0 与 DESIGN U.2（0xFADA0 / 1,027,488 B）矛盾；
+  QSettings 白名单 9 键 vs 代码 10 键；E 节消息表缺 additive 0x06–0x09 / 0x13 与
+  SET_MODE mode=3；CAPABILITIES 标记“可选”但已实现且 Wi-Fi Wizard 依赖。
+- 资源预算：docs/RESOURCE_BUDGET.md 不存在；实测数据散落 DESIGN J/U/X.13、
+  esp32/build/*.map、build/config/sdkconfig.h；CPU 利用率无测量
+  （CONFIG_FREERTOS_GENERATE_RUN_TIME_STATS 未启用）。
+- Target 抽象：sdkconfig.defaults 固定 `CONFIG_IDF_TARGET="esp32"`；Kconfig GPIO
+  range `-1 39` / `0 39` 仅经典 ESP32；flash 4 MiB / 2 MiB factory / no OTA 写死；
+  本地 gitignored esp32/sdkconfig 已被 set-target 漂移到 esp32s3（实时证据）。
+- Profile 抽象：espview_profiles.py 白名单健全（6 属性 + 凭据守卫 + choice group）；
+  g1_a..g1_d 为历史 harness 但仍在一等 CI 矩阵与 dispatch 菜单；Target 与 Profile
+  通过 seed 文件耦合（target 未规范化）。
+- CI：fresh-clone gate 不测 ESP32 target/profile 矩阵；默认 PR/push 矩阵缺 oled；
+  esp32s3-smoke 仅非 PR（AR.6 设计如此，但触发表未标注）；check_docs 缺
+  docs/README 索引、HEAD 时效、workflow profile、target token 校验。
+- 架构：shared/protocol 仅依赖 transport 接口头（M8-A3 已文档化豁免）；display/input
+  分层干净；architecture-overview.md 缺“依赖规则”与 S3 边界小节。
+- S3 准备：无 USB/LCD/Touch/OTA 实现（红线保持）；ITransport 预留 kUsb=2；
+  必改点 = Kconfig range、UART0/GPIO 默认簇、flash/partition 参数化、
+  espview_flash.bat `--chip esp32` 硬编码。
+
+### AS.2 债务项 → 修复章节映射
+
+| 编号 | 债务 | 严重度 | 修复章节 |
+|------|------|--------|----------|
+| D1 | README/DESIGN/changelog/testing 过期里程碑与 HEAD | Blocker | A7-2 |
+| D2 | README 固件大小与验证数字与 DESIGN 矛盾 | Warning | A7-2/A7-4 |
+| D3 | DESIGN M 表/P 节“运行时 DisplayMode 未开始”过期 | Warning | A7-3 |
+| D4 | E 节消息表缺 additive 类型与 SET_MODE mode=3 | Warning | A7-3 |
+| D5 | QSettings 白名单 9 键（应为 10） | Warning | A7-3 |
+| D6 | RESOURCE_BUDGET.md 缺失、CPU 未测量 | Blocker | A7-4 |
+| D7 | Kconfig GPIO range 仅经典 ESP32 | Warning | A7-5 |
+| D8 | profile 工具不规范化 CONFIG_IDF_TARGET | Warning | A7-5 |
+| D9 | g1_* 历史 profile 仍一等 CI / 默认矩阵缺 oled | Warning | A7-6 |
+| D10 | 无 sdkconfig.defaults.esp32s3、flash/脚本 target 不感知 | Blocker | A7-7 |
+| D11 | verify_lvgl 忽略 ESPIDF_PROFILE、.gitignore 缺口 | Warning | A7-8 |
+| D12 | examples 覆盖不全、troubleshooting 缺项 | Warning | A7-9 |
+| D13 | check_docs 缺索引/时效/profile/target 校验 | Warning | A7-10 |
+| D14 | fresh-clone gate 不测 ESP32 矩阵、docs/ci.md 不同步 | Blocker | A7-10 |
+| D15 | architecture-overview 缺依赖规则与 S3 边界 | Warning | A7-2/A7-10 |
+
