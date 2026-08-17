@@ -896,7 +896,7 @@ ESPView/
 - `StatusModel`：QAbstractListModel 或简单 struct，展示 COM 口、波特率、分辨率、像素格式、FPS、RX/TX 字节、延迟。
 - CMake 需 `find_package(Qt6 COMPONENTS Widgets SerialPort)`；本机用 MSYS2 MinGW Qt 6.11.1：`-DCMAKE_PREFIX_PATH=C:/msys64/mingw64`，运行时把 `C:\msys64\mingw64\bin` 加入 PATH。
 
-## M. MVP 开发阶段划分（当前进度，M8-A6 更新）
+## M. MVP 开发阶段划分（当前进度，M8-A7 更新）
 
 | 阶段 | 内容 | 状态 |
 |------|------|------|
@@ -937,9 +937,11 @@ ESPView/
 | M8-A4 | Display/Input/OLED 抽象收敛（software-only；wire 零改动）：删除 DisplayManager/DisplayMode/HeartbeatView 死代码；mode 唯一转换；writeRectDetailed 背压接口化；320x240 与 128x64 几何单一来源；PHYSICAL_PREVIEW 单编码路径；PhysicalRenderer 紧凑 rect 索引 + crop 参数化；HID/坐标校验收敛；OLED 列序反转单一 helper；新增 espview_m8a4_bench（render alloc=0） | ✅ 完成（2026-08-17；host 388,9xx checks / 0 failures；详见 AP 章） |
 | M8-A5 | 硬件验收记录（UART/TCP/OLED/S3 probe；AR.6/AR.8/AR.9） | ✅ 完成（2026-08-17；host 393,661+211 checks / 0 failures；详见 AR 章） |
 | M8-A6 | CI / benchmark / sanitizer / build matrix / docs tooling（fast/full/sanitizer/benchmark/esp32/docs-security 9 workflows + fresh-clone gate + 首跑修复） | ✅ 完成（2026-08-17；全绿；host 393,661+211 checks / 0 failures；详见 AR 章与 docs/ci.md） |
+| M8-A7 | 文档时效 / 资源预算 / Target 与 Profile 抽象 / S3 准备 / 仓库维护（wire format 零改动）：RESOURCE_BUDGET.md、target_info 组件、sdkconfig.defaults.{esp32,esp32s3}、partitions.esp32s3.csv、build/flash `-t`、ci_collect_artifacts `--target`、examples/ 9 份、check_docs 3 项新检查、fresh-clone target/profile 矩阵校验 | ✅ 完成（2026-08-18；host 回归 0 failures；esp32 diagnostic PASS factory 余 56%；esp32s3 smoke PASS 16 MiB 余 83%；详见 AS/AT 章与 docs/ci.md） |
 | M6(未来) | 真实 LCD (DEVICE/MIRROR)、触摸（INPUT_TOUCH）、TinyUSB | 未开始（运行时 DisplayMode 已于 M7-C3 实现，SET_MODE 0..3） |
 
 注：表中各里程碑的 host checks 数字为该里程碑完成时的快照；当前最新全量基线见 AR.8（393,661 + 211 checks / 0 failures）。
+注：M8-A7 为文档与构建配置层改动（target/profile 抽象、S3 准备、examples/docs 工具链），wire format 零改动，host 数字基线不变。
 
 ### M2 前置架构冻结（M1-3D 检查）
 
@@ -4443,4 +4445,47 @@ target/profile/build；A3：CI/hygiene/architecture）对 HEAD f6c843a 形成债
 | D13 | check_docs 缺索引/时效/profile/target 校验 | Warning | A7-10 |
 | D14 | fresh-clone gate 不测 ESP32 矩阵、docs/ci.md 不同步 | Blocker | A7-10 |
 | D15 | architecture-overview 缺依赖规则与 S3 边界 | Warning | A7-2/A7-10 |
+
+## AT. M8-A7 落地回写与证据（2026-08-18）
+
+M8-A7 共 10 个 commit（A7-1..A7-10）全部落地并推送；wire format 零改动。
+AS.2 债务清单 D1–D15 全部闭环，修复映射与验证证据如下。
+
+### AT.1 债务修复映射（D1–D15 → A7-x）
+
+| 编号 | 修复 commit | 解决的问题 | 验证证据 |
+|------|-------------|-----------|----------|
+| D1 | A7-1/A7-2（9e417f0 / eeef3fe） | README/DESIGN/changelog/testing 过期里程碑与 HEAD | 全仓扫除 M7-G “in progress” 等过期声明；文档 HEAD 与 AR.8 基线一致 |
+| D2 | A7-2/A7-4 | README 固件大小与验证数字与 DESIGN 矛盾 | RESOURCE_BUDGET.md 全部数字带来源；README 与 DESIGN U.2 对齐 |
+| D3 | A7-3（2305306） | DESIGN M 表/P 节“运行时 DisplayMode 未开始”过期 | M 表补 M6(未来) 行；SET_MODE 0..3 已实现语义同步 |
+| D4 | A7-3 | E 节消息表缺 additive 类型与 SET_MODE mode=3 | E 节补 0x06–0x09 / 0x13 与 mode=3 说明 |
+| D5 | A7-3 | QSettings 白名单 9 键（应为 10） | transport_config_test.cpp 与代码同步为 10 键 |
+| D6 | A7-4（f497422） | RESOURCE_BUDGET.md 缺失、CPU 未测量 | docs/RESOURCE_BUDGET.md（Flash/RAM/Heap/任务栈，全部带来源） |
+| D7 | A7-5（e750547） | Kconfig GPIO range 仅经典 ESP32 | Kconfig 按 target 参数化；新增 target_info 组件暴露编译期 target 能力 |
+| D8 | A7-5 | profile 工具不规范化 CONFIG_IDF_TARGET | espview_profile_sdkconfig.py 规范化目标 target 并支持 `--check` 白名单 |
+| D9 | A7-6（f38b3a6） | g1_* 历史 profile 一等 CI / 默认矩阵缺 oled | espview_profiles.py 拆 TARGETS / HISTORICAL_PROFILES；esp32-ci.yml 矩阵含 oled |
+| D10 | A7-7（184affe） | 无 sdkconfig.defaults.esp32s3、flash/脚本 target 不感知 | 新增 sdkconfig.defaults.{esp32,esp32s3}、partitions.esp32s3.csv；espview_build/flash.bat 支持 `-t`；ci_collect_artifacts.py 支持 `--target` |
+| D11 | A7-8（7432430） | verify_lvgl 忽略 ESPIDF_PROFILE、.gitignore 缺口 | verify_lvgl.bat 支持 ESPIDF_PROFILE 覆盖；.gitignore 补 check-logs/、release/ |
+| D12 | A7-9（d35040d） | examples 覆盖不全、troubleshooting 缺项 | examples/ 9 份（索引 + uart/tcp/oled/display-modes/input/benchmark/host-verification/wifi-provisioning）；troubleshooting 补齐 |
+| D13 | A7-10 | check_docs 缺索引/时效/profile/target 校验 | check_docs 新增 check 11（docs/README 索引完整性）、12（esp32-ci.yml target/profile 白名单）、13（changelog 里程碑时效） |
+| D14 | A7-10 | fresh-clone gate 不测 ESP32 矩阵、docs/ci.md 不同步 | full-ci.yml 新增 target/profile 矩阵配置校验步骤；docs/ci.md §1/§2/§7 同步 |
+| D15 | A7-2/A7-10 | architecture-overview 缺依赖规则与 S3 边界 | architecture-overview.md 补依赖规则与 S3 边界说明 |
+
+### AT.2 构建与回归证据（2026-08-18）
+
+- host 回归：393,661 + 211 checks / 0 failures；verify_host.bat 全绿；
+  check_docs / security_scan / check_bat_crlf / git diff --check 全过。
+- ESP32 构建证据（本地 ESP-IDF v6.0.2）：
+  - esp32 diagnostic profile build PASS，factory app 余量 56%（4 MiB / partitions.csv）；
+  - esp32s3 16 MiB smoke build PASS，factory 余量 83%（partitions.esp32s3.csv）；
+  - 本地 gitignored esp32/sdkconfig 已恢复 CONFIG_IDF_TARGET="esp32"；
+    esp32/build 下各 profile 产物全部为 esp32（S3 构建隔离在 build/s3）。
+- CI 配置：9 个 workflow YAML 全部解析通过；fresh-clone gate 校验 target/profile
+  矩阵配置（不跑 ESP-IDF 编译，实际构建由 esp32-ci.yml 容器矩阵负责）。
+
+### AT.3 收尾状态
+
+- HEAD == origin/main（d35040d + 本收尾 commit）；工作树干净；git diff --check 通过。
+- 协议层（shared/protocol）零改动；本里程碑无任何 wire 格式变更。
+- M8-A7 关闭；M8-A8 的启动由下一任务书决定，本任务不预实现。
 

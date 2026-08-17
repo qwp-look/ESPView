@@ -125,3 +125,21 @@ jobs:
           cd /tmp/espview-fresh
           python3 scripts/check_docs.py
           python3 scripts/security_scan.py
+
+      - name: Validate target/profile matrix configuration
+        run: |
+          cd /tmp/espview-fresh
+          set -euo pipefail
+          # M8-A7（A7-10）：fresh-clone gate 校验 target/profile 矩阵配置
+          # （不跑 ESP-IDF 编译；实际构建由 esp32-ci.yml 容器矩阵负责）。
+          for p in uart tcp oled oled-off diagnostic; do
+            python3 scripts/espview_profile_sdkconfig.py --check "$p"
+          done
+          for t in esp32 esp32s3; do
+            f="esp32/sdkconfig.defaults.$t"
+            test -f "$f" || { echo "missing $f"; exit 1; }
+            grep -q "CONFIG_IDF_TARGET=\"$t\"" "$f" \
+              || { echo "bad CONFIG_IDF_TARGET in $f"; exit 1; }
+          done
+          test -f esp32/sdkconfig.defaults || { echo "missing esp32/sdkconfig.defaults"; exit 1; }
+          echo "target/profile matrix configuration OK"

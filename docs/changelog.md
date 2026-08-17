@@ -59,7 +59,13 @@
   硬件验收记录。
 - M8-A6：CI / benchmark / sanitizer / build matrix / docs tooling（9 workflows、
   TSan subset、bench_compare、fresh-clone gate）；首跑修复记录见 DESIGN AR.9。
-- M8-A7：文档时效 / 资源预算 / target 与 profile 抽象 / S3 准备 / 仓库维护（本轮）。
+- M8-A7：文档时效 / 资源预算 / target 与 profile 抽象 / S3 准备 / 仓库维护
+  （A7-1..A7-10）：docs 审计与用户/开发文档、DESIGN 语义同步、RESOURCE_BUDGET.md、
+  target_info 组件 + Kconfig target 参数化、TARGETS/HISTORICAL_PROFILES 拆分、
+  sdkconfig.defaults.{esp32,esp32s3} + partitions.esp32s3.csv + build/flash `-t` +
+  ci_collect_artifacts `--target`、verify_lvgl ESPIDF_PROFILE、examples/ 9 份、
+  check_docs 新 check 11/12/13、fresh-clone target/profile 矩阵校验；
+  验证见 DESIGN AS/AT 章（2026-08-18）。
 
 ## 版本策略说明
 

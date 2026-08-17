@@ -20,7 +20,7 @@ CI 按「速度从快到慢、环境从薄到厚」分四层，外加两条特�
 | Layer 2 Windows Qt CI | `windows-ci.yml` | windows-latest + MSYS2 MinGW64 + Qt 6（base / serialport 包），构建 `espview_virtual_display.exe` 并做 offscreen 自关闭冒烟（`--autoclose-ms`，不连硬件） | 按 pc / shared / scripts / docs / README 路径过滤 |
 | Layer 3 ESP32 构建 CI | `esp32-ci.yml` | `espressif/idf:v6.0.2` 容器内构建固件（默认 matrix：uart / tcp / oled / diagnostic，M8-A7 起；手动可触发全部 9 个 profile，g1_* 标记历史）；**只 build，绝不 flash** | 按 esp32 / shared / scripts-profile 路径过滤；`workflow_dispatch` 全 9 profile |
 | Layer 4 docs + security | `docs-security.yml` | `scripts\check_docs.py` + `scripts\security_scan.py` + `scripts\check_bat_crlf.py` + workflow YAML lint | 每次 PR / push（paths 不过滤，始终运行） |
-| Full platform CI | `full-ci.yml` | Ubuntu GCC 全量 host 套件、Ubuntu Clang、fresh-clone 可复现 gate（git archive → 干净目录 configure/build/ctest/docs/security） | push main / 手动 / 每周（周日 03:00 UTC） |
+| Full platform CI | `full-ci.yml` | Ubuntu GCC 全量 host 套件、Ubuntu Clang、fresh-clone 可复现 gate（git archive → 干净目录 configure/build/ctest/docs/security + target/profile 矩阵配置校验） | push main / 手动 / 每周（周日 03:00 UTC） |
 | Sanitizer CI | `sanitizer.yml` | Linux ASan（全量 host）、UBSan（全量 host）、TSan（core concurrency subset：endpoint_race / ack_concurrency / endpoint_lifecycle / deferred_control / lifecycle） | push main / 手动 / 每周（周日 04:00 UTC） |
 | Benchmark CI | `benchmark.yml` | bench-smoke（每次 PR/push：编译 + `--quick` + `stream_encode alloc_count=0` gate）；bench-full（每晚/手动：全量 CSV + 与基线比较；GitHub runner 上时间比较为 advisory（--warn-only，回归表入日志 + 环境元数据），alloc_count=0 为硬门槛；严格 &gt;25% 留给同机 run_bench） | PR/push（smoke）；schedule 02:30 UTC / 手动（full） |
 | Release（tag 通道） | `release.yml` | tag `v*` 触发（可手动），收集固件产物与校验和发布到 GitHub Release | 仅 tag `v*` 或手动 |
@@ -38,7 +38,7 @@ CI 按「速度从快到慢、环境从薄到厚」分四层，外加两条特�
 | `windows-ci` | pull_request + push | pc/**、shared/**、scripts/**、docs/**、README.md 等（以 workflow 文件为准） | 命中 pc / shared / scripts / docs / README 路径时 |
 | `esp32-ci` | pull_request + push + workflow_dispatch | esp32/**、shared/**、scripts/espview_profile*、scripts/ci_esp32*、examples/**、.github/workflows/esp32-ci.yml | 命中 esp32 / shared / scripts-profile 路径时；手动触发全部 9 个 profile |
 | `docs-security` | pull_request + push + workflow_dispatch | 无（始终运行） | 每次 PR、每次 push |
-| `full-ci` | push main + workflow_dispatch + schedule（周日 03:00 UTC） | 无 | main push / 手动 / 每周 |
+| `full-ci` | push main + workflow_dispatch + schedule（周日 03:00 UTC） | 无 | main push / 手动 / 每周（fresh-clone 校验 target/profile 矩阵配置；ESP-IDF 编译由 esp32-ci 负责） |
 | `sanitizer` | push main + workflow_dispatch + schedule（周日 04:00 UTC） | 无 | main push / 手动 / 每周（不在 PR 上跑，保持 PR 分钟级） |
 | `benchmark` | pull_request + push + workflow_dispatch + schedule（每晚 02:30 UTC） | 无 | smoke：每次 PR/push；full：main push / 手动 / 每晚 |
 | `release` | push tag `v*` + workflow_dispatch | 无 | 仅 v* tag 或手动 |
@@ -113,12 +113,16 @@ oled-off, diagnostic, g1_a, g1_b, g1_c, g1_d}；`<sha>` = 触发 commit 短 SHA�
 | partition table | `partition-table-<profile>-<sha>.bin` |
 | 校验和 | `SHA256SUMS.txt`（逐行 `sha256sum`，含以上三个文件） |
 
-- **禁止上传**：`esp32/sdkconfig*`（`sdkconfig.defaults` 除外，且它不含凭据）、构建日志
+- **禁止上传**：`esp32/sdkconfig*`（白名单 `sdkconfig.defaults`、`sdkconfig.defaults.esp32`、
+  `sdkconfig.defaults.esp32s3` 除外，且它们不含凭据）、构建日志
   （`idf_build.log` 等只打印到 Actions 输出，不归档为固件 artifact）、任何 secrets / 凭据文件。
 - host 测试日志如由 `fast-ci` / `windows-ci` 归档，必须是脱敏测试输出（不得含凭据或私网地址）。
 - **artifact 名称不含 SSID / IP / 密码**：artifact 名在 Actions 列表页公开可见，只允许纯技术名
   （如 `esp32-<profile>`、`host-*-test-logs`）。
 - `release.yml` 复用同一命名，把三个 bin + `SHA256SUMS.txt` 附到 GitHub Release。
+- `scripts/ci_collect_artifacts.py --target <esp32|esp32s3>` 可给产物加 `<target>-` 前缀
+  （如 `esp32s3-espview-<profile>-<sha>.bin`），供未来 S3 产物与 esp32 产物共存一个 release
+  目录时防重名；release.yml 当前调用不变（无前缀）。
 
 ## 8. 凭据策略（Credentials policy）
 

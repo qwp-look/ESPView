@@ -30,6 +30,13 @@ Checks (all local, no build / no hardware):
  10. examples/ coverage: every file under examples/ must be referenced from
      README; example-internal references to scripts/... and examples/... must
      resolve to existing files.
+ 11. docs/README index completeness: every top-level docs/*.md (except
+     docs/README.md itself) must be referenced from docs/README.md.
+ 12. workflow config allowlist: profiles and IDF targets referenced by
+     esp32-ci.yml (matrix, dispatch options, set-target, --target,
+     sdkconfig.defaults.<target>) must be whitelisted in espview_profiles.
+ 13. milestone freshness: docs/changelog.md must record the newest M8-A<n>
+     milestone advertised by docs/README.md.
 
 Scope note: credential / IP patterns are checked on the *scripts* surface
 (scripts/**, README.md, docs/**). docs/DESIGN.md legitimately records test
@@ -50,7 +57,8 @@ REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SCRIPTS_DIR = os.path.join(REPO_ROOT, "scripts")
 sys.path.insert(0, SCRIPTS_DIR)
 
-from espview_profiles import PROFILES, ALIASES  # noqa: E402
+from espview_profiles import (  # noqa: E402
+    PROFILES, ALIASES, TARGETS, HISTORICAL_PROFILES)
 
 # ---------------------------------------------------------------------------
 # corpus
@@ -449,6 +457,78 @@ class Checker:
                                     "workflow references missing script: %s"
                                     % script)
 
+    # -- check 11: docs/README index completeness --
+    def check_docs_index(self):
+        index = os.path.join(REPO_ROOT, "docs", "README.md")
+        if not os.path.isfile(index):
+            return
+        index_text = read_text(index)
+        linked = {os.path.basename(m.group(1))
+                  for m in re.finditer(r"\]\(\s*([^)\s#]+)",
+                                        index_text)}
+        for path in md_files():
+            rel = os.path.relpath(path, REPO_ROOT).replace(os.sep, "/")
+            if rel == "docs/README.md":
+                continue
+            if os.path.basename(rel) not in linked:
+                self.report(index, 0,
+                            "docs index must reference %s" % rel)
+
+    # -- check 12: workflow profile/target allowlist (M8-A7) --
+    def check_workflow_config(self):
+        wf = os.path.join(REPO_ROOT, ".github", "workflows",
+                          "esp32-ci.yml")
+        if not os.path.isfile(wf):
+            return
+        text = read_text(wf)
+        known_profiles = (set(PROFILES) | set(HISTORICAL_PROFILES)
+                          | {"all"})
+        tokens = set()
+        for m in re.finditer(r'^\s*-\s+([A-Za-z0-9_\-]+)\s*$',
+                              text, re.M):
+            tokens.add(m.group(1))
+        for m in re.finditer(r'\["([A-Za-z0-9_\-]+)"', text):
+            tokens.add(m.group(1))
+        for tok in sorted(tokens):
+            if tok not in known_profiles:
+                self.report(wf, 0,
+                            "unknown profile %r (whitelist: %s)" % (
+                                tok, ", ".join(sorted(known_profiles))))
+        targets = set()
+        for line in text.splitlines():
+            if "idf.py" in line:
+                for m in re.finditer(r'set-target\s+([A-Za-z0-9_\-]+)',
+                                      line):
+                    targets.add(m.group(1))
+            if ("espview_profile_sdkconfig" in line
+                    or "ci_esp32_build" in line):
+                for m in re.finditer(r'--target\s+([A-Za-z0-9_\-]+)',
+                                      line):
+                    targets.add(m.group(1))
+            for m in re.finditer(r'sdkconfig\.defaults\.'
+                                  r'([A-Za-z0-9_\-]+)', line):
+                targets.add(m.group(1))
+        for tok in sorted(targets):
+            if tok not in TARGETS:
+                self.report(wf, 0,
+                            "unknown IDF target %r (whitelist: %s)" % (
+                                tok, ", ".join(TARGETS)))
+
+    # -- check 13: milestone freshness (M8-A7) --
+    def check_doc_freshness(self):
+        index = os.path.join(REPO_ROOT, "docs", "README.md")
+        changelog = os.path.join(REPO_ROOT, "docs", "changelog.md")
+        if not (os.path.isfile(index) and os.path.isfile(changelog)):
+            return
+        def milestones(text):
+            return set(int(n) for n in re.findall(r"M8-A(\d+)", text))
+        idx_max = max(milestones(read_text(index)), default=0)
+        chg_max = max(milestones(read_text(changelog)), default=0)
+        if idx_max > chg_max:
+            self.report(changelog, 0,
+                        "changelog must record milestone M8-A%d " % idx_max
+                        + "(docs/README advertises it)")
+
     # -- check 10: examples coverage (M8-A6 §二十五.4 / §四十八) --
     def check_examples(self):
         examples_dir = os.path.join(REPO_ROOT, "examples")
@@ -499,6 +579,9 @@ def main():
     c.check_ci_badges()
     c.check_doc_index()
     c.check_workflow_script_refs()
+    c.check_docs_index()
+    c.check_workflow_config()
+    c.check_doc_freshness()
     c.check_examples()
     issues = c.issues
     if issues:
