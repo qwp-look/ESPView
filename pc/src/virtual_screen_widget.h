@@ -27,6 +27,7 @@
 #include <QWidget>
 
 #include "display_frame.h"
+#include "display_geometry.h"  // M8-B（B2）：默认几何单一来源（无帧时 logicalSize 回退）
 #include "i18n.h"
 
 namespace espview {
@@ -51,7 +52,15 @@ public:
     // 文件名 full_<frameId>.png；同 frameId 只存一次；目录需已存在。
     void setPngDumpDir(const QString& dir);
 
-    QSize logicalSize() const { return QSize(320, 240); }
+    // M8-B（B2）：逻辑分辨率跟随当前帧（rendered）；无帧时回退默认几何
+    // （kVirtualDisplayGeometry）。resize 窗口不改变本值（只影响显示缩放）。
+    QSize logicalSize() const {
+        if (hasImage_ && !image_.isNull()) {
+            return image_.size();
+        }
+        return QSize(espview::display::kVirtualDisplayGeometry.width,
+                     espview::display::kVirtualDisplayGeometry.height);
+    }
 
     // M3：接 InputController（GUI 线程同线程调用；传入已映射的逻辑坐标事件）。
     // letterbox 黑边外的鼠标事件不会上送（spec §12 推荐行为）。

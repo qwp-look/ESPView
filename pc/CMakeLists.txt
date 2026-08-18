@@ -147,6 +147,38 @@ if(ESPVIEW_BUILD_QT_GUI)
 endif()
 
 # ------------------------------------------------------------
+# M8-B（B1/B2）：virtual_screen_offscreen_test —— Qt offscreen 布局 /
+# 动态分辨率测试（QT_QPA_PLATFORM=offscreen，不依赖真实显示器）。
+# 覆盖 letterbox 渲染、resize 不重建 QImage、动态分辨率 logicalSize。
+# ------------------------------------------------------------
+if(ESPVIEW_BUILD_QT_GUI)
+    add_executable(virtual_screen_offscreen_test
+        src/i18n.cpp
+        src/virtual_screen_widget.cpp
+        src/input/input_controller.cpp
+        src/input/input_controller.h
+        src/input/qt_key_adapter.cpp
+        src/input/qt_key_adapter.h
+        src/virtual_screen_offscreen_test.cpp
+    )
+    set_target_properties(virtual_screen_offscreen_test PROPERTIES
+        AUTOMOC ON
+        CXX_STANDARD 17
+        CXX_STANDARD_REQUIRED ON
+    )
+    target_include_directories(virtual_screen_offscreen_test PRIVATE src src/input)
+    target_link_libraries(virtual_screen_offscreen_test PRIVATE
+        espview_input
+        espview_display
+        Qt6::Widgets
+    )
+    if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+        target_compile_options(virtual_screen_offscreen_test PRIVATE -Wall -Wextra -Wpedantic)
+    endif()
+    add_test(NAME virtual_screen_offscreen_test COMMAND virtual_screen_offscreen_test)
+endif()
+
+# ------------------------------------------------------------
 # M3：input_send_test（真实 COM3 输入链路验收工具，无 Qt）。
 # Qt::Key 语义由 host 测试（input_mapper_test）覆盖；本工具直接使用
 # 共享 InputEvent → input_codec → ProtocolEndpoint → HostUartTransport。
