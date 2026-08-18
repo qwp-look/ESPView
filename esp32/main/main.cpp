@@ -35,6 +35,7 @@
 #endif
 
 #include "display_router.h"              // M7-C2：DisplayRouter / PhysicalScene（shared/display）
+#include "display_geometry.h"              // M8-B：虚拟显示几何单一来源（kVirtualDisplayGeometry）
 #include "espview/tcp_transport.hpp"
 #include "espview/uart_transport.hpp"
 #include "espview/wifi_provisioning.hpp"
@@ -1362,8 +1363,10 @@ extern "C" void app_main() {
             // 非拥有引用：g_physicalSink 与 g_oled 同为全局，销毁序 sink 先于 display。
             g_physicalSink = std::make_shared<espview::oled::PhysicalDisplaySink>(g_oled.get());
             display::DisplayCapabilities prodCaps;
-            prodCaps.width = 320;    // LVGL/TestPattern 源帧分辨率（LVGL 320x240）
-            prodCaps.height = 240;
+            // M8-B（B2）：源帧几何不再散落字面量 —— 以 display_geometry.h 为
+            // 单一事实来源（LVGL/TestPattern 当前 320x240；动态分辨率沿用同一常量）。
+            prodCaps.width = display::kVirtualDisplayGeometry.width;
+            prodCaps.height = display::kVirtualDisplayGeometry.height;
             prodCaps.format = proto::PixelFormat::kRgb565;
             prodCaps.color = 16;
             prodCaps.mono = false;

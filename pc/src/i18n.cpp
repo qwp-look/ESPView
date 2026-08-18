@@ -114,7 +114,12 @@ const std::map<std::string, std::string>& enDict() {
         {"displayTemporarilyPausedDuringWifiScan", "Display temporarily paused during Wi-Fi scan"},
         // ---- M7-C 四显示模式名 ----
         {"Virtual Only", "Virtual Only"},
-        {"Physical Only", "Physical Only"},
+        // ---- M8-B（B3/B5/B6）：模式切换 / 分辨率 / 重连 / 预览状态文案 ----
+        {"Mode switch failed", "Mode switch failed"},
+        {"Recovered to VirtualOnly", "Recovered to VirtualOnly"},
+        {"Resolution changed", "Resolution changed"},
+        {"Waiting for reconnect", "Waiting for reconnect"},
+        {"Preview unavailable", "Preview unavailable"},        {"Physical Only", "Physical Only"},
         // ---- M2/M4/M6 UI 补充用词 ----
         {"ESPView", "ESPView"},
         {"Transport Type", "Transport Type"},
@@ -472,7 +477,12 @@ const std::map<std::string, std::string>& zhDict() {
         {"displayTemporarilyPausedDuringWifiScan", "Wi-Fi 扫描期间显示已临时暂停"},
         // ---- M7-C 四显示模式名 ----
         {"Virtual Only", "仅虚拟显示"},
-        {"Physical Only", "仅物理显示"},
+        // ---- M8-B（B3/B5/B6）：模式切换 / 分辨率 / 重连 / 预览状态文案 ----
+        {"Mode switch failed", "模式切换失败"},
+        {"Recovered to VirtualOnly", "已恢复为仅虚拟显示"},
+        {"Resolution changed", "分辨率已变化"},
+        {"Waiting for reconnect", "等待重连"},
+        {"Preview unavailable", "预览不可用"},        {"Physical Only", "仅物理显示"},
         // ---- M2/M4/M6 UI 补充用词 ----
         {"ESPView", "ESPView"},
         {"Transport Type", "传输方式"},
