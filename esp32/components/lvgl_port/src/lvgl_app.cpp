@@ -7,6 +7,8 @@
 
 #include "hid_lvgl_keymap.h"
 
+#include "display_geometry.h"  // M8-B (B3): kVirtualDisplayGeometry single source
+
 namespace espview {
 
 namespace {
@@ -216,8 +218,8 @@ bool LvglDemoApp::takeScene() {
 
 void LvglDemoApp::buildScene() {
     scene_.clear();
-    scene_.logicalWidth = 320;
-    scene_.logicalHeight = 240;
+    scene_.logicalWidth = display::kVirtualDisplayGeometry.width;
+    scene_.logicalHeight = display::kVirtualDisplayGeometry.height;
 
     display::SceneElement* t = scene_.add(display::kSceneIdTitle,
                                           display::SceneElementKind::kText,

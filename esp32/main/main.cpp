@@ -600,7 +600,9 @@ void onError(ErrorCode code, std::string_view text) {
 
 // M3：ProtocolEndpoint 未消费的消息（INPUT_KEY / INPUT_MOUSE）→ InputManager。
 void onOtherMessage(const Message& msg) {
-    const auto ev = espview::input::decodeInputMessage(msg, 319, 239);  // 320x240
+    const auto ev = espview::input::decodeInputMessage(msg,
+                           static_cast<uint16_t>(display::kVirtualDisplayGeometry.width - 1),
+                           static_cast<uint16_t>(display::kVirtualDisplayGeometry.height - 1));  // geometry single source (M8-B B3)
     if (ev.has_value()) {
         espview::input::InputEvent e = *ev;
 #if CONFIG_ESPVIEW_TEST_TRANSPORT_SWITCH
@@ -1134,8 +1136,8 @@ const EndpointConfig kEndpointCfg = [] {
     EndpointConfig c;
     c.protocol_version = kProtocolVersion;
     c.device_class = 0;
-    c.width = 320;
-    c.height = 240;
+    c.width = display::kVirtualDisplayGeometry.width;
+    c.height = display::kVirtualDisplayGeometry.height;
     c.pixel_format = PixelFormat::kRgb565;
     c.mode_mask = 0b1111;  // M7-C2：WINDOW | DEVICE | MIRROR | SPLIT（SET_MODE 白名单 0..3）
     c.device_name = "espview-esp32";

@@ -134,7 +134,55 @@ void testLetterboxPaint() {
     CHECK(top == qRgb(0xFF, 0xFF, 0xFF));
 }
 
+
+// B3：多窗口尺寸 letterbox smoke（640x480 / 1280x720 / 1920x1080 /
+// 2560x1440 / fullscreen）—— 等比居中、不拉伸、resize 不改变逻辑分辨率。
+void testLetterboxMultiSize() {
+    const struct {
+        int w;
+        int h;
+    } sizes[] = {{640, 480}, {1280, 720}, {1920, 1080}, {2560, 1440}};
+    for (const auto& s : sizes) {
+        espview::pc::VirtualScreenWidget w;
+        w.resize(s.w, s.h);
+        w.show();
+        QApplication::processEvents();
+        w.setFrame(makeFull(320, 240, 1, 0xFFFFu));
+        QApplication::processEvents();
+
+        const QImage img = w.grab().toImage();
+        CHECK(!img.isNull());
+        const QRgb bg = qRgb(0x18, 0x18, 0x18);
+        // 4:3 内容在窗口内等比：高优先（16:9 窗口），否则宽优先。
+        const int contentW = (s.h * 4 / 3 <= s.w) ? (s.h * 4 / 3) : s.w;
+        const int contentH = (s.h * 4 / 3 <= s.w) ? s.h : (s.w * 3 / 4);
+        const int barX = (s.w - contentW) / 2;
+        const int barY = (s.h - contentH) / 2;
+        if (barX > 0) {
+            CHECK(img.pixel(barX / 2, s.h / 2) == bg);  // 左右黑边
+        }
+        if (barY > 0) {
+            CHECK(img.pixel(s.w / 2, barY / 2) == bg);  // 上下黑边
+        }
+        CHECK(img.pixel(s.w / 2, s.h / 2) == qRgb(0xFF, 0xFF, 0xFF));  // 内容中心白
+        CHECK(img.pixel(barX + 4, barY + 4) == qRgb(0xFF, 0xFF, 0xFF));  // 内容边缘白
+        CHECK(w.logicalSize() == QSize(320, 240));  // resize 不改逻辑分辨率
+    }
+    // fullscreen smoke：不崩溃、逻辑分辨率不变、画面可 grab。
+    {
+        espview::pc::VirtualScreenWidget w;
+        w.showFullScreen();
+        QApplication::processEvents();
+        w.setFrame(makeFull(320, 240, 2, 0xFFFFu));
+        QApplication::processEvents();
+        const QImage img = w.grab().toImage();
+        CHECK(!img.isNull());
+        CHECK(w.logicalSize() == QSize(320, 240));
+    }
+}
+
 }  // namespace
+
 
 int main(int argc, char** argv) {
     qputenv("QT_QPA_PLATFORM", QByteArrayLiteral("offscreen"));
@@ -144,6 +192,7 @@ int main(int argc, char** argv) {
     testDynamicResolution();          // B2
     testPartialAndResizeKeepImage();  // B1/B2
     testLetterboxPaint();             // B1
+    testLetterboxMultiSize();        // B3
     std::printf("[virtual_screen_offscreen] checks: %d, failures: %d\n", g_checks,
                 g_failures);
     return g_failures == 0 ? 0 : 1;
