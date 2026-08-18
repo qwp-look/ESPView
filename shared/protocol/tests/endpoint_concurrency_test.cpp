@@ -323,6 +323,115 @@ void heartbeat_does_not_block_during_streaming_transmit() {
     CHECK_EQ(ep.stats().txPing, 0u);  // 全程无 PING 发出
 }
 
+
+// M8-B（B5）：长流式发送 + 对端心跳 —— 不得误判 peer dead（Problem D）。
+// 语义：peer liveness = 最近收到对端有效消息（lastPeerRxMs_），与 TX 是否忙碌
+//   无关。ESP32 长 FULL 帧流（115200 下 ~13.5s）持有 sendMutex_ 期间本端 PING
+//   发不出，但只要 PC 的 PING 持续到达（RX 任务独立），会话必须保持 CONNECTED；
+//   反之对端真正静默 5s，即使本端仍在流式发送也必须 failSession（不因 TX 忙碌
+//   掩盖断线，M1-3B/M1-3C 回归）。
+void long_stream_live_peer_no_peer_timeout() {
+    uint64_t nowMs = 0;
+    std::atomic<bool> sinkBlock{false};
+    std::atomic<int> sinkCalls{0};
+    std::vector<SessionState> states;
+    std::vector<uint16_t> protoErrors;
+    ProtocolEndpoint::Callbacks cb;
+    cb.onSessionState = [&states](SessionState s) { states.push_back(s); };
+    cb.onProtocolError = [&protoErrors](espview::proto::SessionError e, std::string_view) {
+        protoErrors.push_back(static_cast<uint16_t>(e));
+    };
+    auto sink = [&sinkBlock, &sinkCalls](const uint8_t*, size_t) -> SendStatus {
+        sinkCalls.fetch_add(1, std::memory_order_acq_rel);
+        while (sinkBlock.load(std::memory_order_acquire)) {
+            std::this_thread::yield();
+        }
+        return SendStatus::kOk;
+    };
+    ProtocolEndpoint ep(EndpointConfig{}, sink, cb, [&nowMs]() { return nowMs; });
+
+    // 被动握手 → CONNECTED。
+    ep.onTransportConnected();
+    {
+        SequenceCounter seq(0);
+        MessageEncoder enc(seq);
+        const auto hello = espview::proto::makeHello(
+            1, 0, 320, 240, espview::proto::PixelFormat::kRgb565, 0b1111, "b5-live");
+        CHECK(hello.has_value());
+        std::vector<std::vector<uint8_t>> pkts;
+        CHECK_EQ(enc.encode(*hello, pkts), PacketError::kNone);
+        for (const auto& p : pkts) {
+            ep.onTransportData(p.data(), p.size());
+        }
+    }
+    CHECK_EQ(ep.state(), SessionState::kConnected);
+
+    // 预编码对端 PING（握手完成后 expectedSeq 基线 = 0，与 M0 基线语义一致）。
+    const auto pingMsg = espview::proto::makePing(0x1234);
+    SequenceCounter pingSeq(0);
+    MessageEncoder pingEnc(pingSeq);
+    std::vector<std::vector<uint8_t>> pingPkts;
+    CHECK_EQ(pingEnc.encode(pingMsg, pingPkts), PacketError::kNone);
+    CHECK_EQ(pingPkts.size(), 1u);
+    const auto& pingBytes = pingPkts[0];
+
+    // 长流式发送：sink 阻塞 → sendMutex_ 被长期持有（模拟 ~13.5s FULL 流）。
+    sinkBlock.store(true, std::memory_order_release);
+    struct BlockingSource : espview::proto::IMessagePayloadSource {
+        std::vector<uint8_t> data;
+        size_t off = 0;
+        explicit BlockingSource(size_t n) : data(n, 0x5A) {}
+        size_t read(uint8_t* dst, size_t maxBytes) override {
+            const size_t n = std::min(maxBytes, data.size() - off);
+            if (n > 0) {
+                std::memcpy(dst, data.data() + off, n);
+                off += n;
+            }
+            return n;
+        }
+    };
+    std::atomic<bool> started{false};
+    const int sinkBaseline = sinkCalls.load(std::memory_order_acquire);
+    std::thread tx([&]() {
+        started.store(true, std::memory_order_release);
+        espview::proto::MessageHeader h;
+        h.type = static_cast<uint8_t>(espview::proto::MessageType::kFrameRect);
+        h.flags = 0;
+        BlockingSource src(10000);
+        ep.sendMessageStreaming(h, src);
+    });
+    while (!started.load(std::memory_order_acquire)) {
+        std::this_thread::yield();
+    }
+    while (sinkCalls.load(std::memory_order_acquire) == sinkBaseline) {
+        std::this_thread::yield();
+    }
+
+    // 对端 PING 每 2s 到达（RX 任务不受 sendMutex_ 影响）→ 跨越 >5s 窗口。
+    for (const uint64_t t : {2000u, 4000u, 6000u}) {
+        nowMs = t;
+        ep.onTransportData(pingBytes.data(), pingBytes.size());
+        nowMs = t + 1000;
+        ep.tick();  // 本端 PING 锁忙跳过；但不得 failSession
+        CHECK_EQ(ep.state(), SessionState::kConnected);
+        CHECK_EQ(ep.stats().pingTimeouts, 0u);
+    }
+    CHECK_EQ(protoErrors.size(), 0u);
+
+    // 对端停止心跳：再 +5s → 即使本端仍在流式发送，也必须 failSession。
+    nowMs = 11000;
+    ep.tick();
+    CHECK_EQ(ep.state(), SessionState::kDisconnected);
+    CHECK_EQ(ep.stats().pingTimeouts, 1u);
+    CHECK(protoErrors.size() == 1u &&
+          protoErrors[0] ==
+              static_cast<uint16_t>(espview::proto::SessionError::kPeerTimeout));
+
+    // 释放 sink，让后台发送线程退出（会话已断，其返回值不影响断言）。
+    sinkBlock.store(false, std::memory_order_release);
+    tx.join();
+}
+
 void rx_tick_hello_connected_no_seq_gap();
 void rx_tick_ping_auto_pong_and_rtt();
 void rx_tick_set_mode_ack_exactly_once();
@@ -338,6 +447,8 @@ void runEndpointConcurrencyTests() {
     encode_stream_matches_encode();
     std::printf("  heartbeat_does_not_block_during_streaming_transmit\n");
     heartbeat_does_not_block_during_streaming_transmit();
+    std::printf("  long_stream_live_peer_no_peer_timeout\n");
+    long_stream_live_peer_no_peer_timeout();
     std::printf("  rx_tick_hello_connected_no_seq_gap\n");
     rx_tick_hello_connected_no_seq_gap();
     std::printf("  rx_tick_ping_auto_pong_and_rtt\n");

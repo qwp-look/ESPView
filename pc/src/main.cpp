@@ -771,7 +771,12 @@ private:
             statusBar()->showMessage(tr_("Failure: SET_MODE timeout"), 5000);
             return;
         }
-        if (s.fullResyncPending && now - fullWaitStartMs_ >= kModeFullTimeoutMs) {
+        // M8-C（本地修复）：UART 下 FULL 帧线长（115200 全帧 ~13.5s）可能逼近
+        // 原 15s 上限，放宽到 30s（仅超时门槛；帧到达即收敛）。TCP 保持 15s。
+        const uint64_t fullTimeoutMs = (currentCfg_.kind == TransportKind::kUart)
+                                           ? 30000u
+                                           : kModeFullTimeoutMs;
+        if (s.fullResyncPending && now - fullWaitStartMs_ >= fullTimeoutMs) {
             modeWatchdog_->stop();
             s.onFullTimeout();  // 模式已应用但 FULL 未到 → 状态明确 + 恢复 Apply
             modeWidget_->setUiState(s);

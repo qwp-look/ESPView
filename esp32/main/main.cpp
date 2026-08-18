@@ -54,6 +54,8 @@
 #endif
 
 #include <memory>
+#include <mutex>
+#include <optional>
 
 using namespace espview;
 using namespace espview::proto;
@@ -217,6 +219,67 @@ extern std::shared_ptr<espview::oled::PhysicalDisplaySink> g_physicalSink;
 #endif
 // M7-C2：DisplayRouter（定义在文件下方；SET_MODE/调试钩子提前引用）。
 extern std::shared_ptr<display::DisplayRouter> g_router;
+// ---- M8-C（本地修复）：ACK_REQ 回复可靠投递（UART 帧流期间不丢失）----
+// 背景：UART FULL 帧流式发送期间，pump（lvgl_tx, prio 4）按 RECT 持有
+// sendMutex_（115200 下每 RECT 最长 ~1.5s）；RX 任务内的 acknowledge()
+// （tryTransmit，非阻塞）几乎必然因 sendMutex_ 忙而失败 → SET_MODE / WIFI_*
+// 的 ACK 在帧流期间系统性丢失 → PC 侧 10s ACK 看门狗超时 → 模式切换失败、
+// 失败后 VirtualOnly 无法恢复（真实硬件回归确认，M8-C）。
+// 修复：ACK 先尽力一次（acknowledge，非阻塞）；失败则入单槽 pending，
+// 由 sessionLoop（prio 5，每 200ms）用阻塞 sendMessage 排空 —— sessionLoop
+// 优先级高于 pump，会在 pump 释放 sendMutex_ 的 RECT 间隙抢先获得发送权，
+// ACK 在 ≤1 个 RECT（~1.5s @115200）内可靠上 wire。wire format 不变
+// （仍是单包 ACK 消息；与帧消息在消息边界穿插合法，M0-C 已冻结语义）。
+struct PendingReply {
+    uint16_t seq = 0;
+    uint8_t status = 0;
+    ErrorCode err = ErrorCode::kNone;
+};
+std::mutex g_replyMutex;
+std::optional<PendingReply> g_pendingReply;
+std::atomic<bool> g_replyPending{false};
+
+// 尽力发送 ACK；失败入单槽（replace-if-present，同一会话至多 1 份在途）。
+void sendOrQueueAck(uint16_t ackSeq, uint8_t status, ErrorCode errorCode) {
+    const SendResult r = g_endpoint.acknowledge(ackSeq, status, errorCode);
+    if (r == SendResult::kOk) {
+        return;
+    }
+    std::lock_guard<std::mutex> lock(g_replyMutex);
+    g_pendingReply = PendingReply{ackSeq, status, errorCode};
+    g_replyPending.store(true, std::memory_order_release);
+}
+
+// sessionLoop 每 200ms 排空：阻塞发送等待 pump 释放 sendMutex_（≤1 RECT）。
+void drainPendingReply() {
+    if (!g_replyPending.load(std::memory_order_acquire)) {
+        return;
+    }
+    if (g_endpoint.state() != SessionState::kConnected) {
+        // 会话未连接：丢弃槽（断线重连后 PC 会自动补发 SET_MODE，B6）。
+        std::lock_guard<std::mutex> lock(g_replyMutex);
+        g_pendingReply.reset();
+        g_replyPending.store(false, std::memory_order_release);
+        return;
+    }
+    PendingReply r;
+    {
+        std::lock_guard<std::mutex> lock(g_replyMutex);
+        if (!g_pendingReply) {
+            return;
+        }
+        r = *g_pendingReply;
+    }
+    // makeAck 返回 Message（确定性成功；异常路径被 -fno-exceptions 关闭）。
+    const Message ack = makeAck(r.seq, r.status, r.err);
+    const SendResult s = g_endpoint.sendMessage(ack);
+    if (s == SendResult::kOk || s == SendResult::kNotConnected) {
+        std::lock_guard<std::mutex> lock(g_replyMutex);
+        g_pendingReply.reset();
+        g_replyPending.store(false, std::memory_order_release);
+    }
+    // 其余失败（背压/传输错误）：保留槽，下个 200ms 重试（消息间穿插合法）。
+}
 
 #include "esp_heap_caps.h"  // heap_caps_get_largest_free_block / MALLOC_CAP_DEFAULT
 #include "esp_system.h"     // esp_get_free_heap_size / esp_get_minimum_free_heap_size
@@ -488,18 +551,18 @@ void applyDisplayMode(uint8_t mode) {
 // DisplayRouter 实际路由（缺 physical sink 时对应模式仍 ACK OK，但仅虚拟侧生效）。
 void onSetModeRequest(uint8_t type, const std::vector<uint8_t>& payload, uint16_t ackSeq) {
     if (type != static_cast<uint8_t>(MessageType::kSetMode) || payload.size() != 1) {
-        g_endpoint.acknowledge(ackSeq, 1, ErrorCode::kInvalidParam);
+        sendOrQueueAck(ackSeq, 1, ErrorCode::kInvalidParam);
         return;
     }
     const uint8_t mode = payload[0];
     if (mode > static_cast<uint8_t>(display::DisplayRouteMode::kSplit)) {
-        g_endpoint.acknowledge(ackSeq, 1, ErrorCode::kInvalidParam);
+        sendOrQueueAck(ackSeq, 1, ErrorCode::kInvalidParam);
         ESP_LOGW(kTag, "SET_MODE invalid mode=%u -> ACK ERR", static_cast<unsigned>(mode));
         return;
     }
     applyDisplayMode(mode);
     ESP_LOGI(kTag, "SET_MODE OK mode=%u -> ACK", static_cast<unsigned>(mode));
-    g_endpoint.acknowledge(ackSeq, 0, ErrorCode::kNone);
+    sendOrQueueAck(ackSeq, 0, ErrorCode::kNone);
 }
 
 // ---- M7-D3：Wi-Fi Provisioning 请求处理（AF.2/AF.3）----
@@ -507,17 +570,17 @@ void onSetModeRequest(uint8_t type, const std::vector<uint8_t>& payload, uint16_
 // ACK ERR = 非法参数（探针场景下老固件同样回 ERR，PC 据此降级，不发真实凭据）。
 void onWifiScanReqRequest(uint8_t type, const std::vector<uint8_t>& payload, uint16_t ackSeq) {
     if (type != static_cast<uint8_t>(MessageType::kWifiScanReq) || payload.size() != 2) {
-        g_endpoint.acknowledge(ackSeq, 1, ErrorCode::kInvalidParam);
+        sendOrQueueAck(ackSeq, 1, ErrorCode::kInvalidParam);
         return;
     }
     const uint8_t flags = payload[0];
     const uint8_t maxEntries = payload[1];
     if (flags != 0 || maxEntries > 64) {
-        g_endpoint.acknowledge(ackSeq, 1, ErrorCode::kInvalidParam);
+        sendOrQueueAck(ackSeq, 1, ErrorCode::kInvalidParam);
         return;
     }
     g_wifiProv.requestScan(maxEntries);
-    g_endpoint.acknowledge(ackSeq, 0, ErrorCode::kNone);
+    sendOrQueueAck(ackSeq, 0, ErrorCode::kNone);
 }
 
 // WIFI_CONFIG（103B，含密码明文）。AF.3：ACK ERR → 不上报成功、不落存储。
@@ -527,12 +590,12 @@ void onWifiScanReqRequest(uint8_t type, const std::vector<uint8_t>& payload, uin
 void onWifiConfigRequest(uint8_t type, const std::vector<uint8_t>& payload, uint16_t ackSeq) {
     if (type != static_cast<uint8_t>(MessageType::kWifiConfig) ||
         payload.size() < kWifiConfigPayloadSize) {
-        g_endpoint.acknowledge(ackSeq, 1, ErrorCode::kInvalidParam);
+        sendOrQueueAck(ackSeq, 1, ErrorCode::kInvalidParam);
         return;
     }
     WifiConfigInfo info;
     if (!parseWifiConfig(BytesView(payload.data(), payload.size()), info)) {
-        g_endpoint.acknowledge(ackSeq, 1, ErrorCode::kInvalidParam);
+        sendOrQueueAck(ackSeq, 1, ErrorCode::kInvalidParam);
         return;
     }
     if ((info.flags & kWifiConfigFlagClear) != 0) {
@@ -541,7 +604,7 @@ void onWifiConfigRequest(uint8_t type, const std::vector<uint8_t>& payload, uint
             std::memset(info.password.data(), 0, info.password.size());
         }
         g_wifiProv.requestClear();
-        g_endpoint.acknowledge(ackSeq, 0, ErrorCode::kNone);
+        sendOrQueueAck(ackSeq, 0, ErrorCode::kNone);
         return;
     }
     // 校验与 makeWifiConfig 同规则（ssid 1..32；password 0 或 8..63；serverIp 非 0；
@@ -555,7 +618,7 @@ void onWifiConfigRequest(uint8_t type, const std::vector<uint8_t>& payload, uint
         if (!info.password.empty()) {
             std::memset(info.password.data(), 0, info.password.size());
         }
-        g_endpoint.acknowledge(ackSeq, 1, ErrorCode::kInvalidParam);
+        sendOrQueueAck(ackSeq, 1, ErrorCode::kInvalidParam);
         return;
     }
     g_wifiProv.requestConfig(info.ssid.data(), info.ssid.size(), info.password.data(),
@@ -565,7 +628,7 @@ void onWifiConfigRequest(uint8_t type, const std::vector<uint8_t>& payload, uint
         std::memset(info.password.data(), 0, info.password.size());
         info.password.clear();
     }
-    g_endpoint.acknowledge(ackSeq, 0, ErrorCode::kNone);
+    sendOrQueueAck(ackSeq, 0, ErrorCode::kNone);
 }
 
 // ACK_REQ 控制消息按 type 分派（v0.1：SET_MODE / WIFI_SCAN_REQ / WIFI_CONFIG）。
@@ -583,7 +646,7 @@ void onAckRequestDispatcher(uint8_t type, const std::vector<uint8_t>& payload,
             onWifiConfigRequest(type, payload, ackSeq);
             return;
         default:
-            g_endpoint.acknowledge(ackSeq, 1, ErrorCode::kInvalidParam);
+            sendOrQueueAck(ackSeq, 1, ErrorCode::kInvalidParam);
             return;
     }
 }
@@ -973,6 +1036,7 @@ void sessionLoop(void*) {
             debugModeSwitch();
         }
 #endif
+        drainPendingReply();  // M8-C：排空 ACK_REQ 单槽（帧流期间可靠投递）
         g_endpoint.tick();
         // M7-D3：Wi-Fi Provisioning 相位机（命令/扫描结果/状态去重；非阻塞回调）。
         g_wifiProv.tick(monotonicMs());
