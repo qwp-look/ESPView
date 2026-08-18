@@ -31,6 +31,7 @@ void runRuntimeStatsTests();
 void runRemoteDisplayTests();
 void runDisplayRouterTests();
 void runDisplayUiStateTests();
+void runLogicalSceneTests();
 void runPhysicalStatusTests();
 void runPhysicalCapabilitySnapshotTests();
 void runSplitStateTests();
@@ -105,6 +106,8 @@ int main() {
     runDisplayRouterTests();
     std::printf("[display_ui_state]\n");
     runDisplayUiStateTests();
+    std::printf("[logical_scene]\n");
+    runLogicalSceneTests();
     std::printf("[physical_status]\n");
     runPhysicalStatusTests();
     runPhysicalCapabilitySnapshotTests();

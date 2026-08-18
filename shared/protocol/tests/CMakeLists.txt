@@ -28,6 +28,7 @@ add_executable(espview_protocol_tests
     ../../display/tests/remote_display_test.cpp
     ../../display/tests/display_router_test.cpp
     ../../display/tests/display_ui_state_test.cpp
+    ../../display/tests/logical_scene_test.cpp
     ../../display/tests/physical_status_test.cpp
     ../../display/tests/physical_capability_snapshot_test.cpp
     ../../display/tests/split_state_test.cpp
