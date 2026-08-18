@@ -129,6 +129,18 @@
 > format 零改动。新发现：ESP32 长 uptime 多次重连后协议会话偶发停滞（TCP 仍 ESTABLISHED
 > 但停止应答 HELLO/PONG，硬复位后恢复；未归因未改代码，详见 AU.5）；真实 AP outage
 > 测试 DEFERRED（AU.6）。凭据仅存在于本地 gitignored profile。详见 AU 章。
+>
+> **修订记录（M8-B, 2026-08-18）**：FINAL DISPLAY UX + DYNAMIC DISPLAY STATE + ROUTING
+> HARDENING——Qt resize/fullscreen letterbox；动态分辨率三态（reported/applied/rendered）
+> 进入 UI 状态；DisplayMode 切换状态机硬化（selected/applied 分离、两阶段看门狗 ACK 10s
+> + FULL 15s、失败后强制回退 VirtualOnly、断开重连恢复 appliedMode）；B5 ACK 可靠投递
+> （pending 单槽 + sessionLoop 排空，帧流期间不再丢 ACK）；B6 对端超时双因子
+> （peer-idle + data-plane-idle，长流式帧不再误杀被动存活对端）；OLED LogicalScene /
+> PhysicalSceneRenderer / Split Drawer / Physical Preview 状态一致性；i18n 新字符串
+> EN+zh-CN。真实硬件验收：UART 模式切换矩阵 32/32 PASS、TCP 模式切换矩阵 32/32 PASS
+> （VirtualOnly/PhysicalOnly/Mirror/Split ×5 + 回退序列，0 CRC / 0 bad_magic / 0 seq gap）、
+> UART 断线重连 ×10 PASS（串口关闭/重开真实场景）。host 394,892 checks / 0 failures；
+> verify_host / verify_qt / verify_lvgl ALL PASS；wire format 零改动。详见 AV 章。
 
 ---
 
@@ -949,6 +961,12 @@ ESPView/
 | M8-A6 | CI / benchmark / sanitizer / build matrix / docs tooling（fast/full/sanitizer/benchmark/esp32/docs-security 9 workflows + fresh-clone gate + 首跑修复） | ✅ 完成（2026-08-17；全绿；host 393,661+211 checks / 0 failures；详见 AR 章与 docs/ci.md） |
 | M8-A7 | 文档时效 / 资源预算 / Target 与 Profile 抽象 / S3 准备 / 仓库维护（wire format 零改动）：RESOURCE_BUDGET.md、target_info 组件、sdkconfig.defaults.{esp32,esp32s3}、partitions.esp32s3.csv、build/flash `-t`、ci_collect_artifacts `--target`、examples/ 9 份、check_docs 3 项新检查、fresh-clone target/profile 矩阵校验 | ✅ 完成（2026-08-18；host 回归 0 failures；esp32 diagnostic PASS factory 余 56%；esp32s3 smoke PASS 16 MiB 余 83%；详见 AS/AT 章与 docs/ci.md） |
 | M8-A8 | Direct Wi-Fi Hardware Regression（跳过 provisioning 直接配置注入）：真实硬件 Wi-Fi STA + TCP + 协议全链路验收（HELLO/CAPABILITIES/FULL/PARTIAL/INPUT/TCP reconnect×5/10min 长稳）；host/Qt/LVGL 回归 PASS；wire format 零改动 | ✅ 完成（2026-08-18；真实硬件；详见 AU 章） |
+| M8-B | FINAL DISPLAY UX + DYNAMIC DISPLAY STATE + ROUTING HARDENING（wire format 零改动）：
+B1 Qt resize/fullscreen/letterbox + LogicalScene 模型；B2 动态分辨率三态进入 UI；
+B3 DisplayMode 状态机硬化（两阶段看门狗 + 失败回退 VirtualOnly）；B4 四模式能力门控；
+B5 ACK 可靠投递 + 对端超时验证；B6 对端超时双因子 + 重连恢复；B7 host tests；
+B8 真实硬件回归（UART/TCP 模式矩阵各 32/32、UART 重连 ×10）；B9 文档 | ✅ 完成（2026-08-18；
+真实硬件 UART+TCP；host 394,892 checks / 0 failures；详见 AV 章） |
 | M6(未来) | 真实 LCD (DEVICE/MIRROR)、触摸（INPUT_TOUCH）、TinyUSB | 未开始（运行时 DisplayMode 已于 M7-C3 实现，SET_MODE 0..3） |
 
 注：表中各里程碑的 host checks 数字为该里程碑完成时的快照；当前最新全量基线见 AR.8（393,661 + 211 checks / 0 failures）。
@@ -4568,3 +4586,159 @@ AS.2 债务清单 D1–D15 全部闭环，修复映射与验证证据如下。
 - 真实凭据未进入 Git：git grep / tracked files / git diff / git diff --cached /
   security_scan 全 clean；测试 profile 仍被 gitignore。
 - 生产 profile 已恢复仓库默认；工作树干净；wire format 零改动。
+
+## AV. M8-B Display UX / Dynamic Display State / Routing Hardening（2026-08-18 冻结；wire format 零改动）
+
+### AV.1 目标与范围
+
+- 把 ESPView 从「功能已经存在」提升到「多显示模式真正可用、可恢复、可观察、可调整、
+  可扩展」：Qt 自由 resize/fullscreen、动态分辨率进入 UI 状态、四种 DisplayMode 任意
+  方向可切换且失败可恢复、Split Drawer / Physical Preview 状态一致、断线重连不污染
+  显示状态。
+- 章节：B1 Qt Layout/Resize、B2 Dynamic Resolution、B3 Display Switch State Machine、
+  B4 VirtualOnly/PhysicalOnly/Mirror/Split、B5 Split Drawer / Physical Preview、
+  B6 Session/Reconnect/Rollback、B7 Host tests、B8 Hardware regression、B9 文档。
+- 红线：wire format 零改动（CRC/CHUNKED/MAX_PACKET_PAYLOAD=4096/MAX_MESSAGE_PAYLOAD=1MiB
+  全部不变）；ESP32 RemoteDisplay 不创建第二个整屏 framebuffer；QImage 仅按分辨率
+  变化重建。
+
+### AV.2 B1 Qt Layout / Resize（实现语义）
+
+- 窗口可自由 resize / maximize / fullscreen / restore；逻辑分辨率（320x240 默认）
+  不因窗口大小改变。
+- VirtualScreenWidget 按逻辑分辨率等比绘制（letterbox）：显示区域非 4:3 时上下/左右
+  留黑边，不拉伸；letterbox 黑边内的鼠标事件不上送（input_controller 边界映射）。
+- 单一几何来源：display::kVirtualDisplayGeometry（320x240）与
+  oled::kDefaultOledGeometry（128x64）定义在 display_geometry.h / oled_geometry.h，
+  ESP32 生产代码（PhysicalDisplaySink producer caps）不再散落 320x240 字面量。
+- LogicalScene 纯模型（shared/display/logical_scene.h）：应用/诊断场景的布局与绘制
+  与 Qt/OLED 解耦，host 可测（logical_scene_test）。
+
+### AV.3 B2 Dynamic Resolution（三态模型）
+
+- DisplayUiState 分辨率三态：
+  - reported：对端 HELLO/CAPABILITIES 报告的源分辨率（尚未提交帧）；
+  - applied：设备侧已应用（由能力/会话确认）；
+  - rendered：最近一次 FULL 帧提交的实际分辨率（画面真实状态）。
+- reported 变化且已有 rendered 基准 → resolutionChangedPending=true；UI 显示
+  「Resolution: WxH / Frame: waiting for FULL」，禁止把「收到 metadata」当
+  「画面已更新」。FULL 提交（onFrameResolution）→ rendered 更新 + 清 pending。
+- PhysicalRenderer 源几何从 DisplayCapabilities / 当前源分辨率取（crop/scale/
+  threshold），OLED 目标能力（128x64 mono）不变。
+- Qt 窗口标题 / 状态面板 / Split Drawer metadata / 鼠标坐标映射随 rendered 分辨率
+  更新（offscreen 布局测试 virtual_screen_offscreen_test）。
+
+### AV.4 B3 Display Switch State Machine
+
+- selectedMode / appliedMode / requestedMode 分离：用户选择 ≠ 设备已确认。
+  ACK ok → appliedMode = 本次实际发送的模式 + fullResyncPending=true；ACK fail →
+  选择回退 appliedMode、保留错误文本、恢复 Apply。
+- Apply 防重复：switchingInProgress=true 期间 applyEnabled=false（applyRequested
+  拒绝）；断开时允许改选择，Apply 进入「Waiting for connection」标记，不假装成功。
+- 两阶段看门狗（替代单一 30s）：SET_MODE 发出后 ACK 超时 10s → Failed；
+  ACK ok 但 FULL 未到 → FULL 超时 15s（onFullTimeout 幂等）→ 状态明确、恢复 Apply，
+  可重试；不改变 appliedMode（设备确实已应用）、不清空 capability/会话。
+- 失败强制恢复能力（最高优先级）：任何 PhysicalOnly/Mirror/Split 切换失败后，
+  Apply VirtualOnly 必须可用（host 测试覆盖 Mirror failure → VirtualOnly success、
+  Split failure → VirtualOnly success、Physical failure → VirtualOnly success）。
+- PhysicalOnly 收敛不依赖 FULL resync（virtual sink 已禁用、ESP32 不再发 Application
+  帧；capability 门控由 onPhysicalAvailable 保证）；其余模式 ACK 后等待新 FULL。
+
+### AV.5 B4 四种 DisplayMode 与能力门控
+
+- VirtualOnly：Application → Virtual；OLED = Diagnostics；PC 显示 Application 帧；
+  始终可回退的目标。
+- PhysicalOnly：Application → Physical；PC 不应继续显示 stale Application 帧；
+  OLED 显示 Application scene（非旧 Diagnostics）；物理不可用 → PhysicalUnavailable，
+  绝不假装成功。
+- Mirror：Application → Virtual + Physical；Qt 与 OLED 语义一致。
+- Split：Virtual = Application、Physical = Diagnostics；Split Drawer 显示物理
+  诊断/状态；绝不把 Split 错切成 Physical Application。
+- capability 门控：physicalAvailable=false → PhysicalOnly/Mirror/Split 不可选
+  （setSelectedMode 拒绝 + Unavailable），选择回退 VirtualOnly；disconnect 撤销
+  能力、reconnect 重新获得，不跨 session 保留旧 physical capability。
+
+### AV.6 B5 ACK 可靠投递 / Split Drawer / Physical Preview
+
+- B5 问题：帧流期间 ACK 系统丢失（UART 115200 每 RECT ~1.5s 持 sendMutex_），PC 侧
+  10s 看门狗超时 → 模式切换失败、失败后 VirtualOnly 也无法恢复。修复：ACK 先尽力一次
+  （acknowledge 非阻塞 tryTransmit）；失败入单槽 pendingReply，sessionLoop（200ms）
+  用阻塞 sendMessage 排空（优先级高于 pump，在 RECT 间隙抢得发送权），ACK ≤1 RECT
+  可靠上 wire；会话未连接时丢弃槽（重连后 PC 补发）。wire format 不变。
+- Split Drawer 不伪造 OLED framebuffer：显示 Physical availability / Controller /
+  Resolution / Scene / I2C state / Last update / Error count / Wi-Fi / TCP / Session /
+  Heap / Mode；有 PHYSICAL_PREVIEW 时按实际 capability 显示 preview，否则明确
+  「Preview unavailable」，不显示旧缓存假装实时。
+- PHYSICAL_PREVIEW：新 session preview state reset；旧 preview 不得显示到新 session；
+  PhysicalOnly 下 preview 不重新产生 Virtual frame；Split 下 preview 作为 Drawer
+  数据源。
+
+### AV.7 B6 Session / Reconnect / Rollback + 对端超时双因子
+
+- TCP/UART reconnect：session++、display request epoch++、capability 重置/刷新、
+  physical availability 刷新、fullResyncPending=true；HELLO → CAPABILITIES → FULL；
+  新 FULL 前 Qt 不显示 stale Application frame；当前模式 Mirror 新 session 继续
+  Mirror；物理不可用降级 VirtualOnly/Degraded 且 UI 明确提示。
+- 旧 ACK / 旧 FULL 经 sessionEpoch 识别为 stale 并丢弃（M8-A2 已冻结语义）。
+- 对端超时双因子（Problem D 修复）：单因子（对端 5s 无响应）会在 UART 115200 长流式
+  FULL（~13s）期间误杀被动存活对端（本端 PING 因 sendMutex_ 被 pump 持有而发不出）。
+  新规则：仅当「对端静默 ≥ peer_timeout_ms 且数据面（流式发送）停滞 ≥ peer_timeout_ms」
+  才判 dead；数据面排空证明 transport 健康（长流式期间对端无义务主动发言）；数据面
+  停滞时恢复 5s 判定，真实断线仍可发现。
+- 可观测性（本里程碑新增诊断）：ProtocolEndpoint::peerIdleMs() / dataPlaneIdleMs()
+  （clock_ 单调毫秒），statsLoop 的 sess2 行追加 i=<peerIdle> d=<dataPlaneIdle>，
+  供硬件回归区分「会话已断开」与「数据面停滞」。
+
+### AV.8 B7 Host Tests（Qt-independent）
+
+- 新增/扩展：display_ui_state_test（PhysicalOnly 收敛、FULL timeout 恢复、分辨率三态、
+  reconnect 恢复、rollback-to-VirtualOnly 序列）、logical_scene_test、
+  scene_renderer_test、virtual_screen_offscreen_test（640x480/960x720/1280x720/
+  1920x1080 布局几何）、endpoint_concurrency_test（ACK 可靠投递与对端超时证明）、
+  protocol_endpoint_test（双因子超时：流式活动抑制超时、>5s 对端静默保持连接、
+  流停后超时恢复）。
+- 基线：host 394,892 checks / 0 failures；verify_host / verify_qt / verify_lvgl
+  全部 PASS。
+
+### AV.9 B8 Hardware Regression（真实硬件，2026-08-18）
+
+- 硬件：ESP32-D0WDQ6 开发板 + USB-SERIAL CH340（COM4）+ I2C OLED（GPIO21/22）。
+- UART（profile uart，115200）：模式切换矩阵 32/32 PASS —— VirtualOnly/PhysicalOnly/
+  Mirror/Split 各 ×5（20 次单切）+ 回退序列 VirtualOnly→PhysicalOnly→VirtualOnly、
+  Mirror→VirtualOnly、Split→VirtualOnly、PhysicalOnly→Mirror→Split→VirtualOnly
+  （12 次）+ 最终 VirtualOnly；每切 Apply → ACK OK → FULL resync（PhysicalOnly
+  无 virtual 帧、PHYSICAL_PREVIEW 2Hz 继续）；0 CRC / 0 bad_magic / 0 seq gap。
+- TCP（profile tcp，Wi-Fi STA + LAN）：模式切换矩阵 32/32 PASS，同样零错误；
+  ESP32 STA 192.168.3.x、PC server 0.0.0.0:8765（凭据仅本地 gitignored profile）。
+- UART 断线重连 ×10 PASS（真实场景：静默期关闭串口 = GUI 消失 → 7s → 重开串口 =
+  GUI 重启 → 新会话 HELLO → FULL resync；每轮 FULL commit，hello=20 begin=20
+  rect=800 end=20，0 CRC / 0 bad_magic）。
+- 测试方法备注：握手完成后双方 packet.seq 清零（DESIGN.md 冻结），host 测试客户端
+  必须在发送对端 HELLO 后重置自身 SEQ；否则首个 SET_MODE 会被对端解码器按 seq 跳变
+  丢弃（UART 场景由 PONG 吸收、TCP 场景直接命中 SET_MODE——这是测试脚本问题，
+  真实 PC 客户端 ProtocolEndpoint 已在 completeHandshake 内 seq_.reset(0)）。
+
+### AV.10 i18n
+
+- 新字符串进 i18n catalog（EN + zh-CN）：Applying… / Waiting for FULL /
+  Physical unavailable / Mode switch failed / Recovered to VirtualOnly /
+  Resolution changed / Waiting for reconnect / Preview unavailable。
+
+### AV.11 新发现 / 遗留
+
+- AU.5 遗留（未归因）：ESP32 长 uptime 多次 TCP 重连后协议会话偶发停滞（TCP 仍
+  ESTABLISHED 但停止应答 HELLO/PONG / 或 CONNECTED 后不再产出 FULL），硬复位后恢复。
+  本次 B8 再次观察同一现象（快速连续会话后一次「HELLO 收到但 20s 无 FULL」），
+  RTS 硬复位后恢复；未改代码，与 AU.5 同源记录。
+- 真实 AP outage 仍 DEFERRED（本环境无法安全控制 AP）。
+- 测试 harness（b6_uart_reconnect2.py / b8_mode_matrix.py / b8_tcp_mode_matrix.py）
+  为本机 build/ 目录产物（gitignored），结果记录于本章；未纳入仓库 scripts/。
+
+### AV.12 结论
+
+- M8-B 完成 Gate 全项通过：Qt resize/fullscreen PASS、Dynamic resolution PASS、
+  四模式 PASS、rollback PASS、stale ACK/FULL 保护 PASS、reconnect PASS、
+  capability reset PASS、Split Drawer PASS、i18n PASS、host tests PASS、
+  Qt build PASS、LVGL build PASS、UART hardware PASS、TCP hardware PASS
+  （Wi-Fi 环境可用）、security scan PASS、docs check PASS。
+- wire format 零改动；生产默认 profile（uart）已恢复。

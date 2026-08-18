@@ -1,4 +1,4 @@
-# ESPView 测试与验证指南（M8-A7）
+# ESPView 测试与验证指南（M8-B）
 
 > 范围：host-only 测试、Qt 构建验证、ESP32 固件构建验证、真实硬件（UART / Wi-Fi / OLED）测试的入口、真实命令、通过标准与当前 baseline。内容与 `docs/DESIGN.md`（§Q 测试分层、各里程碑实测章节、AK 硬件证据矩阵）保持一致，详细设计与证据见 DESIGN.md。
 >
@@ -48,14 +48,15 @@ cmake --build build\verify_host\protocol --target espview_protocol_tests scan_tr
 ctest --test-dir build\verify_host\protocol --output-on-failure
 ```
 
-通过标准（2026-08-17，M8-A6 DESIGN AR.8 实测）：`100% tests passed out of 2`（ctest 2/2）；`espview_protocol_tests` 393,661 checks / 0 failures；`scan_transaction_test` 211 checks / 0 failures。
+通过标准（2026-08-18，M8-B DESIGN AV.8 实测）：`100% tests passed out of 2`（ctest 2/2）；`espview_protocol_tests` 394,892 checks / 0 failures；`scan_transaction_test` 211 checks / 0 failures。
 
 套件组成（均并入 `espview_protocol_tests` 单进程）：
 
 - `shared/protocol/tests`：CRC32、Packet、Encoder、Streaming Encoder、Decoder、FrameAssembler、Pipeline、FramePipeline、ProtocolEndpoint、Endpoint 并发、Capabilities、PhysicalPreview、Wi-Fi Provisioning 事务。
-- `shared/display/tests`：RemoteDisplay（writeRect bounds / RGB565 / streaming / FULL 首帧 / PARTIAL / disconnect-FULL / backpressure / flush 生命周期）、DisplayRouter、DisplayUiState、PhysicalStatus、PhysicalCapabilitySnapshot、SplitState。
+- `shared/display/tests`：RemoteDisplay（writeRect bounds / RGB565 / streaming / FULL 首帧 / PARTIAL / disconnect-FULL / backpressure / flush 生命周期）、DisplayRouter、DisplayUiState（M8-B：PhysicalOnly 收敛 / FULL 超时恢复 / 分辨率三态 / reconnect 恢复 / rollback 序列）、LogicalScene、PhysicalStatus、PhysicalCapabilitySnapshot、SplitState。
+- `shared/oled/tests`：OledFb、OledStatus、PhysicalRenderer、OledPreview（见 2.6）；M8-B 扩展 SceneRenderer（LogicalScene → 128x64 mono）。
+- `pc/src/virtual_screen_offscreen_test.cpp`（M8-B）：Qt 离屏布局（640x480/960x720/1280x720/1920x1080 letterbox 几何）。
 - `shared/transport/tests`：TransportManager、TransportSink、TransportPipeline。
-- `shared/oled/tests`：OledFb、OledStatus、PhysicalRenderer、OledPreview（见 2.6）。
 - `pc/src` 纯模型（无 Qt）：`physical_preview_state_test`、`wifi_wizard_state_test`。
 - `shared/wifi/tests`：`scan_transaction_test`（独立可执行，单独注册 ctest）。
 

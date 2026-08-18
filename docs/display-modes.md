@@ -1,6 +1,6 @@
 # 显示模式（Display Modes）
 
-> M7-C1 冻结四模式路由，M7-C3 冻结 PC 侧 UI 语义。数值 0..3 是 wire 上的 SET_MODE
+> M7-C1 冻结四模式路由，M7-C3 冻结 PC 侧 UI 语义，M8-B B3 硬化切换状态机。数值 0..3 是 wire 上的 SET_MODE
 > payload（`kWindow=0` / `kDevice=1` / `kMirror=2` / `kSplit=3`，协议常量名沿用历史）。
 > 用户可见文案只显示模式名，绝不显示 0/1/2/3。
 
@@ -24,9 +24,11 @@
 - 当前现成构建 profile `uart_hw` 使用 `ESPVIEW_DEFAULT_MODE=2`（Mirror），
   OLED、LVGL、TEST hooks 全开（见 `scripts\espview_build.bat -h` 与
   `scripts\README.md` profile 说明）。
-- **运行时切换已实现**（M7-C3）：UI Apply → `SET_MODE`（ACK_REQ）→ ACK ok →
-  FULL resync pending → 新 FULL 帧 → READY。ACK fail / 30s 看门狗超时 → 回退到
-  appliedMode + 错误提示，不无限重试。
+- **运行时切换已实现**（M7-C3 + M8-B B3 硬化）：UI Apply → `SET_MODE`（ACK_REQ）→
+  ACK ok → FULL resync pending → 新 FULL 帧 → READY。两阶段看门狗：ACK 超时 10s →
+  Failed；ACK ok 但 FULL 未到 → FULL 超时 15s（幂等，恢复 Apply 可重试）；ACK fail
+  → 回退到 appliedMode + 错误提示。任何 PhysicalOnly/Mirror/Split 切换失败后
+  仍可 Apply VirtualOnly 强制恢复（M8-B 最高优先级要求，host 测试覆盖）。
 - 早期设计（DESIGN.md F 节）只实现编译期模式；M7-C 之后运行时 SET_MODE 0..3 全部
   可用（HELLO `mode_mask=0b1111`；SET_MODE 白名单 0..3）。
 

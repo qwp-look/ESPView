@@ -1,6 +1,6 @@
 # 高层架构（Architecture Overview）
 
-> 只描述**已实现**的部分（M0..M8-A7 冻结）。目录结构与设计依据：
+> 只描述**已实现**的部分（M0..M8-B 冻结）。目录结构与设计依据：
 > [docs/DESIGN.md](DESIGN.md)（E/C/D/K/L 节 + 里程碑 M 节）。
 
 ## 1. 系统图
@@ -111,6 +111,8 @@ PC（Qt VirtualScreen）
 | M7-D1..D6 | CAPABILITIES / PHYSICAL_PREVIEW / Wi-Fi provisioning 协议 / Wizard UX / Build-Flash UX / UART 真实验收 |
 | M7-E | Power-aware provisioning（OLED suspend + ScanTransaction + A/B/C harness） |
 | M7-F | 硬件证据矩阵（F1–F4）+ provisioning 生产化硬化 |
+| M8-A1..A8 | ProtocolEndpoint 并发硬化 / Transport 抽象 / Display-Input-OLED 收敛 / CI+bench / 文档+资源预算+target/profile 抽象 / Direct Wi-Fi 硬件回归 |
+| M8-B | Display UX 收尾：Qt resize/letterbox、动态分辨率三态、模式切换状态机 + 回退、ACK 可靠投递、对端超时双因子、Split Drawer / Physical Preview、硬件模式矩阵 UART+TCP 各 32/32 |
 
 逐条提交历史见 [docs/changelog.md](changelog.md)。
 

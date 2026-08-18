@@ -1,6 +1,6 @@
 # 变更日志（Changelog）
 
-> 里程碑历史提炼自 `git log`（真实提交）。当前里程碑范围 M0..M8-A7 已提交（HEAD 见 git log）。
+> 里程碑历史提炼自 `git log`（真实提交）。当前里程碑范围 M0..M8-B 已提交（HEAD 见 git log）。
 > M0..M6-E 集中在 v0.1 初始提交；M7/M8 系列逐里程碑提交。
 > （docs/ 共 19 份文档，均已随里程碑提交）。
 
@@ -66,10 +66,18 @@
   ci_collect_artifacts `--target`、verify_lvgl ESPIDF_PROFILE、examples/ 9 份、
   check_docs 新 check 11/12/13、fresh-clone target/profile 矩阵校验；
   验证见 DESIGN AS/AT 章（2026-08-18）。
+- M8-A8：Direct Wi-Fi Hardware Regression（跳过 provisioning，直接本地未跟踪 profile
+  注入 Wi-Fi/TCP 参数）：Wi-Fi STA + TCP + 协议 + LVGL/OLED/Qt 全链路验收 PASS；
+  证据见 DESIGN AU 章（2026-08-18）。
+- M8-B：FINAL DISPLAY UX + DYNAMIC DISPLAY STATE + ROUTING HARDENING——Qt
+  resize/fullscreen/letterbox、动态分辨率三态、DisplayMode 状态机 + 两阶段看门狗 +
+  失败回退 VirtualOnly、ACK 可靠投递（pending 单槽）、对端超时双因子、Split Drawer /
+  Physical Preview 一致、i18n；真实硬件 UART/TCP 模式矩阵各 32/32 + UART 重连 ×10
+  全 PASS；证据见 DESIGN AV 章（2026-08-18）。
 
 ## 版本策略说明
 
 - 协议版本 `VERSION=0x01` 冻结：M7 系列全部为 wire additive（新增 TYPE/错误码/
   kSplit=3），不改 Packet Header / CRC / 既有消息 / Frame 语义。
-- host 测试规模随里程碑增长：M0 207,900 checks → M8-A6 393,661 checks
+- host 测试规模随里程碑增长：M0 207,900 checks → M8-B 394,892 checks
   （不含 i18n/transport_config 独立套件；实测数字见 DESIGN.md 对应章节）。
