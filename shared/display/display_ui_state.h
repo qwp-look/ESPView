@@ -62,6 +62,12 @@ inline bool modeRequiresPhysical(DisplayRouteMode m) {
            m == DisplayRouteMode::kSplit;
 }
 
+// M8-B（B3）：该模式是否需要 FULL resync 帧收敛。PhysicalOnly 下 virtual sink
+// 已禁用（ESP32 不再发 Application 帧），收敛不依赖 FULL（capability 门控由
+// onPhysicalAvailable 保证）；其余模式在 ACK 后等待新 FULL 帧。
+inline bool modeExpectsFullResync(DisplayRouteMode m) {
+    return m != DisplayRouteMode::kPhysicalOnly;
+}
 // M7-C3 — Display Mode UI 状态模型（GUI 线程独占；纯值对象 + 转移方法）。
 class DisplayUiState {
 public:
@@ -82,6 +88,18 @@ public:
     bool pendingInterruptedApply = false;// 在飞 Apply 被断线打断 → 重连后补发（P1-1）
     std::string lastError;            // 最近一次错误（空 = 无错误）
 
+    // ---- M8-B（B2）：分辨率三态（reported / applied / rendered）----
+    // reported：对端 HELLO/CAPABILITIES 报告的源分辨率（尚未提交帧）；
+    // rendered：最近一次 FULL 帧提交的实际分辨率（画面真实状态）；
+    // resolutionChangedPending：已有 rendered 基准且 reported 变化、尚无新
+    //   FULL commit（"收到 metadata ≠ 画面已更新"，UI 据此显示 waiting FULL）。
+    uint16_t reportedWidth = 0;
+    uint16_t reportedHeight = 0;
+    uint8_t reportedPixelFormat = 0;
+    uint16_t renderedWidth = 0;
+    uint16_t renderedHeight = 0;
+    uint8_t renderedPixelFormat = 0;
+    bool resolutionChangedPending = false;
     // ---- 转移方法 ----
     // 选择模式（0..3；capability 不足时拒绝并保留 lastError）。断开/切换中均可改。
     bool setSelectedMode(DisplayRouteMode mode);
@@ -105,6 +123,16 @@ public:
     void onPhysicalDegraded(bool degraded);
     void clearError() { lastError.clear(); }
 
+    // ---- M8-B（B2/B3）：分辨率与 FULL 超时 ----
+    // 对端报告分辨率（HELLO/CAPABILITIES/stats 层；校验 1..4096）。
+    // reported 变化且已有 rendered 基准 → resolutionChangedPending=true。
+    void onResolutionReported(uint16_t w, uint16_t h, uint8_t fmt);
+    // FULL 帧提交的实际分辨率（rendered 更新 + 清 pending）。
+    void onFrameResolution(uint16_t w, uint16_t h, uint8_t fmt);
+    // FULL 等待超时（ACK 已 ok、模式已应用但新 FULL 未到达）：状态明确、
+    // 恢复 Apply（可重试），不改变 appliedMode（设备确实已应用）、不清空
+    // capability / 会话。仅 fullResyncPending 时生效（幂等）。
+    void onFullTimeout();
 private:
     // 按 appliedMode + 会话 + capability + 降级收敛路由状态（不含切换）。
     UiRouterState convergedState() const;

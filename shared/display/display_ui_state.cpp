@@ -59,11 +59,15 @@ void DisplayUiState::onAck(bool ok) {
     pendingInterruptedApply = false;
     switchingInProgress = false;
     applyEnabled = true;
-    fullResyncPending = ok;  // ACK ok 后设备已应用 → 等 FULL resync 帧
     if (ok) {
         appliedMode = pendingApplyMode_;
+        // M8-B（B3）：PhysicalOnly 下 virtual 侧已禁用（ESP32 不再发 Application
+        // 帧），收敛不依赖 FULL；其余模式 ACK 后等待新 FULL resync 帧。
+        fullResyncPending = modeExpectsFullResync(appliedMode);
         lastError.clear();
     } else {
+        // M8-B（B3）：ACK 失败 → 无 resync 等待（回退选择到已应用模式）。
+        fullResyncPending = false;
         // 设备拒绝：回退选择到已应用模式，保留错误。
         selectedMode = appliedMode;
         lastError = "SET_MODE failed (ACK ERR)";
@@ -76,7 +80,9 @@ void DisplayUiState::onConnected() {
     pendingInterruptedApply = false;
     sessionConnected = true;
     waitingForConnection = false;
-    fullResyncPending = true;   // 新会话必须 FULL resync
+    // M8-B（B3）：新会话必须 FULL resync——但 PhysicalOnly 无 virtual 帧流，
+    // 按已应用模式判定（重连补发后 onAck 会重新设置）。
+    fullResyncPending = modeExpectsFullResync(appliedMode);
     switchingInProgress = false;
     applyEnabled = true;
     lastError.clear();
@@ -167,6 +173,37 @@ void DisplayUiState::refreshActive() {
             physicalActive = false;
             break;
     }
+}
+
+void DisplayUiState::onResolutionReported(uint16_t w, uint16_t h, uint8_t fmt) {
+    if (w == 0 || h == 0 || w > 4096 || h > 4096) {
+        return;  // 非法几何：忽略（防御）
+    }
+    reportedWidth = w;
+    reportedHeight = h;
+    reportedPixelFormat = fmt;
+    // 已有 rendered 基准且发生变化 → 等待新 FULL（收到 metadata ≠ 画面已更新）。
+    resolutionChangedPending =
+        renderedWidth != 0 && (renderedWidth != w || renderedHeight != h);
+}
+
+void DisplayUiState::onFrameResolution(uint16_t w, uint16_t h, uint8_t fmt) {
+    renderedWidth = w;
+    renderedHeight = h;
+    renderedPixelFormat = fmt;
+    resolutionChangedPending = false;
+}
+
+void DisplayUiState::onFullTimeout() {
+    if (!fullResyncPending) {
+        return;  // 已收敛 / 已处理：幂等
+    }
+    fullResyncPending = false;
+    switchingInProgress = false;
+    applyEnabled = true;  // 允许重试（失败必须可恢复）
+    lastError = "FULL resync timeout (mode applied, frame pending)";
+    routerState = convergedState();
+    refreshActive();
 }
 
 }  // namespace display

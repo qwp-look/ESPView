@@ -248,19 +248,21 @@ void testFullResyncPending() {
     CHECK(!s.fullResyncPending);
     CHECK_EQ(static_cast<int>(s.routerState), static_cast<int>(UiRouterState::kConnected));
 
-    // 切换成功 → 再次 pending。
+    // 切换成功：M8-B（B3）PhysicalOnly 收敛不依赖 FULL（virtual 侧已禁用，
+    // ESP32 不再发 Application 帧）→ ACK 后直接收敛。
     CHECK(s.setSelectedMode(DisplayRouteMode::kPhysicalOnly));
     CHECK(s.applyRequested());
     s.onAck(true);
-    CHECK(s.fullResyncPending);
-    s.onFullCommit();
+    CHECK(!s.fullResyncPending);
+    s.onFullCommit();  // 防御：PhysicalOnly 下收到 FULL 也应保持收敛
     CHECK(!s.fullResyncPending);
 
-    // 断开 → 清除 pending；重连 → 重新挂起。
+    // 断开 → 清除 pending；重连：appliedMode=PhysicalOnly → M8-B（B3）
+    // 无 FULL 依赖（重连补发后 onAck 按模式重新判定）。
     s.onDisconnected();
     CHECK(!s.fullResyncPending);
     s.onConnected();
-    CHECK(s.fullResyncPending);
+    CHECK(!s.fullResyncPending);
 }
 
 // §二十二-10：apply disabled during switching（防重复）。
@@ -515,6 +517,144 @@ void testEnumAlignment() {
     CHECK(!s.lastError.empty());
 }
 
+// ============ M8-B（B2/B3/B6）：分辨率三态 / PhysicalOnly 收敛 / FULL 超时 / 重连恢复 ============
+
+// M8-B B3：PhysicalOnly ACK ok 后不依赖 FULL（virtual 侧已禁用，ESP32 不再发
+// Application 帧）→ fullResyncPending=false，直接收敛。
+void testPhysicalOnlyNoFullResync() {
+    DisplayUiState s;
+    s.onPhysicalAvailable(true);
+    s.onConnected();
+    CHECK(s.setSelectedMode(DisplayRouteMode::kPhysicalOnly));
+    CHECK(s.applyRequested());
+    s.onAck(true);
+    CHECK(!s.fullResyncPending);  // M8-B：PhysicalOnly 收敛不依赖 FULL
+    CHECK_EQ(static_cast<int>(s.routerState), static_cast<int>(UiRouterState::kConnected));
+    CHECK(!s.virtualActive);
+    CHECK(s.physicalActive);
+    CHECK_EQ(static_cast<int>(s.appliedMode), static_cast<int>(DisplayRouteMode::kPhysicalOnly));
+}
+
+// M8-B B3：Mirror ACK ok 后 fullResyncPending=true（等新 FULL），FULL commit 后收敛。
+void testMirrorFullResyncPending() {
+    DisplayUiState s;
+    s.onPhysicalAvailable(true);
+    s.onConnected();
+    CHECK(s.setSelectedMode(DisplayRouteMode::kMirror));
+    CHECK(s.applyRequested());
+    s.onAck(true);
+    CHECK(s.fullResyncPending);  // Mirror 期望 FULL resync
+    CHECK_EQ(static_cast<int>(s.routerState), static_cast<int>(UiRouterState::kConnected));
+    s.onFullCommit();
+    CHECK(!s.fullResyncPending);
+}
+
+// M8-B B3：FULL 超时 → 状态明确 + 恢复 Apply（可重试回 VirtualOnly，非死模式）。
+void testFullTimeoutRecovers() {
+    DisplayUiState s;
+    s.onPhysicalAvailable(true);
+    s.onConnected();
+    CHECK(s.setSelectedMode(DisplayRouteMode::kMirror));
+    CHECK(s.applyRequested());
+    s.onAck(true);  // applied=Mirror, fullResyncPending=true
+    CHECK(s.fullResyncPending);
+    CHECK(s.applyEnabled);
+    s.onFullTimeout();
+    CHECK(!s.fullResyncPending);
+    CHECK(s.applyEnabled);
+    CHECK(!s.lastError.empty());
+    CHECK_EQ(static_cast<int>(s.appliedMode), static_cast<int>(DisplayRouteMode::kMirror));
+    // 失败后必须可恢复：Apply VirtualOnly 成功。
+    CHECK(s.setSelectedMode(DisplayRouteMode::kVirtualOnly));
+    CHECK(s.applyRequested());
+    s.onAck(true);
+    s.onFullCommit();
+    CHECK_EQ(static_cast<int>(s.appliedMode), static_cast<int>(DisplayRouteMode::kVirtualOnly));
+    CHECK_EQ(static_cast<int>(s.routerState), static_cast<int>(UiRouterState::kConnected));
+    CHECK(s.lastError.empty());
+    // 幂等：已收敛后 onFullTimeout 无副作用。
+    s.onFullTimeout();
+    CHECK_EQ(static_cast<int>(s.appliedMode), static_cast<int>(DisplayRouteMode::kVirtualOnly));
+}
+
+// M8-B B2：分辨率三态（reported / rendered + resolutionChangedPending）。
+void testResolutionThreeStates() {
+    DisplayUiState s;
+    s.onConnected();
+    s.onResolutionReported(320, 240, 0);
+    CHECK_EQ(static_cast<int>(s.reportedWidth), 320);
+    CHECK_EQ(static_cast<int>(s.reportedHeight), 240);
+    CHECK(!s.resolutionChangedPending);  // 无 rendered 基准
+    s.onFrameResolution(320, 240, 0);
+    CHECK_EQ(static_cast<int>(s.renderedWidth), 320);
+    CHECK(!s.resolutionChangedPending);
+    // reported 变化、尚未 FULL commit → pending（收到 metadata ≠ 画面已更新）。
+    s.onResolutionReported(240, 320, 0);
+    CHECK_EQ(static_cast<int>(s.reportedWidth), 240);
+    CHECK(s.resolutionChangedPending);
+    s.onFrameResolution(240, 320, 0);
+    CHECK_EQ(static_cast<int>(s.renderedHeight), 320);
+    CHECK(!s.resolutionChangedPending);
+    // 非法几何忽略（0 与 >4096）。
+    s.onResolutionReported(0, 0, 0);
+    CHECK_EQ(static_cast<int>(s.reportedWidth), 240);
+    s.onResolutionReported(5000, 10, 0);
+    CHECK_EQ(static_cast<int>(s.reportedWidth), 240);
+}
+
+// M8-B B6：重连后 appliedMode 保持（Mirror 继续 Mirror）+ FULL resync 恢复。
+void testReconnectRestoresPhysicalMode() {
+    DisplayUiState s;
+    s.onPhysicalAvailable(true);
+    s.onConnected();
+    CHECK(s.setSelectedMode(DisplayRouteMode::kMirror));
+    CHECK(s.applyRequested());
+    s.onAck(true);
+    s.onFullCommit();
+    CHECK_EQ(static_cast<int>(s.appliedMode), static_cast<int>(DisplayRouteMode::kMirror));
+
+    s.onDisconnected();
+    CHECK(!s.sessionConnected);
+    CHECK_EQ(static_cast<int>(s.routerState), static_cast<int>(UiRouterState::kUnavailable));
+
+    s.onConnected();  // 重连：appliedMode 保持 Mirror，期望 FULL resync
+    CHECK(s.sessionConnected);
+    CHECK_EQ(static_cast<int>(s.appliedMode), static_cast<int>(DisplayRouteMode::kMirror));
+    CHECK(s.fullResyncPending);
+    CHECK(s.applyEnabled);
+    // 补发（MainWindow 接线语义）：onSwitchStart → ACK → FULL 收敛。
+    CHECK(s.setSelectedMode(DisplayRouteMode::kMirror));
+    CHECK(s.applyRequested());
+    s.onAck(true);
+    CHECK(s.fullResyncPending);
+    s.onFullCommit();
+    CHECK_EQ(static_cast<int>(s.routerState), static_cast<int>(UiRouterState::kConnected));
+}
+
+// M8-B B3：失败注入 → 回 VirtualOnly 成功（Mirror / Split / PhysicalOnly）。
+void rollbackToVirtualOnly(DisplayRouteMode failedMode) {
+    DisplayUiState s;
+    s.onPhysicalAvailable(true);
+    s.onConnected();
+    CHECK(s.setSelectedMode(failedMode));
+    CHECK(s.applyRequested());
+    s.onAck(false);  // ACK 失败 → 回退选择到 appliedMode（VirtualOnly）
+    CHECK_EQ(static_cast<int>(s.appliedMode), static_cast<int>(DisplayRouteMode::kVirtualOnly));
+    CHECK_EQ(static_cast<int>(s.selectedMode), static_cast<int>(DisplayRouteMode::kVirtualOnly));
+    // 重新 Apply VirtualOnly 成功（失败必须可恢复）。
+    CHECK(s.applyRequested());
+    s.onAck(true);
+    s.onFullCommit();
+    CHECK_EQ(static_cast<int>(s.appliedMode), static_cast<int>(DisplayRouteMode::kVirtualOnly));
+    CHECK_EQ(static_cast<int>(s.routerState), static_cast<int>(UiRouterState::kConnected));
+    CHECK(s.lastError.empty());
+}
+void testRollbackSequences() {
+    rollbackToVirtualOnly(DisplayRouteMode::kMirror);
+    rollbackToVirtualOnly(DisplayRouteMode::kSplit);
+    rollbackToVirtualOnly(DisplayRouteMode::kPhysicalOnly);
+}
+
 }  // namespace
 
 void runDisplayUiStateTests() {
@@ -536,5 +676,12 @@ void runDisplayUiStateTests() {
     testWatchdogTimeout();        // §16-13
     testCapabilityGateAvailable();    // §16-14
     testCapabilityGateUnavailable();  // §16-15
+    // ---- M8-B（B2/B3/B6）----
+    testPhysicalOnlyNoFullResync();   // B3：PhysicalOnly 收敛不依赖 FULL
+    testMirrorFullResyncPending();    // B3：Mirror ACK 后等 FULL
+    testFullTimeoutRecovers();        // B3：FULL 超时 → 恢复 Apply
+    testResolutionThreeStates();      // B2：分辨率三态
+    testReconnectRestoresPhysicalMode();  // B6：重连恢复物理模式
+    testRollbackSequences();          // B3：失败 → VirtualOnly 恢复
     std::printf("[display_ui_state] done\n");
 }

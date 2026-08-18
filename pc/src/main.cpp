@@ -132,6 +132,10 @@ QString severityColor(int severity) {
 }
 
 // M6-D：切换耗时统计用单调时钟（与 Worker 的 steady clock 同一基）。
+// M8-B（B3）：模式切换分阶段超时 —— 短 ACK 超时 + FULL 超时（不再依赖单一 30s）。
+constexpr uint64_t kModeAckTimeoutMs = 10000;
+constexpr uint64_t kModeFullTimeoutMs = 15000;
+
 uint64_t steadyMs() {
     return static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
                                      std::chrono::steady_clock::now().time_since_epoch())
@@ -149,8 +153,7 @@ public:
     MainWindow(const TransportConfig& initialCfg, const QString& pngDumpDir,
                QWidget* parent = nullptr)
         : QMainWindow(parent), currentCfg_(initialCfg) {
-        setWindowTitle(tr_("ESPView") + QStringLiteral(" ") + tr_("Virtual Display") +
-                       QStringLiteral(" — 320x240"));
+        updateWindowTitle();  // M8-B（B2）：标题跟随当前分辨率（初始无会话 → 无后缀）
         resize(1160, 720);
         // M6-D §二十一：恢复上次窗口大小（QSettings）。
         const QSize savedSize =
@@ -216,6 +219,15 @@ public:
                 [this](bool ok) {
                     modeWatchdog_->stop();
                     modeWidget_->onAck(ok);
+                    if (ok) {
+                        // M8-B（B3）：ACK 已回 → 进入 FULL 等待阶段（PhysicalOnly
+                        // 收敛不依赖 FULL，模型已置 fullResyncPending=false）。
+                        const auto& s = modeWidget_->state();
+                        if (s.fullResyncPending) {
+                            fullWaitStartMs_ = steadyMs();
+                            modeWatchdog_->start();
+                        }
+                    }
                     syncModeStateToUi();
                     statusBar()->showMessage(
                         ok ? tr_("Success: SET_MODE") : tr_("Failure: SET_MODE"),
@@ -326,9 +338,13 @@ private slots:
         if (frame.frameType == 0) {
             auto s = modeWidget_->state();
             s.onFullCommit();
+            // M8-B（B2）：FULL commit → rendered 分辨率更新（reported/applied/
+            // rendered 三态收敛；resolutionChangedPending 清除）。
+            s.onFrameResolution(frame.width, frame.height, frame.pixelFormat);
             modeWidget_->setUiState(s);
             syncModeStateToUi();
         }
+        updateWindowTitle();  // M8-B（B2）：标题跟随 rendered/reported 分辨率
     }
 
     void onStatusChanged(quint64 sessionId, WorkerStatus status, const QString& text) {
@@ -371,9 +387,14 @@ private slots:
             // 断线期间 Apply 过（waitingForConnection）或 Apply 在飞被断线打断
             // （pendingInterruptedApply，P1-1）且选择未应用 → 自动补发一次
             // SET_MODE（单飞行 + 看门狗，失败回退选择，不重试循环）。
+            // M8-B（B6）：重连后恢复显示模式 —— 原条件（用户意图未应用）之外，
+            // appliedMode 为物理相关模式时必须补发（ESP32 可能复位到默认
+            // VirtualOnly；不补发会造成 applied=Physical 但实际 VirtualOnly
+            // 的状态污染）。
             const bool needsAutoSend =
-                (s.waitingForConnection || s.pendingInterruptedApply) &&
-                s.selectedMode != s.appliedMode;
+                ((s.waitingForConnection || s.pendingInterruptedApply) &&
+                 s.selectedMode != s.appliedMode) ||
+                s.appliedMode != espview::display::DisplayRouteMode::kVirtualOnly;
             s.onConnected();  // 新会话 → fullResyncPending
             currentSessionId_ = manager_.sessionId();  // P1-2：会话 epoch 更新
             if (needsAutoSend) {
@@ -473,6 +494,27 @@ private slots:
         if (resLabel_->text() == QStringLiteral("—") && st.peerWidth > 0 &&
             st.peerHeight > 0) {
             resLabel_->setText(QStringLiteral("%1x%2").arg(st.peerWidth).arg(st.peerHeight));
+        }
+        // M8-B（B2）：对端 HELLO 分辨率 → reported 状态。reported 变化且尚无
+        // 新 FULL commit → 显示 "XxY · waiting FULL"（收到 metadata ≠ 画面已更新）。
+        {
+            auto s = modeWidget_->state();
+            if (st.peerWidth > 0 && st.peerHeight > 0 &&
+                (s.reportedWidth != st.peerWidth || s.reportedHeight != st.peerHeight ||
+                 s.reportedPixelFormat != st.peerPixelFormat)) {
+                s.onResolutionReported(st.peerWidth, st.peerHeight, st.peerPixelFormat);
+                modeWidget_->setUiState(s);
+                syncModeStateToUi();
+            }
+            if (s.resolutionChangedPending) {
+                const QString txt = QStringLiteral("%1x%2 · %3")
+                                        .arg(s.reportedWidth)
+                                        .arg(s.reportedHeight)
+                                        .arg(tr_("Waiting for FULL"));
+                if (resLabel_->text() != txt) {
+                    resLabel_->setText(txt);
+                }
+            }
         }
         if (formatLabel_->text() == QStringLiteral("—") && st.peerPixelFormat == 0) {
             formatLabel_->setText(tr_("RGB565"));
@@ -700,17 +742,41 @@ private:
             drawer_->open();
         }
     }
+    // M8-B（B2）：窗口标题跟随当前分辨率（rendered 优先，其次 reported；
+    // 均未知时无后缀）。modeWidget_ 未创建时安全（构造早期调用）。
+    void updateWindowTitle() {
+        QString suffix;
+        if (modeWidget_ != nullptr) {
+            const auto& s = modeWidget_->state();
+            const uint16_t w = s.renderedWidth != 0 ? s.renderedWidth : s.reportedWidth;
+            const uint16_t h = s.renderedHeight != 0 ? s.renderedHeight : s.reportedHeight;
+            if (w != 0 && h != 0) {
+                suffix = QStringLiteral(" — %1x%2").arg(w).arg(h);
+            }
+        }
+        setWindowTitle(tr_("ESPView") + QStringLiteral(" ") + tr_("Virtual Display") + suffix);
+    }
     void onModeWatchdog() {
-        if (!modeWidget_->state().switchingInProgress) {
+        auto s = modeWidget_->state();
+        if (!s.switchingInProgress && !s.fullResyncPending) {
             modeWatchdog_->stop();
             return;
         }
-        if (steadyMs() - modeSwitchStartMs_ >= 30000) {
+        const uint64_t now = steadyMs();
+        // M8-B（B3）：分阶段超时 —— 短 ACK 超时 + FULL 超时。
+        if (s.switchingInProgress && now - modeSwitchStartMs_ >= kModeAckTimeoutMs) {
             modeWatchdog_->stop();
-            modeWidget_->onAck(false);  // 超时 → 回退选择 + 错误（不无限等待）
+            modeWidget_->onAck(false);  // ACK 超时 → 回退选择 + 错误（不无限等待）
             syncModeStateToUi();
-            statusBar()->showMessage(
-                tr_("Failure: SET_MODE timeout"), 5000);
+            statusBar()->showMessage(tr_("Failure: SET_MODE timeout"), 5000);
+            return;
+        }
+        if (s.fullResyncPending && now - fullWaitStartMs_ >= kModeFullTimeoutMs) {
+            modeWatchdog_->stop();
+            s.onFullTimeout();  // 模式已应用但 FULL 未到 → 状态明确 + 恢复 Apply
+            modeWidget_->setUiState(s);
+            syncModeStateToUi();
+            statusBar()->showMessage(tr_("Failure: FULL resync timeout"), 5000);
         }
     }
     void onLanguageChanged(int lang) {
@@ -719,8 +785,7 @@ private:
         settings_.setValue(QStringLiteral("ui/language"), lang);
     }
     void retranslateUi() {
-        setWindowTitle(tr_("ESPView") + QStringLiteral(" ") + tr_("Virtual Display") +
-                       QStringLiteral(" — 320x240"));
+        updateWindowTitle();  // M8-B（B2）：语言切换时重刷标题（保留分辨率后缀）
         for (const auto& entry : retranslateLabels_) {
             if (entry.first != nullptr && entry.second != nullptr) {
                 entry.first->setText(tr_(entry.second));
@@ -1228,6 +1293,7 @@ private:
     espview::display::PhysicalCapabilitySnapshot physCap_;  // M7-C4：能力/健康收敛点
     uint64_t currentSessionId_ = 0;  // P1-2：当前传输会话 epoch（0 = 无会话）
     uint64_t modeSwitchStartMs_ = 0;
+    uint64_t fullWaitStartMs_ = 0;  // M8-B：FULL 等待起点（ACK ok 后）
     std::vector<std::pair<QLabel*, const char*>> retranslateLabels_;  // i18n 重刷
     QLabel* uartPortTitle_ = nullptr;
     QLabel* uartBaudTitle_ = nullptr;
