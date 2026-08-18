@@ -104,12 +104,18 @@ public:
     // Semantic text write (truncated to capacity-1, NUL guaranteed;
     // nullptr treated as empty string).
     static void setText(SceneElement& e, const char* s) {
+        // Manual clipped copy: no strncpy (GCC16 inline -Warray-bounds /
+        // -Wstringop-truncation false positives), NUL always guaranteed.
+        e.text.fill('\0');
         if (s == nullptr) {
-            e.text[0] = '\0';
             return;
         }
-        std::strncpy(e.text.data(), s, kSceneTextCapacity - 1);
-        e.text[kSceneTextCapacity - 1] = '\0';
+        size_t i = 0;
+        while (i + 1 < e.text.size() && s[i] != '\0') {
+            e.text[i] = s[i];
+            ++i;
+        }
+        e.text[i] = '\0';
     }
 
     // Find by stable id (nullptr when absent).

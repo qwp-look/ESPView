@@ -41,6 +41,7 @@ add_executable(espview_protocol_tests
     ../../oled/tests/oled_test.cpp
     ../../oled/tests/oled_status_test.cpp
     ../../oled/tests/physical_renderer_test.cpp
+    ../../oled/tests/scene_renderer_test.cpp
     ../../oled/tests/oled_preview_test.cpp
     ../../../pc/src/physical_preview_state.cpp
     ../../../pc/src/physical_preview_state_test.cpp

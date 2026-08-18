@@ -11,9 +11,13 @@ add_library(espview_oled STATIC
     oled_status.cpp
     oled_recovery.cpp
     physical_renderer.cpp
+    scene_renderer.cpp
     oled_preview.cpp
 )
-target_include_directories(espview_oled PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
+target_include_directories(espview_oled PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR}
+    ${CMAKE_CURRENT_SOURCE_DIR}/../display  # M8-B B2: SceneRenderer 依赖 display::LogicalScene
+)
 target_compile_features(espview_oled PUBLIC cxx_std_17)
 
 if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")

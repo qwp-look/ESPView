@@ -44,6 +44,7 @@ void runReconnectPolicyTests();
 void runOledTests();
 void runOledStatusTests();
 void runPhysicalRendererTests();
+void runSceneRendererTests();
 void runPhysicalPreviewStateTests();
 void runWifiWizardStateTests();
 
@@ -131,6 +132,8 @@ int main() {
     runOledStatusTests();
     std::printf("[physical_renderer]\n");
     runPhysicalRendererTests();
+    std::printf("[scene_renderer]\n");
+    runSceneRendererTests();
     std::printf("[physical_preview_state]\n");
     runPhysicalPreviewStateTests();
     std::printf("[wifi_wizard_state]\n");
