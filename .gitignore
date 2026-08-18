@@ -19,7 +19,8 @@ esp32/managed_components/
 esp32/sdkconfig
 esp32/sdkconfig.*
 !esp32/sdkconfig.defaults
-!esp32/sdkconfig.defaults.*
+!esp32/sdkconfig.defaults.esp32
+!esp32/sdkconfig.defaults.esp32s3
 
 # Python bytecode
 __pycache__/
