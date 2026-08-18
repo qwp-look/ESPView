@@ -32,6 +32,7 @@ using espview::display::DisplayRouter;
 using espview::display::DisplaySinkKind;
 using espview::display::DisplayStatus;
 using espview::display::IDisplaySink;
+using espview::display::LogicalScene;
 using espview::display::PhysicalScene;
 using espview::display::Rect;
 using espview::display::RouterState;
@@ -74,6 +75,12 @@ public:
         lastStatus_ = DisplayStatus::kOk;
         return DisplayStatus::kOk;
     }
+    // M8-B B2：记录语义场景投递（默认接受；sceneResult_ 可注入失败）。
+    DisplayStatus presentScene(const LogicalScene& scene) override {
+        ++scenePresents;
+        lastScene_ = scene;
+        return sceneResult_;
+    }
     DisplayStatus setEnabled(bool enabled) override {
         enabled_ = enabled;
         if (log_) {
@@ -91,6 +98,9 @@ public:
     DisplayCapabilities initCaps_;
     std::vector<std::pair<Rect, uint8_t>> presents_;
     int flushCalls = 0;
+    int scenePresents = 0;          // M8-B B2：presentScene(LogicalScene) 次数
+    LogicalScene lastScene_;        // M8-B B2：最近一次场景投递内容
+    DisplayStatus sceneResult_ = DisplayStatus::kOk;
     bool enabled_ = false;
 
 private:
@@ -794,6 +804,62 @@ void testC2SceneSwitch() {
 }
 }  // namespace
 
+// ---- M8-B B2：语义场景投递（LogicalScene → Physical sink）----
+void testSceneRoutingPhysicalOnly() {
+    Harness h;
+    LogicalScene scene;
+    scene.logicalWidth = 320;
+    scene.logicalHeight = 240;
+    CHECK_EQ(static_cast<int>(h.router.setMode(DisplayRouteMode::kPhysicalOnly)),
+             static_cast<int>(DisplayStatus::kOk));
+    CHECK_EQ(static_cast<int>(h.router.presentScene(scene)),
+             static_cast<int>(DisplayStatus::kOk));
+    CHECK_EQ(h.phys->scenePresents, 1);
+    CHECK_EQ(h.virt->scenePresents, 0);  // Virtual 不消费场景
+    if (h.phys->scenePresents == 1) {
+        CHECK_EQ(static_cast<int>(h.phys->lastScene_.logicalWidth), 320);
+        CHECK_EQ(static_cast<int>(h.phys->lastScene_.logicalHeight), 240);
+    }
+}
+
+void testSceneRoutingMirror() {
+    Harness h;
+    LogicalScene scene;
+    CHECK_EQ(static_cast<int>(h.router.setMode(DisplayRouteMode::kMirror)),
+             static_cast<int>(DisplayStatus::kOk));
+    CHECK_EQ(static_cast<int>(h.router.presentScene(scene)),
+             static_cast<int>(DisplayStatus::kOk));
+    CHECK_EQ(h.phys->scenePresents, 1);
+    CHECK_EQ(h.virt->scenePresents, 0);
+}
+
+void testSceneRoutingDiagnosticsNoop() {
+    Harness h;
+    LogicalScene scene;
+    // VirtualOnly / Split：物理侧 Diagnostics（OLED 任务自绘）→ 场景投递 no-op kOk。
+    CHECK_EQ(static_cast<int>(h.router.setMode(DisplayRouteMode::kVirtualOnly)),
+             static_cast<int>(DisplayStatus::kOk));
+    CHECK_EQ(static_cast<int>(h.router.presentScene(scene)),
+             static_cast<int>(DisplayStatus::kOk));
+    CHECK_EQ(h.phys->scenePresents, 0);
+    CHECK_EQ(static_cast<int>(h.router.setMode(DisplayRouteMode::kSplit)),
+             static_cast<int>(DisplayStatus::kOk));
+    CHECK_EQ(static_cast<int>(h.router.presentScene(scene)),
+             static_cast<int>(DisplayStatus::kOk));
+    CHECK_EQ(h.phys->scenePresents, 0);
+}
+
+void testSceneRoutingPhysicalUnavailable() {
+    Harness h;
+    LogicalScene scene;
+    h.phys->setAvailable(false);
+    CHECK_EQ(static_cast<int>(h.router.setMode(DisplayRouteMode::kMirror)),
+             static_cast<int>(DisplayStatus::kOk));
+    CHECK_EQ(static_cast<int>(h.router.presentScene(scene)),
+             static_cast<int>(DisplayStatus::kNotConnected));
+    CHECK_EQ(h.phys->scenePresents, 0);
+}
+
 void runDisplayRouterTests() {
     std::printf("[display_router] tests\n");
     testVirtualOnly();
@@ -818,5 +884,10 @@ void runDisplayRouterTests() {
     testC2PhysicalFailureDoesNotBlockVirtual();
     testC2PhysicalEnableDisable();
     testC2SceneSwitch();
+    // M8-B B2 追加：语义场景投递
+    testSceneRoutingPhysicalOnly();
+    testSceneRoutingMirror();
+    testSceneRoutingDiagnosticsNoop();
+    testSceneRoutingPhysicalUnavailable();
     std::printf("[display_router] done\n");
 }

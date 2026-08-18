@@ -291,6 +291,14 @@ void LvglPort::flushCb(lv_disp_drv_t* drv, const lv_area_t* area, lv_color_t* co
         }
     }
 
+    // M8-B B2：语义场景投递（与帧成败解耦 —— 背压丢帧不阻塞 OLED 状态更新；
+    // 场景只在状态变化时重建，事件驱动，非每帧）。VirtualOnly/Split 由 Router
+    // 判定物理侧 Diagnostics → no-op；PhysicalOnly/Mirror → SceneRenderer 渲染。
+    if (lv_disp_flush_is_last(drv) && self->router_ && self->demo_ != nullptr &&
+        self->demo_->takeScene()) {
+        self->router_->presentScene(self->demo_->scene());
+    }
+
     // 4) 无论成功/背压/丢弃：必须调用 flush_ready（否则 LVGL 永久停在当前 cycle）。
     lv_disp_flush_ready(drv);
     self->flushCbExitMs_.store(self->nowMs());  // M6-D 诊断：flush_cb 返回时刻

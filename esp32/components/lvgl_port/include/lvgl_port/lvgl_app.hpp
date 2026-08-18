@@ -25,6 +25,7 @@
 
 #include "lvgl.h"
 
+#include "logical_scene.h"  // M8-B B2：共享 LogicalScene（语义镜像）
 #include "lvgl_adapter.h"
 
 namespace espview {
@@ -34,6 +35,13 @@ public:
     explicit LvglDemoApp(input::LvglInputAdapter* inputAdapter);
     void create();  // LVGL 初始化后、UI 任务启动前调用一次
     lv_group_t* group() const { return group_; }
+
+    // ---- M8-B B2：语义场景镜像（Physical OLED 消费；Virtual 侧 = LVGL 自身）----
+    // 场景只在状态变化时重建（事件驱动）；LvglPort 在 flush 帧边界消费。
+    const display::LogicalScene& scene() const { return scene_; }
+    // 消费脏标记：返回 true 时重建 scene_（反映最新 widget 状态）并清除标记。
+    // 同一 LVGL 任务调用（无跨线程竞争）。
+    bool takeScene();
 
 private:
     static void timerCb(lv_timer_t* timer);
@@ -45,6 +53,8 @@ private:
     void setCounter(int32_t delta);
     void setKeyLabel(uint32_t lvglKey);
     void updateMouseLabel();
+    void buildScene();  // M8-B B2：从当前 widget 状态重建 LogicalScene
+    void markSceneDirty() { sceneDirty_ = true; }  // M8-B B2：状态变化置脏
 
     input::LvglInputAdapter* input_ = nullptr;
     lv_obj_t* btnA_ = nullptr;
@@ -59,6 +69,8 @@ private:
     bool bState_ = false;
     int16_t lastMouseX_ = -1;  // -1 = 尚未显示
     int16_t lastMouseY_ = -1;
+    display::LogicalScene scene_;  // M8-B B2：语义场景镜像
+    bool sceneDirty_ = true;       // M8-B B2：初始画面需要首帧推送
 };
 
 }  // namespace espview

@@ -180,6 +180,26 @@ DisplayStatus DisplayRouter::presentScene(PhysicalScene scene, const Rect& rect,
     return s;
 }
 
+DisplayStatus DisplayRouter::presentScene(const LogicalScene& scene) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    // 物理侧应用场景仅在 PhysicalOnly / Mirror（OLED 显示 Application）；
+    // VirtualOnly / Split 物理侧为 Diagnostics（OLED 任务 renderStatus 自绘），
+    // 场景投递为空操作（不改变状态，返回 kOk 以免调用方重试/告警）。
+    const bool physicalGetsApp =
+        mode_ == DisplayRouteMode::kPhysicalOnly ||
+        mode_ == DisplayRouteMode::kMirror;
+    if (!physicalGetsApp) {
+        return DisplayStatus::kOk;
+    }
+    if (!physical_ || !physical_->isAvailable()) {
+        reconcileStateLocked();
+        return DisplayStatus::kNotConnected;
+    }
+    const DisplayStatus s = physical_->presentScene(scene);
+    reconcileStateLocked();
+    return s;
+}
+
 void DisplayRouter::refreshState() {
     std::lock_guard<std::mutex> lock(mutex_);
     reconcileStateLocked();

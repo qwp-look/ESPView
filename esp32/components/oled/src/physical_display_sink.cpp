@@ -29,8 +29,6 @@ display::DisplayStatus PhysicalDisplaySink::init(
     if (caps.width <= 0 || caps.height <= 0) {
         return display::DisplayStatus::kInvalidParam;
     }
-    srcW_ = caps.width;
-    srcH_ = caps.height;
     caps_.width = OledFb::kWidth;    // 128
     caps_.height = OledFb::kHeight;  // 64
     caps_.format = proto::PixelFormat::kRgb565;
@@ -43,6 +41,24 @@ display::DisplayStatus PhysicalDisplaySink::init(
 
 display::DisplayStatus PhysicalDisplaySink::present(const display::Rect& rect,
                                                     const uint8_t* pixels) {
+    // M8-B B2：RGB565 缩略渲染已废除 —— 物理应用内容只经
+    // presentScene(LogicalScene)（SceneRenderer 语义渲染）。本方法保持
+    // IDisplaySink 契约（Router 在 PhysicalOnly/Mirror 仍会扇出像素帧），
+    // 像素帧不再进入 OLED 应用 fb（no-op）。
+    (void)rect;
+    (void)pixels;
+    if (!enabled_.load(std::memory_order_relaxed)) {
+        lastStatus_.store(static_cast<int32_t>(display::DisplayStatus::kNotEnabled),
+                          std::memory_order_relaxed);
+        return display::DisplayStatus::kNotEnabled;
+    }
+    lastStatus_.store(static_cast<int32_t>(display::DisplayStatus::kOk),
+                      std::memory_order_relaxed);
+    return display::DisplayStatus::kOk;
+}
+
+display::DisplayStatus PhysicalDisplaySink::presentScene(
+    const display::LogicalScene& scene) {
     // setEnabled 控制应用帧接收（Router 在 setMode 切换窗口 disable 所有 sink）。
     if (!enabled_.load(std::memory_order_relaxed)) {
         lastStatus_.store(static_cast<int32_t>(display::DisplayStatus::kNotEnabled),
@@ -50,26 +66,19 @@ display::DisplayStatus PhysicalDisplaySink::present(const display::Rect& rect,
         return display::DisplayStatus::kNotEnabled;
     }
     // Diagnostics 场景：内容由 OLED 任务 renderStatus 自绘（独立于 router 持续
-    // 刷新）；本 sink 忽略应用帧（presentScene 扩展点进入此路径时为 no-op）。
+    // 刷新）；本 sink 忽略场景投递。
     if (scene() != display::PhysicalScene::kApplication) {
         lastStatus_.store(static_cast<int32_t>(display::DisplayStatus::kOk),
                           std::memory_order_relaxed);
         return display::DisplayStatus::kOk;
     }
-    if (pixels == nullptr || rect.w <= 0 || rect.h <= 0 || rect.x < 0 ||
-        rect.y < 0) {
-        lastStatus_.store(static_cast<int32_t>(display::DisplayStatus::kInvalidParam),
-                          std::memory_order_relaxed);
-        return display::DisplayStatus::kInvalidParam;
-    }
-    if (srcW_ <= 0 || srcH_ <= 0 || !display_) {
+    if (display_ == nullptr) {
         lastStatus_.store(static_cast<int32_t>(display::DisplayStatus::kInternal),
                           std::memory_order_relaxed);
         return display::DisplayStatus::kInternal;
     }
-    // 同步渲染进共享 1KB 应用 fb（mutex 保护；绝不持有 pixels 指针）。
-    display_->presentAppFrame(srcW_, srcH_,
-                              RenderRect{rect.x, rect.y, rect.w, rect.h}, pixels);
+    // 同步渲染进共享 1KB 应用 fb（mutex 保护；绝不持有外部指针）。
+    display_->presentScene(scene);
     lastStatus_.store(static_cast<int32_t>(display::DisplayStatus::kOk),
                       std::memory_order_relaxed);
     return display::DisplayStatus::kOk;

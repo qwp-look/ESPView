@@ -20,6 +20,7 @@
 
 #include "display.h"                // DisplayStatus
 #include "display_capabilities.h"   // DisplayCapabilities
+#include "logical_scene.h"          // M8-B B2: display::LogicalScene (semantic scene)
 
 namespace espview {
 namespace display {
@@ -43,6 +44,14 @@ public:
 
     // 呈现一个逻辑矩形（调用方保证 pixels 在调用期间有效）。
     virtual DisplayStatus present(const Rect& rect, const uint8_t* pixels) = 0;
+
+    // M8-B B2：呈现共享 LogicalScene（semantic mirror —— 物理后端渲染场景语义
+    // 而非缩放像素）。默认 kNotSupported：仅实现场景语义的后端
+    //（PhysicalDisplaySink）覆盖；Virtual sink 不消费场景。
+    virtual DisplayStatus presentScene(const LogicalScene& scene) {
+        (void)scene;
+        return DisplayStatus::kNotSupported;
+    }
     // 提交当前帧（生产者渲染 cycle 结束）。
     virtual DisplayStatus flush() = 0;
 

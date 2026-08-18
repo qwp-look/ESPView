@@ -118,6 +118,7 @@ void LvglDemoApp::updateMouseLabel() {
     std::snprintf(buf, sizeof(buf), "Mouse: %d,%d", static_cast<int>(st.x),
                   static_cast<int>(st.y));
     lv_label_set_text(mouseLabel_, buf);
+    markSceneDirty();  // M8-B B2：鼠标坐标变化 → 场景更新
 }
 
 void LvglDemoApp::onEvent(lv_event_t* e) {
@@ -142,6 +143,7 @@ void LvglDemoApp::onPointerClick(lv_obj_t* target) {
         bState_ = !bState_;
         updateButtonState(btnB_, bState_);
     }
+    markSceneDirty();  // M8-B B2：点击也改变 focus（lv_group_focus_obj 在函数首行）
 }
 
 void LvglDemoApp::updateButtonState(lv_obj_t* btn, bool on) {
@@ -152,6 +154,7 @@ void LvglDemoApp::updateButtonState(lv_obj_t* btn, bool on) {
         lv_obj_clear_state(btn, LV_STATE_CHECKED);
         lv_obj_set_style_bg_color(btn, kBtnColor, LV_STATE_DEFAULT);
     }
+    markSceneDirty();  // M8-B B2：按钮按下状态 → 场景 pressed 语义
 }
 
 void LvglDemoApp::onKeyEvent(uint32_t lvglKey) {
@@ -176,6 +179,7 @@ void LvglDemoApp::onKeyEvent(uint32_t lvglKey) {
         } else {
             lv_group_focus_prev(group_);
         }
+        markSceneDirty();  // M8-B B2：focus 导航 → 场景 focused 语义
     }
 }
 
@@ -188,6 +192,7 @@ void LvglDemoApp::setCounter(int32_t delta) {
     char buf[32];
     std::snprintf(buf, sizeof(buf), "Counter: %d", static_cast<int>(counter_));
     lv_label_set_text(counterLabel_, buf);
+    markSceneDirty();  // M8-B B2：计数变化 → 场景更新
 }
 
 void LvglDemoApp::setKeyLabel(uint32_t lvglKey) {
@@ -196,6 +201,75 @@ void LvglDemoApp::setKeyLabel(uint32_t lvglKey) {
                   input::HidToLvglKeyMapper::keyName(lvglKey));
     if (std::strcmp(lv_label_get_text(keyLabel_), buf) != 0) {
         lv_label_set_text(keyLabel_, buf);
+        markSceneDirty();  // M8-B B2：键盘标签变化 → 场景更新
+    }
+}
+
+bool LvglDemoApp::takeScene() {
+    if (!sceneDirty_) {
+        return false;
+    }
+    buildScene();
+    sceneDirty_ = false;
+    return true;
+}
+
+void LvglDemoApp::buildScene() {
+    scene_.clear();
+    scene_.logicalWidth = 320;
+    scene_.logicalHeight = 240;
+
+    display::SceneElement* t = scene_.add(display::kSceneIdTitle,
+                                          display::SceneElementKind::kText,
+                                          0, 8, 320, 16);
+    display::LogicalScene::setText(*t, "ESPView LVGL Input Test");
+
+    display::SceneElement* a = scene_.add(display::kSceneIdButtonA,
+                                          display::SceneElementKind::kButton,
+                                          55, 65, 110, 40);
+    display::LogicalScene::setText(*a, "Button A");
+    a->state = aState_ ? display::SceneElementState::kPressed
+                       : display::SceneElementState::kNormal;
+
+    display::SceneElement* b = scene_.add(display::kSceneIdButtonB,
+                                          display::SceneElementKind::kButton,
+                                          185, 65, 110, 40);
+    display::LogicalScene::setText(*b, "Button B");
+    b->state = bState_ ? display::SceneElementState::kPressed
+                       : display::SceneElementState::kNormal;
+
+    display::SceneElement* c = scene_.add(display::kSceneIdCounter,
+                                          display::SceneElementKind::kPanel,
+                                          80, 130, 160, 40);
+    char cbuf[32];
+    std::snprintf(cbuf, sizeof(cbuf), "Counter: %d", static_cast<int>(counter_));
+    display::LogicalScene::setText(*c, cbuf);
+
+    display::SceneElement* k = scene_.add(display::kSceneIdKeyboard,
+                                          display::SceneElementKind::kText,
+                                          0, 185, 320, 16);
+    display::LogicalScene::setText(*k, lv_label_get_text(keyLabel_));
+
+    display::SceneElement* m = scene_.add(display::kSceneIdMouse,
+                                          display::SceneElementKind::kText,
+                                          0, 210, 320, 16);
+    display::LogicalScene::setText(*m, lv_label_get_text(mouseLabel_));
+
+    // focus 语义：当前 group focused 对象（按钮 → focused；counter 聚焦时
+    // 滚轮/方向键增减计数，物理侧标记 focused 供操作提示）。
+    lv_obj_t* focused = lv_group_get_focused(group_);
+    const display::SceneElementState focusedState =
+        display::SceneElementState::kFocused;
+    if (focused == btnA_) {
+        a->state = (a->state == display::SceneElementState::kPressed)
+                       ? a->state
+                       : focusedState;
+    } else if (focused == btnB_) {
+        b->state = (b->state == display::SceneElementState::kPressed)
+                       ? b->state
+                       : focusedState;
+    } else if (focused == counterObj_) {
+        c->state = focusedState;
     }
 }
 

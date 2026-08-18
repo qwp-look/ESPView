@@ -165,6 +165,14 @@ public:
     DisplayStatus presentScene(PhysicalScene scene, const Rect& rect,
                                const uint8_t* pixels);
 
+    // ---- M8-B B2：语义场景投递（Application → Physical OLED）----
+    // 把共享 LogicalScene 投递给物理 sink：
+    //   PhysicalOnly / Mirror → 物理侧显示 Application，渲染场景；
+    //   VirtualOnly / Split   → 物理侧显示 Diagnostics（OLED 任务自绘），
+    //                           返回 kOk 空操作（调用方不重试）。
+    // 与 writeRect 正交：物理应用内容只经本路径（RGB565 缩略路径已废除）。
+    DisplayStatus presentScene(const LogicalScene& scene);
+
     // ---- 查询 / 主动重评估 ----
     std::shared_ptr<IDisplaySink> virtualSink() const;
     std::shared_ptr<IDisplaySink> physicalSink() const;

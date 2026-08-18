@@ -56,8 +56,8 @@ constexpr uint32_t kDtorJoinTimeoutMs = 15000;
 
 OledDisplay::OledDisplay(const OledConfig& cfg, StatusProvider provider)
     : cfg_(cfg), provider_(std::move(provider)) {
-    // M7-C2：应用帧渲染器（128x64 单色；presentAppFrame 在互斥锁内使用）。
-    appRenderer_ = std::make_unique<PhysicalRenderer>(OledFb::kWidth, OledFb::kHeight);
+    // M8-B B2：SceneRenderer 为值成员（无堆分配、零平台依赖），
+    // presentScene 在互斥锁内使用。
 }
 
 OledDisplay::~OledDisplay() {
@@ -238,16 +238,12 @@ bool OledDisplay::appFramesEnabled() const {
     return appFramesEnabled_.load(std::memory_order_relaxed);
 }
 
-// PhysicalDisplaySink::present 委托：用 PhysicalRenderer 同步渲染进共享
-// appFb_ 并置 dirty。本方法在 UI/LVGL 任务执行，绝不持有 rgb565 指针
-// （renderFrame 同步完成）；appFbMutex_ 与 OLED 任务的上传快照互斥。
-void OledDisplay::presentAppFrame(int srcW, int srcH, const RenderRect& rect,
-                                  const uint8_t* rgb565) {
+// PhysicalDisplaySink::presentScene 委托：用 SceneRenderer 同步渲染共享
+// LogicalScene 进 appFb_ 并置 dirty。本方法在 UI/LVGL 任务执行（同步完成，
+// 绝不持有外部指针）；appFbMutex_ 与 OLED 任务的上传快照互斥。
+void OledDisplay::presentScene(const display::LogicalScene& scene) {
     std::lock_guard<std::mutex> lock(appFbMutex_);
-    if (appRenderer_ == nullptr || rgb565 == nullptr) {
-        return;  // 渲染器未就绪 / 非法指针：忽略（调用方已校验场景与启用态）
-    }
-    appRenderer_->renderFrame(appFb_, srcW, srcH, rgb565, rect);
+    sceneRenderer_.render(scene, appFb_);
     appFrameDirty_.store(true, std::memory_order_release);
 }
 

@@ -10,6 +10,7 @@ set(OLED_COMPONENT_SRCS
     "${CMAKE_CURRENT_LIST_DIR}/../../../shared/oled/oled_status.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/../../../shared/oled/oled_recovery.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/../../../shared/oled/physical_renderer.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/../../../shared/oled/scene_renderer.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/../../../shared/oled/oled_preview.cpp"
     "src/oled_i2c.cpp"
     "src/oled_controller.cpp"
