@@ -240,6 +240,22 @@ std::vector<uint8_t> bigPixels(size_t n) {
     return v;
 }
 
+
+// M8-B B6：流式 payload source（测试用；零平台依赖）。
+struct VecStreamSource : public espview::proto::IMessagePayloadSource {
+    explicit VecStreamSource(std::vector<uint8_t> d) : data(std::move(d)) {}
+    size_t read(uint8_t* dst, size_t maxBytes) override {
+        const size_t n = std::min(maxBytes, data.size() - off);
+        for (size_t i = 0; i < n; ++i) {
+            dst[i] = data[off + i];
+        }
+        off += n;
+        return n;
+    }
+    std::vector<uint8_t> data;
+    size_t off = 0;
+};
+
 }  // namespace
 
 // 1. disconnected → hello → connected；握手后 packet.seq 清零
@@ -826,6 +842,69 @@ void try_sink_used_for_control_replies() {
 }
 
 
+
+// M8-B B6（Problem D）：对端超时双因子——数据面（流式发送）有进展时，
+//   对端 5s 静默不得误杀健康会话；数据面停滞 >=5s 后才判 dead。
+void peer_timeout_dual_factor_streaming_activity() {
+    EndpointHarness a, b;
+    a.init(EndpointConfig{}, &b);
+    b.init(EndpointConfig{}, &a);
+    connectPair(a, b);  // 握手在 t=0：lastPeerRx=0
+
+    // t=1000：数据面发送一个 FRAME_RECT（流式路径刷新 lastDataPlaneTxMs_）。
+    a.clock.now = 1000;
+    espview::proto::MessageHeader hdr;
+    hdr.type = static_cast<uint8_t>(MessageType::kFrameRect);
+    hdr.flags = 0;
+    VecStreamSource src(smallPixels());
+    CHECK_EQ(a.ep->sendMessageStreaming(hdr, src), SendResult::kOk);
+
+    // t=5000：对端静默 5s，但数据面 4s 前有进展 -> 不得误杀。
+    a.clock.now = 5000;
+    a.ep->tick();
+    CHECK_EQ(a.ep->state(), SessionState::kConnected);
+    CHECK_EQ(a.ep->stats().pingTimeouts, 0u);
+
+    // t=6000：数据面也停滞 5s -> 判 dead（真实断线仍可发现）。
+    a.clock.now = 6000;
+    a.ep->tick();
+    CHECK_EQ(a.ep->state(), SessionState::kDisconnected);
+    CHECK_EQ(a.ep->stats().pingTimeouts, 1u);
+    CHECK(hasProtoError(a, SessionError::kPeerTimeout));
+}
+
+// M8-B B6（Problem D）：连续流式发送跨越 >5s 对端静默窗口 -> 会话保持；
+//   流式结束后数据面停滞 >=5s -> 超时触发（重连检测保留）。
+void peer_timeout_suppressed_during_long_stream() {
+    EndpointHarness a, b;
+    a.init(EndpointConfig{}, &b);
+    b.init(EndpointConfig{}, &a);
+    connectPair(a, b);
+
+    // 模拟 UART 115200 FULL 帧：连续 RECT 每 ~1.3s 一次（数据面持续进展）。
+    for (const uint64_t t : {1000u, 2300u, 3600u, 4900u}) {
+        a.clock.now = t;
+        espview::proto::MessageHeader hdr;
+        hdr.type = static_cast<uint8_t>(MessageType::kFrameRect);
+        hdr.flags = 0;
+        VecStreamSource src(bigPixels(8192));  // 8192B -> 2 个 CHUNKED 包
+        CHECK_EQ(a.ep->sendMessageStreaming(hdr, src), SendResult::kOk);
+    }
+
+    // t=6000：对端静默 6s，但数据面 1.1s 前仍在进展 -> 不得误杀。
+    a.clock.now = 6000;
+    a.ep->tick();
+    CHECK_EQ(a.ep->state(), SessionState::kConnected);
+    CHECK_EQ(a.ep->stats().pingTimeouts, 0u);
+
+    // t=10000：最后进展 5.1s 前 -> 判 dead（断线仍可发现）。
+    a.clock.now = 10000;
+    a.ep->tick();
+    CHECK_EQ(a.ep->state(), SessionState::kDisconnected);
+    CHECK_EQ(a.ep->stats().pingTimeouts, 1u);
+    CHECK(hasProtoError(a, SessionError::kPeerTimeout));
+}
+
 void runProtocolEndpointTests() {
     std::printf("  session_connect_hello\n");
     session_connect_hello();
@@ -867,6 +946,10 @@ void runProtocolEndpointTests() {
     error_message();
     std::printf("  try_sink_used_for_control_replies\n");
     try_sink_used_for_control_replies();
+    std::printf("  peer_timeout_dual_factor_streaming_activity\n");
+    peer_timeout_dual_factor_streaming_activity();
+    std::printf("  peer_timeout_suppressed_during_long_stream\n");
+    peer_timeout_suppressed_during_long_stream();
 }
 
 

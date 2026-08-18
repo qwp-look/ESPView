@@ -414,9 +414,11 @@ private:
     // 发送串行化：整条消息原子送出（并发 sendMessage 不得交叉包）。
     std::mutex sendMutex_;
 
-    // 心跳/超时（M8-A1：lastPeerRxMs_/lastDecoderRxMs_ 原子——RX 写、tick 读）
+    // 心跳/超时（M8-A1：lastPeerRxMs_/lastDecoderRxMs_ 原子——RX 写、tick 读；
+    //   M8-B B6：lastDataPlaneTxMs_ 由流式发送线程写、tick 读——数据面进展时钟）
     std::atomic<uint64_t> lastPeerRxMs_{0};     // 最近一次收到对端有效消息的时间
     std::atomic<uint64_t> lastDecoderRxMs_{0};  // 最近一次向 decoder 喂字节的时间（半包超时时钟）
+    std::atomic<uint64_t> lastDataPlaneTxMs_{0};  // 最近一次流式（数据面）发送开始的时间
     uint64_t lastPingMs_ = 0;       // 最近一次发送 PING 的时间（sessionMutex_）
     uint64_t connectMs_ = 0;        // Transport 连接时间（handshake 超时基准；sessionMutex_）
     uint64_t lastPingSentAtMs_ = 0; // 最近一次 PING 的发送时刻（RTT 测量；sessionMutex_）

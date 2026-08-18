@@ -533,6 +533,9 @@ SendResult ProtocolEndpoint::transmitStreamingImpl(const MessageHeader& header,
                 sinkResult = st2;
                 return false;
             }
+            // M8-B B6（Problem D 双因子）：数据面进展时钟——每成功交给 sink 一个
+            //   流式包即刷新，供 tick() 对端超时判定参考（见 tick() 第 3 节）。
+            lastDataPlaneTxMs_.store(clock_(), std::memory_order_relaxed);
             ++sentCount;
             return true;
         });
@@ -730,8 +733,17 @@ void ProtocolEndpoint::tick() {
         return;
     }
 
-    // ---- 3) 对端超时（DESIGN.md：5s 无响应判断线）----
-    if (now - lastPeerRxMs_.load(std::memory_order_relaxed) >= cfg_.peer_timeout_ms) {
+    // ---- 3) 对端超时（DESIGN.md：5s 无响应判断线；M8-B B6 双因子）----
+    // Problem D：长流式帧（UART 115200 FULL ≈13s）期间本端 PING 因 sendMutex_ 被
+    // pump 持有而发不出；对端若只是“被动存活”（仅回 PONG、不主动发包），按旧单因子
+    // 判定会在帧流中途误杀仍然健康的会话。双因子：对端静默 ≥ peer_timeout_ms 且
+    // 数据面（流式发送）停滞 ≥ peer_timeout_ms 才判 dead——数据面正在排空证明
+    // transport 健康，且对端在长流式发送期间无义务主动发言；数据面停滞（无帧/
+    // 传输停排）时恢复 5s 判定，真实断线（M1-3B/M1-3C 重连回归）仍可发现。
+    const uint64_t lastPeerRxMs = lastPeerRxMs_.load(std::memory_order_relaxed);
+    const uint64_t lastDataTxMs = lastDataPlaneTxMs_.load(std::memory_order_relaxed);
+    if (now - lastPeerRxMs >= cfg_.peer_timeout_ms &&
+        now - lastDataTxMs >= cfg_.peer_timeout_ms) {
         {
             std::lock_guard<std::mutex> lock(sessionMutex_);
             ++stats_.pingTimeouts;
