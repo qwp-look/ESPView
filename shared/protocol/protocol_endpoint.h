@@ -299,6 +299,9 @@ public:
     // ---- 状态/查询（M8-A1：按值返回，sessionMutex_/decoderMutex_ 短临界区保护）----
     SessionState state() const;
     bool isConnected() const;
+    // M8-B B6（Problem D）：对端静默时长 / 数据面停滞时长（诊断；clock_ 单调毫秒）。
+    uint64_t peerIdleMs() const;
+    uint64_t dataPlaneIdleMs() const;
     SessionStats stats() const;    // 快照拷贝（源兼容既有 `ep.stats().field` / `const auto s = ep.stats()`）
     FrameStats frameStats() const; // 快照拷贝（decoderMutex_ 保护 FrameAssembler）
     // M8-A1：peerHello_ 跨线程读写（RX 写 / 任意读）——按值返回（sessionMutex_

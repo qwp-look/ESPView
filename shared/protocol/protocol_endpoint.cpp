@@ -153,6 +153,18 @@ bool ProtocolEndpoint::isConnected() const {
     return state_ == SessionState::kConnected;
 }
 
+uint64_t ProtocolEndpoint::peerIdleMs() const {
+    const uint64_t now = clock_();
+    const uint64_t last = lastPeerRxMs_.load(std::memory_order_relaxed);
+    return now > last ? now - last : 0;
+}
+
+uint64_t ProtocolEndpoint::dataPlaneIdleMs() const {
+    const uint64_t now = clock_();
+    const uint64_t last = lastDataPlaneTxMs_.load(std::memory_order_relaxed);
+    return now > last ? now - last : 0;
+}
+
 SessionStats ProtocolEndpoint::stats() const {
     std::lock_guard<std::mutex> lock(sessionMutex_);
     // M8-A2：合并热路径原子计数器（公共字段不变；快照按值返回）。

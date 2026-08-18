@@ -733,12 +733,14 @@ void reportInputStats() {
     if (m3.has_value()) {
         g_endpoint.sendMessage(*m3);
     }
-    std::snprintf(buf, sizeof(buf), "sess2 q=%llu/%llu e=%llu c=%llu s=%llu",
+    std::snprintf(buf, sizeof(buf), "sess2 q=%llu/%llu e=%llu c=%llu s=%llu i=%llu d=%llu",
                   static_cast<unsigned long long>(clamp(sst.txPong)),
                   static_cast<unsigned long long>(clamp(sst.rxPong)),
                   static_cast<unsigned long long>(clamp(sst.decoderErrors)),
                   static_cast<unsigned long long>(clamp(sst.crcErrors)),
-                  static_cast<unsigned long long>(clamp(sst.seqGaps)));
+                  static_cast<unsigned long long>(clamp(sst.seqGaps)),
+                  static_cast<unsigned long long>(clamp(g_endpoint.peerIdleMs())),
+                  static_cast<unsigned long long>(clamp(g_endpoint.dataPlaneIdleMs())));
     const auto m4 = makeError(ErrorCode::kNone, buf);
     if (m4.has_value()) {
         g_endpoint.sendMessage(*m4);
