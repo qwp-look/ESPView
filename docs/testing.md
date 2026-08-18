@@ -251,7 +251,8 @@ Host 侧 OLED 测试（无硬件）：OledFb、命令/分段生成、恢复策�
 - 仓库 CI 分层：Layer 1 fast host CI（ubuntu + windows MSYS2 host 测试）、Layer 2 Windows+Qt CI（Qt 构建 + offscreen 冒烟）、
   Layer 3 ESP32 build CI（容器 `espressif/idf:v6.0.2`，默认 uart/tcp/diagnostic，dispatch 可全量）、
   Layer 4 docs+security（check_docs / security_scan / check_bat_crlf / YAML lint，每次 PR 必跑）。
-- M8-A6 追加层：full-ci（Ubuntu GCC/Clang 全量 + fresh-clone 可复现 gate）、sanitizer（Linux ASan/UBSan/TSan subset）、benchmark（PR smoke + 非 PR full + stream_encode alloc gate）；详见 [docs/ci.md](ci.md) 与 DESIGN AR.2/AR.8/AR.9。`n- CI 只做 build 与静态验证，绝不 flash、不要求 COM/CH340/真 Wi-Fi；`CI passed ≠ hardware passed`（硬件 gate 边界见 [docs/ci.md](ci.md) 与 DESIGN.md AL.3）。
+- M8-A6 追加层：full-ci（Ubuntu GCC/Clang 全量 + fresh-clone 可复现 gate）、sanitizer（Linux ASan/UBSan/TSan subset）、benchmark（PR smoke + 非 PR full + stream_encode alloc gate）；详见 [docs/ci.md](ci.md) 与 DESIGN AR.2/AR.8/AR.9。
+- CI 只做 build 与静态验证，绝不 flash、不要求 COM/CH340/真 Wi-Fi；`CI passed ≠ hardware passed`（硬件 gate 边界见 [docs/ci.md](ci.md) 与 DESIGN.md AL.3）。
 - 触发矩阵、PR gate、branch protection 建议、artifact 命名与凭据策略详见 [docs/ci.md](ci.md)。
 
 ## 9. 变更纪律

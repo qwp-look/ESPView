@@ -1,6 +1,6 @@
 # ESPView -- ESP32 Virtual Display & Input Bridge
 
-Phase-1 prototype (v0.1) -- milestones M0-M8-A6 completed (2026-08-17), M8-A7 in progress. The wire protocol is
+Phase-1 prototype (v0.1) -- milestones M0-M8-A7 completed (2026-08-18). The wire protocol is
 frozen and covered by host suites plus real-hardware acceptance records; the full
 specification and evidence live in [docs/DESIGN.md](docs/DESIGN.md) (written in
 Simplified Chinese).
@@ -491,9 +491,9 @@ See [docs/security.md](docs/security.md).
 
 ## Project status and roadmap
 
-**Status (honest):** Phase-1 v0.1 prototype. Milestones M0-M8-A6 are committed;
-M8-A7 (documentation / resource budget / target & profile abstraction / S3
-preparation / repository maintainability) is in progress (exact history: git log --oneline).
+**Status (honest):** Phase-1 v0.1 prototype. Milestones M0-M8-A7 are committed
+(documentation / resource budget / target & profile abstraction / S3 preparation /
+repository maintainability; 2026-08-18; exact history: git log --oneline).
 The wire protocol has been frozen since M1-3C -- subsequent milestones only add
 capabilities without changing existing messages.
 

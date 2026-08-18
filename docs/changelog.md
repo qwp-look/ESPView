@@ -1,8 +1,8 @@
 # 变更日志（Changelog）
 
-> 里程碑历史提炼自 `git log`（真实提交）。当前里程碑范围 M0..M8-A6 已提交（HEAD 见 git log）。
+> 里程碑历史提炼自 `git log`（真实提交）。当前里程碑范围 M0..M8-A7 已提交（HEAD 见 git log）。
 > M0..M6-E 集中在 v0.1 初始提交；M7/M8 系列逐里程碑提交。
-> （本目录 12 份文档，尚未提交）。
+> （docs/ 共 19 份文档，均已随里程碑提交）。
 
 ## v0.1 基础（M0..M6-E，2026-08-12..14）
 
@@ -49,7 +49,7 @@
 | `71217c9` | M7-F F2 | Provisioning 事务硬化（timeout / retry / disconnect 收敛） |
 | `456763a` | M7-F F3 | Wizard 硬化 + preview/OLED 修复（15 文件） |
 | `5d758a2` | M7-F F4 | Build/Flash UX + per-profile sdkconfig 隔离 |
-| `c48efcd` | M7-F F5 | 硬件证据矩阵 + AJ.8 / AI.3 / AG.2 措辞修正（当前 HEAD） |
+| `c48efcd` | M7-F F5 | 硬件证据矩阵 + AJ.8 / AI.3 / AG.2 措辞修正（当时 HEAD） |
 
 ## M7-G..H 与 M8 系列（2026-08-16..17，已提交）
 

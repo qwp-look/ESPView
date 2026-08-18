@@ -4485,7 +4485,7 @@ AS.2 债务清单 D1–D15 全部闭环，修复映射与验证证据如下。
 
 ### AT.3 收尾状态
 
-- HEAD == origin/main（d35040d + 本收尾 commit）；工作树干净；git diff --check 通过。
+- HEAD == origin/main（A7-1..A7-10 十个 commit + 评审修正 commit，共 11 个）；工作树干净；git diff --check 通过。
 - 协议层（shared/protocol）零改动；本里程碑无任何 wire 格式变更。
 - M8-A7 关闭；M8-A8 的启动由下一任务书决定，本任务不预实现。
 
