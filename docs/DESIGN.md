@@ -119,6 +119,16 @@
 > 收敛为单一 writeReversedPage；store/reset 双写者互斥；新增
 > espview_m8a4_bench（physical_render_full alloc_count=0）。host 388,9xx checks /
 > 0 failures；详见 AP 章。
+> **修订记录（M8-A8, 2026-08-18）**：Direct Wi-Fi Hardware Regression——跳过 provisioning
+> （Wi-Fi Wizard / WIFI_SCAN_REQ / WIFI_CONFIG），直接本地未跟踪 profile 注入 Wi-Fi/TCP
+> 参数；真实硬件链路 PC TCP server 0.0.0.0:8765 ← Wi-Fi LAN ← ESP32 STA client 全链路
+> 验收 PASS：GOT_IP → TCP connect → HELLO → CONNECTED → FULL（320x240 RGB565）→
+> PARTIAL → INPUT（键盘+鼠标）→ TCP reconnect ×5（每轮 FULL resync）→ 10min 长稳
+> 0 协议错误。性能 5 轮 FULL e=249..324ms（avg 281，对比 M6-B 旧基线 avg 574 明显改善、
+> 与 M6-C 235-254ms 同量级）；OLED/CH340 全程在线；host/Qt/LVGL 回归全部 PASS；wire
+> format 零改动。新发现：ESP32 长 uptime 多次重连后协议会话偶发停滞（TCP 仍 ESTABLISHED
+> 但停止应答 HELLO/PONG，硬复位后恢复；未归因未改代码，详见 AU.5）；真实 AP outage
+> 测试 DEFERRED（AU.6）。凭据仅存在于本地 gitignored profile。详见 AU 章。
 
 ---
 
@@ -938,6 +948,7 @@ ESPView/
 | M8-A5 | 硬件验收记录（UART/TCP/OLED/S3 probe；AR.6/AR.8/AR.9） | ✅ 完成（2026-08-17；host 393,661+211 checks / 0 failures；详见 AR 章） |
 | M8-A6 | CI / benchmark / sanitizer / build matrix / docs tooling（fast/full/sanitizer/benchmark/esp32/docs-security 9 workflows + fresh-clone gate + 首跑修复） | ✅ 完成（2026-08-17；全绿；host 393,661+211 checks / 0 failures；详见 AR 章与 docs/ci.md） |
 | M8-A7 | 文档时效 / 资源预算 / Target 与 Profile 抽象 / S3 准备 / 仓库维护（wire format 零改动）：RESOURCE_BUDGET.md、target_info 组件、sdkconfig.defaults.{esp32,esp32s3}、partitions.esp32s3.csv、build/flash `-t`、ci_collect_artifacts `--target`、examples/ 9 份、check_docs 3 项新检查、fresh-clone target/profile 矩阵校验 | ✅ 完成（2026-08-18；host 回归 0 failures；esp32 diagnostic PASS factory 余 56%；esp32s3 smoke PASS 16 MiB 余 83%；详见 AS/AT 章与 docs/ci.md） |
+| M8-A8 | Direct Wi-Fi Hardware Regression（跳过 provisioning 直接配置注入）：真实硬件 Wi-Fi STA + TCP + 协议全链路验收（HELLO/CAPABILITIES/FULL/PARTIAL/INPUT/TCP reconnect×5/10min 长稳）；host/Qt/LVGL 回归 PASS；wire format 零改动 | ✅ 完成（2026-08-18；真实硬件；详见 AU 章） |
 | M6(未来) | 真实 LCD (DEVICE/MIRROR)、触摸（INPUT_TOUCH）、TinyUSB | 未开始（运行时 DisplayMode 已于 M7-C3 实现，SET_MODE 0..3） |
 
 注：表中各里程碑的 host checks 数字为该里程碑完成时的快照；当前最新全量基线见 AR.8（393,661 + 211 checks / 0 failures）。
@@ -4489,3 +4500,71 @@ AS.2 债务清单 D1–D15 全部闭环，修复映射与验证证据如下。
 - 协议层（shared/protocol）零改动；本里程碑无任何 wire 格式变更。
 - M8-A7 关闭；M8-A8 的启动由下一任务书决定，本任务不预实现。
 
+
+## AU. M8-A8 Direct Wi-Fi Hardware Regression（2026-08-18）
+
+### AU.1 目标与拓扑
+
+- 目标：跳过 provisioning（Wi-Fi Wizard / WIFI_SCAN_REQ / WIFI_CONFIG），在 Wi-Fi 参数
+  直接写入本地未跟踪 firmware configuration 的前提下，验证 ESP32 Wi-Fi STA + TCP +
+  协议 + LVGL/OLED/Qt 整条链路是否稳定工作；Provisioning correctness 与 Configured
+  runtime Wi-Fi correctness 严格分离。
+- 拓扑：PC（TCP server 0.0.0.0:8765）← Wi-Fi LAN ← ESP32（TCP client）。
+- 硬件：ESP32-D0WDQ6 开发板 + USB-SERIAL CH340（COM4）；OLED（I2C，GPIO21/22）开启。
+- 配置注入：仅本机未跟踪 profile（gitignored），真实凭据不进入仓库、日志与报告。
+
+### AU.2 Build / Flash
+
+- 基线：git 08a4988（HEAD == origin/main），本任务零源码改动（仅文档记录）。
+- profile：CONFIG_IDF_TARGET="esp32"、CONFIG_ESPVIEW_TRANSPORT_TCP=y、
+  CONFIG_ESPVIEW_OLED_ENABLE=y、CONFIG_ESPVIEW_APP_LVGL=y、SSID configured、
+  Password configured、Server configured（按当前 LAN IPv4 实时探测）、PORT=8765、
+  baud 115200。
+- build PASS；flash PASS；boot 正常（POWERON_RESET）。
+
+### AU.3 链路验收
+
+- Wi-Fi STA：connect → GOT_IP PASS；RSSI -17..-21 dBm @ ch6；不记录 SSID/password。
+- TCP：ESP32 client → PC server ESTABLISHED；Transport connected 与 Protocol
+  connected 分开验证；ProtocolEndpoint HANDSHAKE → CONNECTED（HELLO done）。
+- HELLO / CAPABILITIES：双向交换 PASS；协议版本、320x240、RGB565、mode mask、
+  capabilities 一致；每个新 TCP session seq 重新开始。
+- FULL：320x240 RGB565 FRAME_BEGIN/RECT/END 完整提交，Qt 收到并提交；OLED 状态页正常。
+- PARTIAL：dirty-rect commit 正常（实测 e=52ms r=3/31848B、e=19ms r=1/14848B），
+  0 协议错误。
+- INPUT：键盘 A/B/Enter/Arrow（8 events）+ 鼠标 move/left click/wheel 全部接收；
+  inp2 r=0 sk=0 sb=0（无卡键/卡按钮）；LVGL inp3 k=8 w=2/1 s=2/1。
+
+### AU.4 TCP reconnect ×5 与性能
+
+- 5 轮 TCP reconnect（GUI kill → 连接消失 → ESP32 backoff → GUI 重启 → accept →
+  HELLO → CONNECTED → FULL resync）全部 PASS，每轮 FULL commit，无 stuck session。
+- FULL elapsed（ESP32 侧 e=，ms）：314 / 260 / 249 / 324 / 260；min 249 / avg 281 /
+  max 324；q=97..186、qp=2、0 drop。
+- 对照：M6-B U.4 旧基线（min 373 / avg 574 / max 716）明显改善；与 M6-C（235-254ms）
+  同量级。RTT（run5 session）min 16 / avg 40 / max 93 ms（n=16），PING 0 timeout。
+- 10min 长稳（30 采样）：sess2 e=0 c=0 s=0 全程；heap ~83-85KB 平稳；OLED err=0 ok=1；
+  reconnect 不再增长；CH340 全程在线（Win32_SerialPort 查询误报 MISSING，
+  SerialPort.GetPortNames / Get-PnpDevice 复验 OK）。
+
+### AU.5 新发现（未归因，未改代码）
+
+- ESP32 长 uptime（多次 TCP 重连、约 50min）后协议会话偶发停滞：TCP 仍 ESTABLISHED，
+  但 ESP32 停止应答 HELLO/PONG，GUI 进入 HELLO 重试循环；esptool 硬复位后约 20s
+  完全恢复（FULL resync，0 错误）。根因待排查；不归因于供电/RF/协议，待后续排查。
+- host 回归协议计数三次运行 ±~30 checks 浮动（0 failures）：ack/endpoint 并发测试
+  按时序浮动，非协议缺陷；verify_host / verify_qt / verify_lvgl 全部 PASS。
+- 测试环境备注：MSYS2 Qt DLL 路径需显式注入 PATH；非提升 GUI 键盘注入使用
+  PostMessage（SendInput 不可达）；GUI 窗口位置每次重启重置。
+
+### AU.6 环境限制（DEFERRED）
+
+- 真实 AP 断电 outage：本环境无法安全控制 AP，标记 DEFERRED，不伪造 PASS。
+- 30min 长稳：可选，10min PASS 后未继续。
+- PS_NONE 实验性 A/B：未执行，保持 production default power save。
+
+### AU.7 安全与收尾
+
+- 真实凭据未进入 Git：git grep / tracked files / git diff / git diff --cached /
+  security_scan 全 clean；测试 profile 仍被 gitignore。
+- 生产 profile 已恢复仓库默认；工作树干净；wire format 零改动。
