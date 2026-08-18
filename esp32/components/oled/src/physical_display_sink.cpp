@@ -58,7 +58,7 @@ display::DisplayStatus PhysicalDisplaySink::present(const display::Rect& rect,
 }
 
 display::DisplayStatus PhysicalDisplaySink::presentScene(
-    const display::LogicalScene& scene) {
+    const display::LogicalScene& logicalScene) {
     // setEnabled 控制应用帧接收（Router 在 setMode 切换窗口 disable 所有 sink）。
     if (!enabled_.load(std::memory_order_relaxed)) {
         lastStatus_.store(static_cast<int32_t>(display::DisplayStatus::kNotEnabled),
@@ -78,7 +78,7 @@ display::DisplayStatus PhysicalDisplaySink::presentScene(
         return display::DisplayStatus::kInternal;
     }
     // 同步渲染进共享 1KB 应用 fb（mutex 保护；绝不持有外部指针）。
-    display_->presentScene(scene);
+    display_->presentScene(logicalScene);
     lastStatus_.store(static_cast<int32_t>(display::DisplayStatus::kOk),
                       std::memory_order_relaxed);
     return display::DisplayStatus::kOk;

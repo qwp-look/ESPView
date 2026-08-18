@@ -41,7 +41,7 @@ public:
     const display::DisplayCapabilities& capabilities() const override { return caps_; }
     display::DisplayStatus present(const display::Rect& rect, const uint8_t* pixels) override;
     // M8-B B2：语义场景投递（Router 在 PhysicalOnly/Mirror 调用；SceneRenderer 渲染）。
-    display::DisplayStatus presentScene(const display::LogicalScene& scene) override;
+    display::DisplayStatus presentScene(const display::LogicalScene& logicalScene) override;
     display::DisplayStatus flush() override;
     display::DisplayStatus setEnabled(bool enabled) override;
     bool isAvailable() const override;
