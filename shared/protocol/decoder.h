@@ -58,6 +58,9 @@ const char* toString(DecoderError e);
 //     若头部本身被破坏，后续包的 seq gap 仍能自愈）；
 //   - seq 跳变：当前包丢弃（不派发），正在组装的 Message 作废，seq 基线重定位为
 //     收到的 seq+1（uint16 回绕）；不视为传输断开；
+//   - HELLO 例外（M8-C C8）：HELLO 是会话起点，跳过 seq 检查并以本包 seq 重建基线
+//     （DESIGN.md 握手双方 seq 清零）；保证断线后残留字节污染基线时，新会话 HELLO
+//     仍能进入被动恢复路径；
 //   - CHUNKED 组装：CHUNKED=1 开始/续接组装，CHUNKED=0 结束并派发；组装期间
 //     TYPE 或 FLAGS（非 CHUNKED 位）不一致 → 当前消息作废，新包按消息边界处理
 //     （CHUNKED=0 直接派发为新消息，CHUNKED=1 以新类型重新开始组装）；

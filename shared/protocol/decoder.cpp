@@ -297,6 +297,21 @@ void StreamDecoder::process() {
                     onPacket_(header_, payload, header_.length);
                 }
 
+                // HELLO is a session start point (DESIGN.md: both sides zero packet.seq
+                // during handshake; HELLO is always the first packet of a new session).
+                // Stale bytes left over from a previous session can rebase the seq
+                // baseline to old-seq+1; if HELLO were dropped by the normal seq rule,
+                // passive recovery (DISCONNECTED -> HELLO -> reply HELLO) would never
+                // complete and the new session would time out. So HELLO skips the seq
+                // check and rebuilds the baseline from its own seq.
+                if (header_.type == static_cast<uint8_t>(MessageType::kHello)) {
+                    expectedSeq_ = static_cast<uint16_t>(header_.seq + 1);
+                    handleVerifiedPacket();
+                    consume(packetSize);
+                    state_ = State::kSync;
+                    break;
+                }
+
                 if (header_.seq != expectedSeq_) {
                     // seq 跳变：当前包视为异常并丢弃，消息作废，基线重定位；
                     // 不视为传输断开（DESIGN.md / M0-B2 要求）。

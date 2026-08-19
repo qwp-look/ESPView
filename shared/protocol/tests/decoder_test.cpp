@@ -467,6 +467,32 @@ void sequence_gap() {
     CHECK_EQ(c.packets.size(), 3u);
 }
 
+// 18b. HELLO 重建 seq 基线（M8-C C8 回归）：旧会话残留字节把基线污染到
+//      stale.seq+1 后，新会话 HELLO(seq=0) 必须跳过 seq 检查并正常派发——
+//      否则被动恢复（DISCONNECTED → HELLO → 回发 HELLO）永不发生。
+void hello_rebuilds_seq_baseline() {
+    Collector c;
+    auto dec = makeDecoder(c);
+    SequenceCounter staleSeq(42);  // 旧会话残留包：seq 42
+    SequenceCounter helloSeq(0);   // 新会话 HELLO：seq 0
+    const Message stale = makePing(99);
+    const auto hello = makeHello(kProtocolVersion, 0, 320, 240,
+                                 PixelFormat::kRgb565, 0b1111, "pc-test");
+    CHECK(hello.has_value());
+    const std::vector<uint8_t> staleBytes = encodeOne(stale, staleSeq, nullptr);
+    const std::vector<uint8_t> helloBytes = encodeOne(*hello, helloSeq, nullptr);
+
+    std::vector<uint8_t> input = staleBytes;
+    input.insert(input.end(), helloBytes.begin(), helloBytes.end());
+    dec.feed(input);
+    // 残留包被 seq 规则丢弃（一次 gap）；HELLO 跳过 seq 检查 → 派发。
+    CHECK_EQ(countError(c.errors, DecoderError::kSequenceGap), 1u);
+    CHECK_EQ(c.messages.size(), 1u);
+    CHECK(c.messages[0].type == static_cast<uint8_t>(MessageType::kHello));
+    CHECK(messageEqual(c.messages[0], *hello));
+    CHECK_EQ(dec.expectedSeq(), 1u);  // 基线重建为 HELLO.seq+1
+}
+
 // 19+26. CHUNKED 组装中途 SEQ 跳变：消息作废
 void seq_gap_during_chunked() {
     Collector c;
@@ -890,6 +916,8 @@ void runDecoderTests() {
     seq_wrap_65535_to_0();
     std::printf("  sequence_gap\n");
     sequence_gap();
+    std::printf("  hello_rebuilds_seq_baseline\n");
+    hello_rebuilds_seq_baseline();
     std::printf("  seq_gap_during_chunked\n");
     seq_gap_during_chunked();
     std::printf("  single_packet_message\n");
