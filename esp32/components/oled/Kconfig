@@ -18,18 +18,24 @@ config ESPVIEW_OLED_ENABLE
 
 config ESPVIEW_OLED_SDA_GPIO
     int "OLED I2C SDA GPIO number"
+    default 8 if IDF_TARGET_ESP32S3
     default 21
     range 0 48
     help
         M8-A7：range 覆盖经典 ESP32（0..39）与 ESP32-S3（0..48）；
-        初始化期按 target 校验（target_info 组件）。默认 21 双 target 均有效。
+        初始化期按 target 校验（target_info 组件）。
+        M8-C C7：默认按 target 条件化 —— 经典 ESP32 21 / ESP32-S3 8
+        （N16R8 实测接线：SDA→GPIO8）；sdkconfig 显式值仍可覆盖。
 
 config ESPVIEW_OLED_SCL_GPIO
     int "OLED I2C SCL GPIO number"
+    default 13 if IDF_TARGET_ESP32S3
     default 22
     range 0 48
     help
-        M8-A7：同上；默认 22 双 target 均有效。
+        M8-A7：同上；range 覆盖双 target。
+        M8-C C7：默认按 target 条件化 —— 经典 ESP32 22 / ESP32-S3 13
+        （N16R8 实测接线：SCL→GPIO13）；sdkconfig 显式值仍可覆盖。
 
 config ESPVIEW_OLED_I2C_CLK_HZ
     int "OLED I2C clock frequency (Hz)"
