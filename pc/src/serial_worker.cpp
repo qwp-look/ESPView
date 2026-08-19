@@ -879,6 +879,9 @@ void SerialWorker::drainDisplayModeQueue() {
         const proto::Message msg = proto::makeSetMode(display::toProtoMode(*rm));
         if (ep_->sendMessage(msg) == proto::SendResult::kOk) {
             ++modeSent_;
+            // M8-C C7: SET_MODE must register pending ACK kind (single slot),
+            // otherwise ACK/timeout arrives with kind=0 and is swallowed.
+            pendingAckKind_ = static_cast<uint8_t>(proto::MessageType::kSetMode);
         } else {
             ++modeDropped_;
         }
