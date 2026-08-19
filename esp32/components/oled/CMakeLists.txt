@@ -12,6 +12,9 @@ set(OLED_COMPONENT_SRCS
     "${CMAKE_CURRENT_LIST_DIR}/../../../shared/oled/physical_renderer.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/../../../shared/oled/scene_renderer.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/../../../shared/oled/oled_preview.cpp"
+    # M8-C (C2)：PhysicalRenderer fast pipeline 门面（shared/render 子集）。
+    "${CMAKE_CURRENT_LIST_DIR}/../../../shared/render/render_pipeline.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/../../../shared/render/stages/fast_scale_threshold_stage.cpp"
     "src/oled_i2c.cpp"
     "src/oled_controller.cpp"
     "src/oled_display.cpp"
@@ -28,6 +31,7 @@ idf_component_register(
         "include"
         "${CMAKE_CURRENT_LIST_DIR}/../../../shared/oled"
         "${CMAKE_CURRENT_LIST_DIR}/../../../shared/display"
+        "${CMAKE_CURRENT_LIST_DIR}/../../../shared/render"
     REQUIRES
         display
         esp_driver_i2c

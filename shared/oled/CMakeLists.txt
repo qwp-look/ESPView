@@ -20,6 +20,9 @@ target_include_directories(espview_oled PUBLIC
 )
 target_compile_features(espview_oled PUBLIC cxx_std_17)
 
+# M8-C (C2)：PhysicalRenderer 重构为 fast pipeline 门面（shared/render）。
+target_link_libraries(espview_oled PUBLIC espview_render)
+
 if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
     target_compile_options(espview_oled PRIVATE -Wall -Wextra -Wpedantic)
 endif()

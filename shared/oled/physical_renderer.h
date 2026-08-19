@@ -1,10 +1,17 @@
-// ESPView M7-C2 — PhysicalRenderer：RGB565 → Mono1（1bpp 页式 OledFb）渲染器。
+// ESPView M7-C2 / M8-C (C2) — PhysicalRenderer：RGB565 → Mono1（1bpp 页式 OledFb）渲染器。
 //
 // 映射策略（DESIGN.md C2 定稿，必须精确实现）：
 //   320x240 RGB565 -> 128x96（aspect-preserving，scale = 0.4 = 2/5，最近邻）
 //   -> center crop 垂直 -> 128x64（crop = (240*2/5 - 64)/2 = 16）。
 // 即 src(sx, sy) 映射到 oled(floor(sx*0.4), floor(sy*0.4) - cropY)；
 // 可见源区域 x∈[0,319]、y∈[40,199]。
+//
+// M8-C (C2)：实现改为「fast pipeline 门面」——内部构造 single-stage
+// RenderPipeline（FastScaleThresholdStage，source-driven last-write-wins，
+// 与 M7-C2 定稿算法字节精确等价；见 shared/render/stages/fast_scale_threshold_stage.*）。
+// 公共 API 与行为不变：增量 compact rect 契约（M8-A4）、crop 按调用期 srcH 计算、
+// 越界裁剪、w/h<=0 no-op、srcW/srcH<=0 clear。逻辑分辨率/阈值变化时才重建
+// pipeline（init-time 成本），run 期零分配。
 //
 // M8-A4 契约修正（OOB 越界读修复，Agent F/P Blocker）：rgb565 是「紧凑矩形
 // 缓冲」——srcRect.w x srcRect.h 行主序，行步长 = srcRect.w，而非整帧步长。
@@ -13,13 +20,17 @@
 //   px = ((sy - srcRect.y) * srcRect.w + (sx - srcRect.x)) * 2
 // srcRect.x/y 仍是全帧逻辑坐标（scale 映射与裁剪用）；srcW/srcH 为全帧尺寸，
 // 仅用于逻辑边界裁剪；scale/crop 按调用期 srcH 计算（不假设 240）。
-// 纯 C++17、零平台依赖、无堆分配、错误路径无异常；strict aliasing 安全
-// （RGB565 逐字节 LE 组合，不 reinterpret_cast 为 uint16_t*）。
+// 纯 C++17、零平台依赖、无堆分配（除 init 期 pipeline 构建）、错误路径无异常；
+// strict aliasing 安全（RGB565 逐字节 LE 组合，不 reinterpret_cast 为 uint16_t*）。
 #pragma once
 
 #include <cstdint>
+#include <memory>
 
 #include "oled_fb.h"
+
+#include "render_pipeline.h"
+#include "stages/fast_scale_threshold_stage.h"
 
 namespace espview {
 namespace oled {
@@ -55,18 +66,22 @@ public:
     int fbHeight() const { return fbH_; }
     uint8_t threshold() const { return threshold_; }
 
-    // 工具（测试用）：RGB565 -> 近似亮度。R5/G6/B5 先放大到 8bit 满量程
-    // （31→255、63→255，等价于左移补位后的满量程归一），
-    // Y = (299R + 587G + 114B + 500) / 1000（四舍五入）。
-    // 锚点：白 0xFFFF→255、红 0xF800→76、绿 0x07E0→150、蓝 0x001F→29。
+    // 工具（测试用）：RGB565 -> 近似亮度。实现收敛到 shared/render
+    // render_color.h（M8-C C1 单一实现；锚点不变：白 255 / 红 76 / 绿 150 /
+    // 蓝 29）。Y >= th -> 1，否则 0。
     static uint8_t luminance(uint16_t rgb565);
-    // Y >= th -> 1，否则 0。
     static uint8_t thresholded(uint16_t rgb565, uint8_t th);
 
 private:
+    // 逻辑分辨率/阈值变化时重建 fast pipeline（init-time；非 per-frame）。
+    void ensurePipeline(int srcW, int srcH);
+
     int fbW_;
     int fbH_;
     uint8_t threshold_;
+    int lastSrcW_ = 0;  // 已构建 pipeline 的逻辑帧几何（0 = 未构建）
+    int lastSrcH_ = 0;
+    std::unique_ptr<render::RenderPipeline> pipeline_;
 };
 
 }  // namespace oled
