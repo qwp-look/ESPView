@@ -257,6 +257,151 @@ void test_semantic_state_propagates() {
     CHECK(!fbEqual(a, b));
 }
 
+// ---- M8-C (C3): Physical Layout Policy tests ----
+
+void test_layout_for_policies() {
+    using espview::oled::layoutFor;
+    using espview::oled::PhysicalLayoutPolicy;
+
+    const auto normal = layoutFor(PhysicalLayoutPolicy::kNormal);
+    CHECK_EQ(normal.rowTitle, 0);
+    CHECK_EQ(normal.rowButtonA, 1);
+    CHECK_EQ(normal.rowButtonB, 2);
+    CHECK_EQ(normal.rowCounter, 3);
+    CHECK_EQ(normal.rowKeyboard, 4);
+    CHECK_EQ(normal.rowMouse, 5);
+    CHECK_EQ(normal.textMaxChars, SceneRenderer::kTextMaxChars);
+    CHECK(!normal.compactPrefix);
+
+    const auto compact = layoutFor(PhysicalLayoutPolicy::kCompact);
+    CHECK_EQ(compact.rowTitle, 0);
+    CHECK_EQ(compact.rowButtonA, 1);
+    CHECK_EQ(compact.rowButtonB, 1);
+    CHECK_EQ(compact.rowCounter, 3);
+    CHECK_EQ(compact.rowKeyboard, 5);
+    CHECK_EQ(compact.rowMouse, 6);
+    CHECK_EQ(compact.textMaxChars, SceneRenderer::kTextMaxChars);
+    CHECK(compact.compactPrefix);
+
+    const auto ultra = layoutFor(PhysicalLayoutPolicy::kUltraCompact);
+    CHECK_EQ(ultra.rowTitle, 0);
+    CHECK_EQ(ultra.rowButtonA, 1);
+    CHECK_EQ(ultra.rowButtonB, 1);
+    CHECK_EQ(ultra.rowCounter, 2);
+    CHECK_EQ(ultra.rowKeyboard, 3);
+    CHECK_EQ(ultra.rowMouse, 3);
+    CHECK_EQ(ultra.textMaxChars, SceneRenderer::kTextMaxChars);
+    CHECK(ultra.compactPrefix);
+}
+
+void test_layout_invalid_geometry_falls_back_to_compact() {
+    using espview::oled::layoutFor;
+    using espview::oled::PhysicalLayoutPolicy;
+    const auto fallback = layoutFor(PhysicalLayoutPolicy::kNormal, 64, 32);
+    const auto compact = layoutFor(PhysicalLayoutPolicy::kCompact, 128, 64);
+    CHECK_EQ(fallback.rowTitle, compact.rowTitle);
+    CHECK_EQ(fallback.rowButtonA, compact.rowButtonA);
+    CHECK_EQ(fallback.rowButtonB, compact.rowButtonB);
+    CHECK_EQ(fallback.rowCounter, compact.rowCounter);
+    CHECK_EQ(fallback.rowKeyboard, compact.rowKeyboard);
+    CHECK_EQ(fallback.rowMouse, compact.rowMouse);
+    CHECK_EQ(fallback.textMaxChars, compact.textMaxChars);
+    CHECK_EQ(fallback.compactPrefix, compact.compactPrefix);
+}
+
+void test_render_normal_rows_full_text() {
+    SceneRenderer r(espview::oled::PhysicalLayoutPolicy::kNormal);
+    OledFb fb;
+    LogicalScene s;
+    buildDemoScene(s);
+    r.render(s, fb);
+    // Title row0 'E' glyph unchanged.
+    const uint8_t* g = OledFb::fontGlyph('E');
+    for (int rr = 0; rr < OledFb::kFontHeight; ++rr) {
+        for (int col = 0; col < OledFb::kFontWidth; ++col) {
+            CHECK_EQ(fb.getPixel(col, rr), ((g[rr] >> col) & 1u) != 0);
+        }
+    }
+    // Buttons on separate rows: A box corner row1, B box corner row2.
+    CHECK(fb.getPixel(0, 8));
+    CHECK(fb.getPixel(0, 16));
+    // Counter panel outline row3.
+    CHECK(fb.getPixel(0, 24));
+    // Keyboard row4 (y=32..39): full text "Keyboard: B" -> second glyph 'e'
+    // (compact "K: B" would show ':' here), proving no compact prefix.
+    const uint8_t* eg = OledFb::fontGlyph('e');
+    for (int rr = 0; rr < OledFb::kFontHeight; ++rr) {
+        for (int col = 0; col < OledFb::kFontWidth; ++col) {
+            CHECK_EQ(fb.getPixel(8 + col, 32 + rr), ((eg[rr] >> col) & 1u) != 0);
+        }
+    }
+    // Mouse row5 (y=40..47): 'M' glyph at x0.
+    const uint8_t* mg = OledFb::fontGlyph('M');
+    for (int rr = 0; rr < OledFb::kFontHeight; ++rr) {
+        for (int col = 0; col < OledFb::kFontWidth; ++col) {
+            CHECK_EQ(fb.getPixel(col, 40 + rr), ((mg[rr] >> col) & 1u) != 0);
+        }
+    }
+}
+
+void test_render_ultra_compact_merged_row() {
+    SceneRenderer r(espview::oled::PhysicalLayoutPolicy::kUltraCompact);
+    OledFb fb;
+    LogicalScene s;
+    buildDemoScene(s);
+    r.render(s, fb);
+    // K/M merged on row3 (y=24..31): 'K' at x0.
+    const uint8_t* kg = OledFb::fontGlyph('K');
+    for (int rr = 0; rr < OledFb::kFontHeight; ++rr) {
+        for (int col = 0; col < OledFb::kFontWidth; ++col) {
+            CHECK_EQ(fb.getPixel(col, 24 + rr), ((kg[rr] >> col) & 1u) != 0);
+        }
+    }
+    // 'M' glyph present later on the same row (x 8..127).
+    const uint8_t* mg = OledFb::fontGlyph('M');
+    bool found = false;
+    for (int x = 8; x + OledFb::kFontWidth <= OledFb::kWidth && !found; ++x) {
+        bool match = true;
+        for (int rr = 0; rr < OledFb::kFontHeight && match; ++rr) {
+            for (int col = 0; col < OledFb::kFontWidth && match; ++col) {
+                if (fb.getPixel(x + col, 24 + rr) != (((mg[rr] >> col) & 1u) != 0)) {
+                    match = false;
+                }
+            }
+        }
+        if (match) {
+            found = true;
+        }
+    }
+    CHECK(found);
+}
+
+void test_policies_deterministic_and_semantic() {
+    for (int p = 0; p < 3; ++p) {
+        const auto policy = static_cast<espview::oled::PhysicalLayoutPolicy>(p);
+        SceneRenderer r(policy);
+        OledFb a, b;
+        LogicalScene s1, s2;
+        buildDemoScene(s1, "Counter: 1", "Keyboard: NONE", "Mouse: 0,0");
+        buildDemoScene(s2, "Counter: 2", "Keyboard: NONE", "Mouse: 0,0");
+        r.render(s1, a);
+        r.render(s1, b);
+        CHECK(fbEqual(a, b));   // deterministic per policy
+        r.render(s2, b);
+        CHECK(!fbEqual(a, b));  // semantic state propagates per policy
+    }
+}
+
+void test_policy_getter() {
+    using espview::oled::PhysicalLayoutPolicy;
+    SceneRenderer def;
+    CHECK(def.policy() == PhysicalLayoutPolicy::kCompact);
+    SceneRenderer normal(PhysicalLayoutPolicy::kNormal);
+    CHECK(normal.policy() == PhysicalLayoutPolicy::kNormal);
+    SceneRenderer ultra(PhysicalLayoutPolicy::kUltraCompact);
+    CHECK(ultra.policy() == PhysicalLayoutPolicy::kUltraCompact);
+}
+
 }  // namespace
 
 void runSceneRendererTests() {
@@ -274,5 +419,11 @@ void runSceneRendererTests() {
     test_deterministic();
     test_resolution_independent_physical();
     test_semantic_state_propagates();
+    test_layout_for_policies();
+    test_layout_invalid_geometry_falls_back_to_compact();
+    test_render_normal_rows_full_text();
+    test_render_ultra_compact_merged_row();
+    test_policies_deterministic_and_semantic();
+    test_policy_getter();
     std::printf("[scene_renderer] all passed\n");
 }
