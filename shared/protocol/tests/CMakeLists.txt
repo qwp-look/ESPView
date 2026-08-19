@@ -43,12 +43,13 @@ add_executable(espview_protocol_tests
     ../../oled/tests/physical_renderer_test.cpp
     ../../oled/tests/scene_renderer_test.cpp
     ../../oled/tests/oled_preview_test.cpp
+    ../../render/tests/render_pipeline_test.cpp
     ../../../pc/src/physical_preview_state.cpp
     ../../../pc/src/physical_preview_state_test.cpp
     ../../../pc/src/wifi_wizard_state.cpp
     ../../../pc/src/wifi_wizard_state_test.cpp
 )
-target_link_libraries(espview_protocol_tests PRIVATE espview_protocol espview_input espview_display espview_transport espview_oled espview_wifi)
+target_link_libraries(espview_protocol_tests PRIVATE espview_protocol espview_input espview_display espview_transport espview_oled espview_wifi espview_render)
 
 # remote_display_test.cpp 位于 shared/display/tests（相对引用本目录 test_util.h）。
 target_include_directories(espview_protocol_tests PRIVATE

@@ -45,6 +45,8 @@ if(ESPVIEW_BUILD_TESTS)
     add_subdirectory(../transport transport_build)
     # M7-A：OLED 层测试依赖 shared/oled（OledFb / 命令/分段生成）。
     add_subdirectory(../oled oled_build)
+    # M8-C（C1）：渲染 pipeline 层测试依赖 shared/render（RenderPipeline / stages / factory）。
+    add_subdirectory(../render render_build)
     # M7-E: ScanTransaction host tests (shared/wifi).
     add_subdirectory(../wifi wifi_build)
     add_subdirectory(tests)
