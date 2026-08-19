@@ -140,6 +140,11 @@ private:
 
     bool physicalDegraded_ = false;
     DisplayRouteMode pendingApplyMode_ = DisplayRouteMode::kVirtualOnly;  // 本次实际发送的模式
+    // M8-C C6：Apply 会话 epoch —— 每次 onSwitchStart / onDisconnected 递增；
+    // onAck 只接受与本次 Apply 相同 epoch 的 ACK。防跨会话重发后迟到旧 ACK
+    // 误结束新 Apply（Qt queued 顺序之外的显式门控；会话内正常路径恒匹配）。
+    uint32_t applyEpoch_ = 0;
+    uint32_t pendingApplyEpoch_ = 0;  // onSwitchStart 锁定的本次 Apply epoch
 };
 
 }  // namespace display

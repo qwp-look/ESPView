@@ -43,6 +43,7 @@ bool DisplayUiState::applyRequested() {
 void DisplayUiState::onSwitchStart() {
     pendingApplyMode_ = selectedMode;  // 锁定本次实际发送的模式
     pendingInterruptedApply = false;
+    pendingApplyEpoch_ = ++applyEpoch_;  // M8-C C6：本次 Apply 的会话 epoch（ACK 归属）
     switchingInProgress = true;
     applyEnabled = false;
     routerState = UiRouterState::kSwitching;
@@ -53,8 +54,8 @@ void DisplayUiState::onSwitchStart() {
 }
 
 void DisplayUiState::onAck(bool ok) {
-    if (!switchingInProgress) {
-        return;  // stale ACK（已超时/断线清理）：忽略
+    if (!switchingInProgress || pendingApplyEpoch_ != applyEpoch_) {
+        return;  // stale ACK（已超时/断线清理/跨会话重发后迟到）：忽略
     }
     pendingInterruptedApply = false;
     switchingInProgress = false;
@@ -93,6 +94,7 @@ void DisplayUiState::onDisconnected() {
     // P1-1：在飞 Apply（SET_MODE 已发、ACK 未回）被断线打断 → 记录
     // interrupted-apply，重连后由接线方自动补发（不能静默丢失切换意图）。
     pendingInterruptedApply = switchingInProgress;
+    ++applyEpoch_;  // M8-C C6：会话边界 → 旧 Apply 的 ACK 归属失效
     sessionConnected = false;
     switchingInProgress = false;
     applyEnabled = true;        // 断开时允许点击 Apply → waitingForConnection
@@ -103,6 +105,12 @@ void DisplayUiState::onDisconnected() {
 
 void DisplayUiState::onFullCommit() {
     sessionConnected = true;
+    // M8-C C6：切换在飞（SET_MODE 已发、ACK 未回）期间到达的 FULL 帧属于旧
+    // 模式，不得提前结束本次 Apply（requested → ACK → applied → FULL →
+    // committed 五阶段，ACK 未回前 FULL 不算切换完成）。
+    if (switchingInProgress) {
+        return;  // 保留 switchingInProgress / applyEnabled=false / kSwitching
+    }
     fullResyncPending = false;
     switchingInProgress = false;
     applyEnabled = true;

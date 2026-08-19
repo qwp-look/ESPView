@@ -655,6 +655,122 @@ void testRollbackSequences() {
     rollbackToVirtualOnly(DisplayRouteMode::kPhysicalOnly);
 }
 
+
+// ---- M8-C C6：DisplayMode 转移矩阵 + 失败恢复压力 + Apply epoch 门控 ----
+
+// 单条有向转移：from（已收敛）→ Apply to → 切换在飞（旧模式 FULL 不得提前
+// 结束 Apply，M8-C C6 门控）→ ACK ok → applied=to → FULL 收敛。
+void directedTransition(DisplayRouteMode from, DisplayRouteMode to) {
+    DisplayUiState s;
+    readyState(s, from);
+    CHECK_EQ(static_cast<int>(s.appliedMode), static_cast<int>(from));
+    CHECK_EQ(static_cast<int>(s.routerState), static_cast<int>(UiRouterState::kConnected));
+    CHECK(s.setSelectedMode(to));
+    CHECK(s.applyRequested());
+    CHECK(s.switchingInProgress);
+    CHECK(!s.applyEnabled);
+    CHECK_EQ(static_cast<int>(s.routerState), static_cast<int>(UiRouterState::kSwitching));
+    // 切换在飞：旧模式 FULL 提交不得清除 switchingInProgress（epoch 门控核心）。
+    s.onFullCommit();
+    CHECK_MSG(s.switchingInProgress, "M8-C C6: in-flight FULL must not end the apply");
+    CHECK_MSG(!s.applyEnabled, "M8-C C6: in-flight FULL must not re-enable Apply");
+    CHECK_EQ(static_cast<int>(s.routerState), static_cast<int>(UiRouterState::kSwitching));
+    // ACK ok → applied=to。
+    s.onAck(true);
+    CHECK(!s.switchingInProgress);
+    CHECK(s.applyEnabled);
+    CHECK_EQ(static_cast<int>(s.appliedMode), static_cast<int>(to));
+    CHECK_EQ(static_cast<int>(s.selectedMode), static_cast<int>(to));
+    // PhysicalOnly 收敛不依赖 FULL（B3）；其余模式 ACK 后等 FULL 收敛。
+    CHECK_EQ(s.fullResyncPending, to != DisplayRouteMode::kPhysicalOnly);
+    s.onFullCommit();
+    CHECK(!s.fullResyncPending);
+    CHECK_EQ(static_cast<int>(s.routerState), static_cast<int>(UiRouterState::kConnected));
+}
+
+void testDirectedTransitionMatrix() {
+    const DisplayRouteMode modes[4] = {DisplayRouteMode::kVirtualOnly,
+                                       DisplayRouteMode::kPhysicalOnly,
+                                       DisplayRouteMode::kMirror,
+                                       DisplayRouteMode::kSplit};
+    int count = 0;
+    for (int i = 0; i < 4; ++i) {
+        for (int j = 0; j < 4; ++j) {
+            if (i == j) {
+                continue;
+            }
+            directedTransition(modes[i], modes[j]);
+            ++count;
+        }
+    }
+    CHECK_MSG(count == 12, "M8-C C6: 12 directed transitions (0<->1<->2<->3)");
+}
+
+// 失败 → VirtualOnly 恢复压力：三种物理模式 ACK 失败 ×50 轮，每轮必须回退
+// VirtualOnly 并可重新 Apply 收敛（失败永远可恢复）。
+void failureRecoveryStress() {
+    const DisplayRouteMode physical[3] = {DisplayRouteMode::kPhysicalOnly,
+                                          DisplayRouteMode::kMirror,
+                                          DisplayRouteMode::kSplit};
+    for (int round = 0; round < 50; ++round) {
+        for (DisplayRouteMode m : physical) {
+            DisplayUiState s;
+            readyState(s, DisplayRouteMode::kVirtualOnly);
+            CHECK(s.setSelectedMode(m));
+            CHECK(s.applyRequested());
+            CHECK(s.switchingInProgress);
+            s.onAck(false);  // 设备拒绝 → 回退选择到 appliedMode（VirtualOnly）
+            CHECK_MSG(!s.switchingInProgress, "M8-C C6: failed ACK clears switching");
+            CHECK(s.applyEnabled);
+            CHECK_EQ(static_cast<int>(s.appliedMode),
+                     static_cast<int>(DisplayRouteMode::kVirtualOnly));
+            CHECK_EQ(static_cast<int>(s.selectedMode),
+                     static_cast<int>(DisplayRouteMode::kVirtualOnly));
+            CHECK(!s.fullResyncPending);
+            CHECK(!s.lastError.empty());
+            // 恢复：重新 Apply VirtualOnly → ACK → FULL → 收敛（错误可清除）。
+            CHECK(s.applyRequested());
+            s.onAck(true);
+            s.onFullCommit();
+            CHECK_EQ(static_cast<int>(s.appliedMode),
+                     static_cast<int>(DisplayRouteMode::kVirtualOnly));
+            CHECK_EQ(static_cast<int>(s.routerState), static_cast<int>(UiRouterState::kConnected));
+            CHECK(s.lastError.empty());
+        }
+    }
+}
+
+// 会话边界 epoch 门控：断线打断在飞 Apply → 迟到旧 ACK 忽略 → 重连重发新
+// Apply → ACK → FULL 收敛（跨会话重发不得被旧 ACK 污染）。
+void testSessionEpochGating() {
+    DisplayUiState s;
+    readyState(s, DisplayRouteMode::kVirtualOnly);
+    CHECK(s.setSelectedMode(DisplayRouteMode::kMirror));
+    CHECK(s.applyRequested());
+    CHECK(s.switchingInProgress);
+    // 断线打断（P1-1 interrupted-apply）。
+    s.onDisconnected();
+    CHECK(s.pendingInterruptedApply);
+    CHECK(!s.switchingInProgress);
+    CHECK(!s.sessionConnected);
+    // 迟到旧 ACK（断线后才到）→ 忽略，不改 appliedMode、不挂 FULL。
+    s.onAck(true);
+    CHECK(!s.switchingInProgress);
+    CHECK(!s.fullResyncPending);
+    CHECK_EQ(static_cast<int>(s.appliedMode), static_cast<int>(DisplayRouteMode::kVirtualOnly));
+    // 重连 + 重发（epoch 已换代，旧 ACK 归属失效）。
+    s.onConnected();
+    CHECK(s.sessionConnected);
+    CHECK(s.setSelectedMode(DisplayRouteMode::kMirror));
+    CHECK(s.applyRequested());
+    CHECK(s.switchingInProgress);
+    s.onAck(true);
+    CHECK_EQ(static_cast<int>(s.appliedMode), static_cast<int>(DisplayRouteMode::kMirror));
+    CHECK(s.fullResyncPending);
+    s.onFullCommit();
+    CHECK(!s.fullResyncPending);
+    CHECK_EQ(static_cast<int>(s.routerState), static_cast<int>(UiRouterState::kConnected));
+}
 }  // namespace
 
 void runDisplayUiStateTests() {
@@ -683,5 +799,9 @@ void runDisplayUiStateTests() {
     testResolutionThreeStates();      // B2：分辨率三态
     testReconnectRestoresPhysicalMode();  // B6：重连恢复物理模式
     testRollbackSequences();          // B3：失败 → VirtualOnly 恢复
+    // ---- M8-C（C6）：DisplayMode 转移矩阵 + 失败恢复压力 + epoch 门控 ----
+    testDirectedTransitionMatrix();   // C6：12 条有向转移（0↔1↔2↔3）
+    failureRecoveryStress();          // C6：ACK 失败 → VirtualOnly ×50/物理模式
+    testSessionEpochGating();         // C6：会话边界 Apply epoch 门控
     std::printf("[display_ui_state] done\n");
 }
