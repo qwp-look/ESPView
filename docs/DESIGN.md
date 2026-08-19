@@ -967,9 +967,19 @@ B3 DisplayMode 状态机硬化（两阶段看门狗 + 失败回退 VirtualOnly�
 B5 ACK 可靠投递 + 对端超时验证；B6 对端超时双因子 + 重连恢复；B7 host tests；
 B8 真实硬件回归（UART/TCP 模式矩阵各 32/32、UART 重连 ×10）；B9 文档 | ✅ 完成（2026-08-18；
 真实硬件 UART+TCP；host 394,892 checks / 0 failures；详见 AV 章） |
+| M8-C | Rendering Pipeline 抽象 + ESP32-S3 Bring-up + Build/Flash/Qt 可靠性 + DisplayMode 稳定性（wire format 零改动）：
+C1 可组合渲染管线（shared/render：RenderFormat / IRenderStage / RenderPipeline / PipelineFactory fast+quality）；
+C2 PhysicalRenderer 迁移 fast pipeline（byte-identical，golden 不变）；C3 物理布局策略 + scene renderer；
+C4 per-target 构建目录隔离 + artifact-only flash + renderer Kconfig（ESPVIEW_RENDER_PIPELINE_FAST/QUALITY）；
+C5 Qt runtime deploy + clean-PATH smoke；C6 mode-switch epoch 门控 + 迁移矩阵测试；
+C7 S3 bring-up（OLED SDA=13/SCL=18、S3 USB auto-reset 烧录、baud 460800、模式切换 pending-ACK 修复）；
+C8 decoder HELLO seq 基线修复（断线重连握手 flake）；C9 文档/CI；C10 最终回归 | ✅ 完成（2026-08-19；
+真实硬件 ESP32-S3-N16R8：flash PASS、TCP 会话健康（FULL 153600B / OLED err=0）、TCP 重连 ×10 PASS、
+四模式切换验收（VirtualOnly/Mirror/Split/PhysicalOnly 已应用于）；host 411,805 checks / 0 failures；
+详见 AW 章） |
 | M6(未来) | 真实 LCD (DEVICE/MIRROR)、触摸（INPUT_TOUCH）、TinyUSB | 未开始（运行时 DisplayMode 已于 M7-C3 实现，SET_MODE 0..3） |
 
-注：表中各里程碑的 host checks 数字为该里程碑完成时的快照；当前最新全量基线见 AR.8（393,661 + 211 checks / 0 failures）。
+注：表中各里程碑的 host checks 数字为该里程碑完成时的快照；当前最新全量基线见 AW.10（411,805 checks / 0 failures）。
 注：M8-A7 为文档与构建配置层改动（target/profile 抽象、S3 准备、examples/docs 工具链），wire format 零改动，host 数字基线不变。
 
 ### M2 前置架构冻结（M1-3D 检查）
@@ -4742,3 +4752,120 @@ AS.2 债务清单 D1–D15 全部闭环，修复映射与验证证据如下。
   Qt build PASS、LVGL build PASS、UART hardware PASS、TCP hardware PASS
   （Wi-Fi 环境可用）、security scan PASS、docs check PASS。
 - wire format 零改动；生产默认 profile（uart）已恢复。
+
+## AW. M8-C Rendering Pipeline / S3 Bring-up / Build-Flash-Qt Reliability（2026-08-19 冻结；wire format 零改动）
+
+### AW.1 范围与冻结原则
+
+- 本轮（C1..C10）不修改 wire format：Packet Header / CRC / 既有消息 / Frame 语义零改动；
+  只做渲染管线抽象、ESP32-S3 bring-up、build/flash/Qt 可靠性、DisplayMode 稳定性。
+- 审计先行（任务书 §四十二）：DESIGN.md、shared/{display,oled,input,protocol,transport}、
+  pc Qt、esp32 target_info、Kconfig、build/flash 脚本、sdkconfig.defaults.esp32s3 全部核对后
+  才开始编码；不复制 esp32 组件到 esp32s3（单一源码，target 只决定 capability/default/profile）。
+
+### AW.2 C1 可组合渲染管线（shared/render）
+
+- 新增 shared/render：RenderFormat（rgb565/gray8/mono1-page）、IRenderStage 契约、
+  RenderPipeline（构建期 format-chain 校验 + init 期 scratch 分配）、PipelinePlan（诊断/bench）。
+- stages：luminance、threshold、nearest-scale、bilinear-scale、crop、ordered-dither（4x4 Bayer）、
+  fast-scale-threshold（PhysicalRenderer hot path）。
+- PipelineFactory：fast（classic ESP32，zero scratch）vs quality（S3，bilinear + dither）mono 管线；
+  算法选择由 profile 决定，工程内不再散布 #if ESP32 分叉。
+- host tests：format helpers / color anchors / threshold boundary / scale-crop-dither 确定性 /
+  fast-path 映射与增量窗口 / format mismatch 构建期拒绝 / factory fast-quality 几何 / gradient sanity；
+  ctest 2/2 Passed；host 409,154 checks / 0 failures（原 394,892）。
+
+### AW.3 C2 PhysicalRenderer 迁移 fast pipeline（byte-identical）
+
+- PhysicalRenderer 变为 fast-pipeline 门面：单 stage RenderPipeline
+  （FastScaleThresholdStage，source-driven last-write-wins，与 M7-C2 映射逐字节一致）。
+- 公共 API/行为不变：增量 compact-rect 契约、按 srcH 逐调用 crop、OOB clip、w/h<=0 no-op、
+  srcW/H<=0 clear；luminance/threshold 委托 shared/render render_color.h（单一实现）。
+- pipeline 仅在逻辑分辨率/阈值变化时重建（init-time），每帧零分配。
+- host golden（physical_renderer_test）不变且全绿：409,775 checks / 0 failures。
+
+### AW.4 C3 物理布局策略与 Scene Renderer
+
+- scene_renderer：物理布局策略按 display capability / 分辨率 / font metrics 决定，
+  逻辑 semantic element（button/label/counter/focus）映射到物理布局；不再简单 scale=0.4。
+- 文字独立渲染（M7 结论保持）：缩小 bitmap 会破坏 glyph → 文字直接绘制到 Mono1/Gray8，
+  位置来自 Logical Layout；Qt 与 OLED 共享 element bounds，字体可不同（semantic mirror）。
+
+### AW.5 C4 Build/Flash per-target 隔离 + Renderer Kconfig
+
+- build：sp32/build/<target>/<profile> 隔离目录，杜绝跨 target 漂移。
+- flash：artifact-only 预检，永不重新 configure；CONFIG_IDF_TARGET 交叉校验。
+- render：ESPVIEW_RENDER_PIPELINE_FAST/QUALITY Kconfig + profile render 属性（FAST）；
+  PhysicalRenderer 支持 quality mono 管线（全帧，pipeline factory）。
+- CI/docs 同步 per-target 路径。
+
+### AW.6 C5 Qt Runtime Deploy + clean-PATH smoke
+
+- verify_qt.bat：build → runtime deploy（Qt6 DLL / MinGW runtime / platforms/qwindows.dll）→
+  smoke test；build/verify_qt/ 独立可运行，不依赖用户临时 PATH。
+
+### AW.7 C6 Mode-switch epoch 门控
+
+- display_ui_state：applyEpoch_ / pendingApplyEpoch_ —— onSwitchStart 锁定本次 Apply 的 epoch；
+  onAck 只接受与本次 Apply 相同 epoch 的 ACK（跨会话重发后迟到旧 ACK 不误结束新 Apply）；
+  onDisconnected 递增 epoch（会话边界 → 旧 Apply 归属失效）；onFullCommit 在 switchingInProgress
+  期间不提前结束 Apply（ACK 未回前 FULL 不算切换完成）。
+- 状态机五阶段：requested → accepted(ACK) → applied → rendered(FULL) → committed；
+  禁止“ACK OK 即成功”“FULL 超时即 Router 错误”的简化判定。
+- host transition-matrix 测试新增（display_ui_state_test，120 行）。
+
+### AW.8 C7 S3 bring-up 与模式切换 pending-ACK 修复
+
+- OLED 引脚 target 条件化：经典 ESP32 SDA=21/SCL=22；ESP32-S3 默认 SDA=13/SCL=18
+  （YD-ESP32-23 2022-V1.3 实测接线，SSD1306 0x3C 探测成功 err=0 ok=1；sdkconfig 显式值仍可覆盖）。
+- flash 脚本：新增 --usb-reset / --before <mode>（auto|default-reset|usb-reset|no-reset；
+  auto 对 esp32s3 解析为 usb-reset，其余 default-reset）；baud 直通 + 460800 默认；
+  --no-reset 映射 --after no-reset；--before 校验修正。
+- 模式切换 pending-ACK 修复（pc/src/serial_worker.cpp）：drainDisplayModeQueue() 发送 SET_MODE
+  成功后注册 pendingAckKind_=kSetMode（此前未注册 → ACK 到达时 kind=0 被吞 → GUI 永不报
+  “已应用于”）。真实 S3 硬件验证：VirtualOnly/Mirror/Split 切换全部成功。
+
+### AW.9 C8 HELLO seq 基线修复（握手重同步）
+
+- 现象（fast-ci flake + 真实硬件偶发）：旧会话残留字节把 decoder seq 基线污染到 old-seq+1，
+  新会话 HELLO(seq=0) 被 seq-gap 规则丢弃 → 被动恢复路径（DISCONNECTED→HELLO→reply HELLO）
+  永不完成 → 握手超时。
+- 修复：shared/protocol/decoder.cpp 在 kVerify 状态收到 HELLO 时跳过 seq 检查，以 HELLO 自身
+  seq 重建 expectedSeq_（DESIGN.md：握手双方 packet.seq 清零）。
+- 测试：decoder_test 新增 hello_rebuilds_seq_baseline（stale seq=42 + hello seq=0 → 1 gap +
+  HELLO 正常派发）；host 411,805 checks / 0 failures。
+
+### AW.10 C9 文档 / CI 收尾（本节）
+
+- DESIGN.md M 表新增 M8-C 行；本章（AW）为 M8-C 实施与证据记录；README / docs/changelog 同步。
+- CI 覆盖核对：esp32-ci.yml esp32s3-smoke（S3 固件编译冒烟，非 PR 触发）；renderer tests 并入
+  espview_protocol_tests（full/fast/windows/sanitizer workflow 均构建并运行）；
+  check_docs / security_scan 全过，docs 无死链。
+
+### AW.11 C10 最终回归（真实硬件 + host）
+
+- host：verify_host.bat ALL PASS —— espview_protocol_tests 411,805 checks / 0 failures
+  + i18n + transport_config + queue 自测。
+- Qt：verify_qt.bat ALL PASS（runtime deploy + clean-PATH smoke）。
+- LVGL：verify_lvgl.bat ALL PASS（esp32s3 固件重建成功，含 C8 decoder 修复）。
+- 真实硬件（ESP32-S3-N16R8 + SSD1306 OLED，SDA=13/SCL=18）：
+  - 烧录：espview_build.bat -esp32 -t esp32s3 -b tcp → espview_flash.bat -p COM6 -t esp32s3
+    -b tcp --usb-reset，flash PASS（USB 口枚举 COM6）。
+  - TCP 会话：ESP32 STA ↔ PC TCP server :8765（真实 IP 仅存本地 runtime logs，不落 Git）；FULL 320x240 RGB565 153600B 提交；
+    OLED err=0；CRC/seq/会话错误全 0。
+  - TCP 重连 ×10：kill→重启 GUI，每轮 ~3s 内 CONNECTED + FULL commit
+    （build/gui_recon_summary.txt，10/10 ok=True）。
+  - 模式切换：C7 修复后四模式切换验收（VirtualOnly/Mirror/Split 已应用于 + PhysicalOnly 已应用于）。
+- 本轮跳过（用户明确指示）：12 组模式切换矩阵（0↔1↔2↔3）、TCP FULL 性能 5-run、
+  10–30 分钟长稳 → 记录为 DEFERRED，不做伪造结论；后续 M8-C 续轮补做。
+
+### AW.12 结论
+
+- M8-C 完成 Gate（代码/构建/回归部分）通过：Rendering pipeline fast+quality PASS、
+  PhysicalRenderer byte-identical PASS、per-target build/flash PASS、Qt runtime deploy PASS、
+  mode-switch epoch 门控 PASS、S3 OLED bring-up PASS、HELLO 重连握手修复 PASS、
+  host/Qt/LVGL regression PASS、security scan PASS、docs check PASS。
+- wire format 零改动；生产默认 profile 保持仓库定义状态（本轮验证使用 esp32s3/tcp profile；
+  esp32/dependencies.lock 为构建产物，已回到仓库基线）。
+- 未完成项（DEFERRED，非阻塞）：模式矩阵 12 组全量、性能 5-run、10–30 分钟长稳、真实 AP
+  outage（环境不可控，与 AV.11 同源）。

@@ -1,6 +1,6 @@
 # 变更日志（Changelog）
 
-> 里程碑历史提炼自 `git log`（真实提交）。当前里程碑范围 M0..M8-B 已提交（HEAD 见 git log）。
+> 里程碑历史提炼自 `git log`（真实提交）。当前里程碑范围 M0..M8-C 已提交（HEAD 见 git log）。
 > M0..M6-E 集中在 v0.1 初始提交；M7/M8 系列逐里程碑提交。
 > （docs/ 共 19 份文档，均已随里程碑提交）。
 
@@ -74,10 +74,19 @@
   失败回退 VirtualOnly、ACK 可靠投递（pending 单槽）、对端超时双因子、Split Drawer /
   Physical Preview 一致、i18n；真实硬件 UART/TCP 模式矩阵各 32/32 + UART 重连 ×10
   全 PASS；证据见 DESIGN AV 章（2026-08-18）。
+- M8-C：Rendering Pipeline 抽象 + ESP32-S3 Bring-up + Build/Flash/Qt 可靠性 +
+  DisplayMode 稳定性——shared/render 可组合渲染管线（fast/quality factory）、
+  PhysicalRenderer 迁移 fast pipeline（byte-identical）、物理布局策略、per-target
+  构建目录隔离 + artifact-only flash + renderer Kconfig、Qt runtime deploy +
+  clean-PATH smoke、mode-switch epoch 门控、S3 OLED 引脚 target 条件化
+  （SDA=13/SCL=18）+ USB auto-reset 烧录 + 460800 baud、模式切换 pending-ACK 修复、
+  decoder HELLO seq 基线修复（重连握手 flake）；真实 S3 硬件：flash PASS、TCP FULL
+  153600B / OLED err=0、TCP 重连 ×10 PASS、四模式切换验收；host 411,805 checks /
+  0 failures；证据见 DESIGN AW 章（2026-08-19）。
 
 ## 版本策略说明
 
 - 协议版本 `VERSION=0x01` 冻结：M7 系列全部为 wire additive（新增 TYPE/错误码/
   kSplit=3），不改 Packet Header / CRC / 既有消息 / Frame 语义。
-- host 测试规模随里程碑增长：M0 207,900 checks → M8-B 394,892 checks
-  （不含 i18n/transport_config 独立套件；实测数字见 DESIGN.md 对应章节）。
+- host 测试规模随里程碑增长：M0 207,900 checks → M8-B 394,892 checks →
+  M8-C 411,805 checks（不含 i18n/transport_config 独立套件；实测数字见 DESIGN.md 对应章节）。

@@ -1,6 +1,6 @@
 # ESPView -- ESP32 Virtual Display & Input Bridge
 
-Phase-1 prototype (v0.1) -- milestones M0-M8-B completed (2026-08-18). The wire protocol is
+Phase-1 prototype (v0.1) -- milestones M0-M8-C completed (2026-08-19). The wire protocol is
 frozen and covered by host suites plus real-hardware acceptance records; the full
 specification and evidence live in [docs/DESIGN.md](docs/DESIGN.md) (written in
 Simplified Chinese).
@@ -491,9 +491,9 @@ See [docs/security.md](docs/security.md).
 
 ## Project status and roadmap
 
-**Status (honest):** Phase-1 v0.1 prototype. Milestones M0-M8-B are committed
-(display UX / dynamic resolution / display-mode state machine / routing hardening;
-2026-08-18; exact history: git log --oneline).
+**Status (honest):** Phase-1 v0.1 prototype. Milestones M0-M8-C are committed
+(rendering pipeline abstraction / ESP32-S3 bring-up / build-flash-Qt reliability /
+display-mode stability; 2026-08-19; exact history: git log --oneline).
 The wire protocol has been frozen since M1-3C -- subsequent milestones only add
 capabilities without changing existing messages.
 
@@ -526,6 +526,14 @@ capabilities without changing existing messages.
   machine + rollback, ACK reliable delivery, peer-timeout dual-factor, split
   drawer / physical preview consistency, hardware mode-switch matrix
   UART 32/32 + TCP 32/32 + reconnect x10 (current)
+- M8-C -- composable rendering pipeline (shared/render, fast/quality factory),
+  PhysicalRenderer onto fast pipeline (byte-identical), physical layout policy,
+  per-target build dirs + artifact-only flash + renderer Kconfig, Qt runtime
+  deploy + clean-PATH smoke, mode-switch epoch gating, ESP32-S3 bring-up
+  (OLED SDA=13/SCL=18, USB auto-reset flash, 460800 baud), display-mode
+  pending-ACK fix, decoder HELLO seq-baseline fix (reconnect handshake);
+  real S3 hardware: flash PASS / TCP FULL 153600B / OLED err=0 / TCP reconnect
+  x10 PASS / four-mode apply verified (current)
 
 **Roadmap (not yet implemented):** hardware verification of the RF/USB power
 hypothesis (voltage/current capture), AP-outage testing, and -- explicitly out of
