@@ -18,12 +18,15 @@ REM   --baud N      flash/probe baud (default 460800; CH340 UART boards may
 REM                 use 921600; ESP32-S3 native USB-Serial/JTAG is USB-limited
 REM                 so baud is cosmetic there)
 REM   -t <target>   IDF target (esp32 default / esp32s3); drives esptool --chip
-REM   --no-reset    do not reset the chip after flashing. ESP-IDF v6.0.2
-REM                 idf.py flash has no native --no-reset, so this calls
-REM                 esptool directly (--before default-reset --after
-REM                 no-reset write-flash @flash_args) so the chip keeps
-REM                 running after the write completes. flash_args is
-REM                 preflighted for existence before invoking esptool.
+REM   --no-reset    do not reset the chip after flashing (esptool --after
+REM                 no-reset); the chip keeps running after the write.
+REM   --usb-reset   use esptool --before usb-reset (ESP32-S3 native
+REM                 USB-Serial/JTAG auto-reset; no manual BOOT/EN needed).
+REM   --before V    esptool reset mode: auto (default; usb-reset for
+REM                 esp32s3, else default-reset) | default-reset |
+REM                 usb-reset | no-reset. Non-default modes call esptool
+REM                 directly with --before V --after AFTER write-flash
+REM                 @flash_args (flash_args preflighted for existence).
 REM   --dry-run     parse args + validate only; do NOT flash anything.
 REM   --check       same as --dry-run (preflight only).
 REM   M8-C C4: flash is artifact-only - it NEVER reconfigures, never applies           the profile and never rewrites sdkconfig. Build dir is per-target:           esp32\build\<target>\<profile>\  (from -t and -b). A read-only           CONFIG_IDF_TARGET cross-check blocks flashing a build dir that           was built for a different target.
@@ -59,6 +62,8 @@ set "BAUD=460800"
 set "ESP32_PROFILE=uart_hw"
 set "ESP32_TARGET=esp32"
 set "NO_RESET="
+set "BEFORE=auto"
+set "AFTER=hard-reset"
 set "DRY_RUN="
 set "ANY_PROFILE="
 set "PROBE="
@@ -81,6 +86,9 @@ if /i "%~1"=="-t" ( if "%~2"=="" goto :usage
 if /i "%~1"=="--target" ( if "%~2"=="" goto :usage
                     set "ESP32_TARGET=%~2" & shift & shift & goto :parse )
 if /i "%~1"=="--no-reset" ( set "NO_RESET=1" & shift & goto :parse )
+if /i "%~1"=="--usb-reset" ( set "BEFORE=usb-reset" & shift & goto :parse )
+if /i "%~1"=="--before" ( if "%~2"=="" goto :usage
+                              set "BEFORE=%~2" & shift & shift & goto :parse )
 if /i "%~1"=="--dry-run"  ( set "DRY_RUN=1"  & shift & goto :parse )
 if /i "%~1"=="--check"    ( set "DRY_RUN=1"  & shift & goto :parse )
 if /i "%~1"=="--any-profile" ( set "ANY_PROFILE=1" & shift & goto :parse )
@@ -126,6 +134,15 @@ if not errorlevel 1 goto :target_ok
 echo [flash] ERROR: invalid target: %ESP32_TARGET%  ^(expected esp32 or esp32s3^)
 set "ERR=2" & goto :usage
 :target_ok
+REM ---- before-reset resolution: auto = usb-reset for esp32s3 ----
+if /i "%BEFORE%"=="auto" (
+    if /i "%ESP32_TARGET%"=="esp32s3" ( set "BEFORE=usb-reset" ) else ( set "BEFORE=default-reset" )
+)
+if defined NO_RESET set "AFTER=no-reset"
+if /i not "%BEFORE%"=="auto" if /i not "%BEFORE%"=="default-reset" if /i not "%BEFORE%"=="usb-reset" if /i not "%BEFORE%"=="no-reset" (
+    echo [flash] ERROR: invalid --before value: %BEFORE%  ^(auto^|default-reset^|usb-reset^|no-reset^)
+    set "ERR=2" & goto :usage
+)
 
 
 REM ---- probe mode: no whitelist / ESP-IDF / bin needed ---------
@@ -139,7 +156,7 @@ if errorlevel 1 goto :prof_tool_fail
 
 echo ============================================================
 echo ESPView flash: port=%PORT% baud=%BAUD% profile=%ESP32_PROFILE% target=%ESP32_TARGET%
-echo                no-reset=%NO_RESET% dry-run=%DRY_RUN%
+echo                before=%BEFORE% after=%AFTER% dry-run=%DRY_RUN%
 echo ============================================================
 if not defined ANY_PROFILE (
     echo [flash] profile summary:
@@ -173,8 +190,7 @@ if not exist "%BIN%" goto :no_bin
 
 REM ---- flash_args preflight (only used by --no-reset) -----------
 set "FLASH_ARGS_FILE=%ESP32_BUILD_DIR%\flash_args"
-if defined NO_RESET if not exist "%FLASH_ARGS_FILE%" goto :no_flash_args
-
+if not "%BEFORE%"=="default-reset" if not exist "%FLASH_ARGS_FILE%" goto :no_flash_args
 REM ---- traceability: target / profile / sdkconfig / build dir ----
 set "PROFILE_SDKCONFIG=%ESP32_BUILD_DIR%\sdkconfig"
 if defined ANY_PROFILE goto :trace_done
@@ -196,7 +212,7 @@ echo   BuildDir: %ESP32_BUILD_DIR%
 echo   Sdkconfig: %PROFILE_SDKCONFIG%  ^(read-only; not modified by flash^)
 echo   Firmware: %BIN%
 echo   Port    : %PORT%
-if defined NO_RESET echo   Reset   : no-reset ^(esptool --after no-reset^)
+echo   Reset   : --before %BEFORE% --after %AFTER%
 
 if defined DRY_RUN (
     echo.
@@ -204,18 +220,18 @@ if defined DRY_RUN (
     exit /b 0
 )
 
-if defined NO_RESET goto :flash_noreset
+if not "%BEFORE%"=="default-reset" goto :flash_esptool
 echo [flash] running: idf.py -B build\%ESP32_TARGET%\%ESP32_PROFILE% -p %PORT% -b %BAUD% flash (artifact-only; no reconfigure)
 powershell -NoProfile -ExecutionPolicy Bypass -Command "$ErrorActionPreference='Stop'; try { & { . '%ESPIDF_PROFILE%' }; Set-Location '%ROOT%\esp32'; idf.py -B build/%ESP32_TARGET%/%ESP32_PROFILE% -p %PORT% -b %BAUD% flash; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE } } catch { Write-Host ('[flash] ERROR: ' + $_.Exception.Message); exit 6 }"
 goto :flash_check
 
-:flash_noreset
+:flash_esptool
 REM --no-reset: esptool --after must precede the write-flash subcommand
 REM (esptool v5.3.1 rejects --after after write-flash). Call esptool
 REM directly using the flash_args file generated by idf.py.
 REM M8-A7（A7-7）：--chip 由 --target 确定（esp32 / esp32s3），不再硬编码 esp32。
-echo [flash] running: esptool --chip %ESP32_TARGET% -p %PORT% -b %BAUD% --before default-reset --after no-reset write-flash @flash_args
-powershell -NoProfile -ExecutionPolicy Bypass -Command "$ErrorActionPreference='Stop'; try { & { . '%ESPIDF_PROFILE%' }; Set-Location '%ESP32_BUILD_DIR%'; & ($env:IDF_PYTHON_ENV_PATH + '\Scripts\python.exe') -m esptool --chip %ESP32_TARGET% -p '%PORT%' -b %BAUD% --before default-reset --after no-reset write-flash '@flash_args'; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE } } catch { Write-Host ('[flash] ERROR: ' + $_.Exception.Message); exit 6 }"
+echo [flash] running: esptool --chip %ESP32_TARGET% -p %PORT% -b %BAUD% --before %BEFORE% --after %AFTER% write-flash @flash_args
+powershell -NoProfile -ExecutionPolicy Bypass -Command "$ErrorActionPreference='Stop'; try { & { . '%ESPIDF_PROFILE%' }; Set-Location '%ESP32_BUILD_DIR%'; & ($env:IDF_PYTHON_ENV_PATH + '\Scripts\python.exe') -m esptool --chip %ESP32_TARGET% -p '%PORT%' -b %BAUD% --before %BEFORE% --after %AFTER% write-flash '@flash_args'; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE } } catch { Write-Host ('[flash] ERROR: ' + $_.Exception.Message); exit 6 }"
 
 :flash_check
 if errorlevel 1 ( set "ERR=6" & goto :fail )
@@ -349,6 +365,8 @@ echo   --baud N      flash/probe baud ^(default 460800; 921600 for CH340 UART^)
 echo   -b ^<profile^>   ESP32 build profile ^(whitelist; default uart^)
 echo   -t ^<target^>   IDF target ^(esp32 default; esp32s3^); used for esptool --chip
 echo   --no-reset   skip chip reset after flashing ^(esptool --after no-reset^)
+echo   --usb-reset  use esptool --before usb-reset ^(ESP32-S3 USB auto-reset^)
+echo   --before V   reset mode: auto^|default-reset^|usb-reset^|no-reset
 echo   --dry-run    validate only, do not flash
 echo   --any-profile skip the whitelist ^(harness-internal dirs only^)
 echo   probe        run win32_com_probe against the port ^(--pulse-reset optional^)
