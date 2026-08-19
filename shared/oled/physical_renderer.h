@@ -50,8 +50,13 @@ public:
     static constexpr int kScaleDen = 5;
 
     // fbW/fbH = 目标 OLED 尺寸；crop 偏移按每次 renderFrame 的 srcH 计算。
+    // M8-C C4：quality=true 时内部改用 quality mono pipeline（shared/render
+    // createMonoPipeline，Luminance + bilinear + center crop + 4x4 Bayer dither），
+    // 由 profile 的 CONFIG_ESPVIEW_RENDER_PIPELINE_QUALITY 决定（构造期注入，
+    // 非运行期热切换）。quality 模式只支持整帧 srcRect（bilinear 需全帧采样），
+    // 部分 rect 一律 no-op（与 fast 的增量契约不同，见实现注释）。
     PhysicalRenderer(int fbW = OledFb::kWidth, int fbH = OledFb::kHeight,
-                     uint8_t threshold = 128);
+                     uint8_t threshold = 128, bool quality = false);
 
     // 把 srcRect 的 RGB565（紧凑 rect.w x rect.h 行主序，小端 uint16，逐字节
     // 访问）渲染进 1KB 页式 OledFb。映射：ox = floor(sx*0.4)，
@@ -79,6 +84,7 @@ private:
     int fbW_;
     int fbH_;
     uint8_t threshold_;
+    bool quality_ = false;   // M8-C C4：quality mono pipeline（整帧）
     int lastSrcW_ = 0;  // 已构建 pipeline 的逻辑帧几何（0 = 未构建）
     int lastSrcH_ = 0;
     std::unique_ptr<render::RenderPipeline> pipeline_;

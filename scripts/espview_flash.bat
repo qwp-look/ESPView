@@ -23,6 +23,7 @@ REM                 running after the write completes. flash_args is
 REM                 preflighted for existence before invoking esptool.
 REM   --dry-run     parse args + validate only; do NOT flash anything.
 REM   --check       same as --dry-run (preflight only).
+REM   M8-C C4: flash is artifact-only - it NEVER reconfigures, never applies           the profile and never rewrites sdkconfig. Build dir is per-target:           esp32\build\<target>\<profile>\  (from -t and -b). A read-only           CONFIG_IDF_TARGET cross-check blocks flashing a build dir that           was built for a different target.
 REM   --any-profile skip the whitelist (harness-internal build dirs such
 REM                 as the M7-E mode_a/b/c dirs; charset check only).
 REM   probe         run build\win32_probe\win32_com_probe.exe against the
@@ -153,20 +154,32 @@ REM ---- COM port check ------------------------------------------
 powershell -NoProfile -ExecutionPolicy Bypass -Command "if ([System.IO.Ports.SerialPort]::GetPortNames() -contains '%PORT%') { exit 0 } else { Write-Host ('[flash] COM port not found: ' + '%PORT%'); exit 1 }"
 if errorlevel 1 goto :no_com
 
+REM ---- per-target build dir (M8-C C4) ----------------------------
+REM Flash is artifact-only: it never reconfigures, never applies the
+REM profile and never rewrites sdkconfig. It only flashes artifacts
+REM produced by a previous build in esp32\build\<target>\<profile>.
+if defined ANY_PROFILE (
+    set "ESP32_BUILD_DIR=%ROOT%\esp32\build\%ESP32_PROFILE%"
+) else (
+    set "ESP32_BUILD_DIR=%ROOT%\esp32\build\%ESP32_TARGET%\%ESP32_PROFILE%"
+)
+
 REM ---- firmware binary check ------------------------------------
-set "BIN=%ROOT%\esp32\build\%ESP32_PROFILE%\espview_esp32.bin"
+set "BIN=%ESP32_BUILD_DIR%\espview_esp32.bin"
 if not exist "%BIN%" goto :no_bin
 
 REM ---- flash_args preflight (only used by --no-reset) -----------
-set "FLASH_ARGS_FILE=%ROOT%\esp32\build\%ESP32_PROFILE%\flash_args"
+set "FLASH_ARGS_FILE=%ESP32_BUILD_DIR%\flash_args"
 if defined NO_RESET if not exist "%FLASH_ARGS_FILE%" goto :no_flash_args
 
-REM ---- profile sdkconfig prep (mirror of the build script) ------
-set "PROFILE_SDKCONFIG=%ROOT%\esp32\build\%ESP32_PROFILE%\sdkconfig"
-if defined ANY_PROFILE goto :flash_start
-"%ESPVIEW_PYTHON%" "%ROOT%\scripts\espview_profile_sdkconfig.py" --apply %ESP32_PROFILE% --sdkconfig "%PROFILE_SDKCONFIG%" --seed "%ROOT%\esp32\sdkconfig" --seed-defaults "%ROOT%\esp32\sdkconfig.defaults"
-if errorlevel 1 goto :prof_tool_fail
-:flash_start
+REM ---- traceability: target / profile / sdkconfig / build dir ----
+set "PROFILE_SDKCONFIG=%ESP32_BUILD_DIR%\sdkconfig"
+if defined ANY_PROFILE goto :trace_done
+if not exist "%PROFILE_SDKCONFIG%" goto :no_sdkconfig
+REM read-only CONFIG_IDF_TARGET cross-check (never prints sdkconfig content)
+powershell -NoProfile -ExecutionPolicy Bypass -Command "$line = Select-String -Path '%PROFILE_SDKCONFIG%' -Pattern '^CONFIG_IDF_TARGET=' | Select-Object -First 1; if ($null -eq $line) { Write-Host ('[flash] ERROR: CONFIG_IDF_TARGET missing in ' + '%PROFILE_SDKCONFIG%'); exit 1 }; $value = (($line.Line -split '=')[1]).Trim().Trim([char]34); if ($value -ne '%ESP32_TARGET%') { Write-Host ('[flash] ERROR: build dir target ' + $value + ' != requested target %ESP32_TARGET%'); exit 1 }; Write-Host ('[flash] target check: ' + $value + ' OK'); exit 0"
+if errorlevel 1 goto :target_mismatch
+:trace_done
 
 set "PROFILE_LABEL=%ESP32_PROFILE%"
 if /i "%ESP32_PROFILE%"=="uart" set "PROFILE_LABEL=uart (UART baseline: OLED, LVGL, F12 hooks)"
@@ -176,6 +189,8 @@ echo.
 echo [flash] Will flash (esptool via ESP-IDF v6.0.2):
 echo   Profile : %PROFILE_LABEL%
 echo   Target  : %ESP32_TARGET%
+echo   BuildDir: %ESP32_BUILD_DIR%
+echo   Sdkconfig: %PROFILE_SDKCONFIG%  ^(read-only; not modified by flash^)
 echo   Firmware: %BIN%
 echo   Port    : %PORT%
 if defined NO_RESET echo   Reset   : no-reset ^(esptool --after no-reset^)
@@ -187,8 +202,8 @@ if defined DRY_RUN (
 )
 
 if defined NO_RESET goto :flash_noreset
-echo [flash] running: idf.py -B build\%ESP32_PROFILE% -p %PORT% flash
-powershell -NoProfile -ExecutionPolicy Bypass -Command "$ErrorActionPreference='Stop'; try { & { . '%ESPIDF_PROFILE%' }; Set-Location '%ROOT%\esp32'; idf.py -B build/%ESP32_PROFILE% -D SDKCONFIG=%PROFILE_SDKCONFIG% -p %PORT% flash; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE } } catch { Write-Host ('[flash] ERROR: ' + $_.Exception.Message); exit 6 }"
+echo [flash] running: idf.py -B build\%ESP32_TARGET%\%ESP32_PROFILE% -p %PORT% flash (artifact-only; no reconfigure)
+powershell -NoProfile -ExecutionPolicy Bypass -Command "$ErrorActionPreference='Stop'; try { & { . '%ESPIDF_PROFILE%' }; Set-Location '%ROOT%\esp32'; idf.py -B build/%ESP32_TARGET%/%ESP32_PROFILE% -p %PORT% flash; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE } } catch { Write-Host ('[flash] ERROR: ' + $_.Exception.Message); exit 6 }"
 goto :flash_check
 
 :flash_noreset
@@ -197,7 +212,7 @@ REM (esptool v5.3.1 rejects --after after write-flash). Call esptool
 REM directly using the flash_args file generated by idf.py.
 REM M8-A7（A7-7）：--chip 由 --target 确定（esp32 / esp32s3），不再硬编码 esp32。
 echo [flash] running: esptool --chip %ESP32_TARGET% -p %PORT% -b 460800 --before default-reset --after no-reset write-flash @flash_args
-powershell -NoProfile -ExecutionPolicy Bypass -Command "$ErrorActionPreference='Stop'; try { & { . '%ESPIDF_PROFILE%' }; Set-Location '%ROOT%\esp32\build\%ESP32_PROFILE%'; & ($env:IDF_PYTHON_ENV_PATH + '\Scripts\python.exe') -m esptool --chip %ESP32_TARGET% -p '%PORT%' -b 460800 --before default-reset --after no-reset write-flash '@flash_args'; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE } } catch { Write-Host ('[flash] ERROR: ' + $_.Exception.Message); exit 6 }"
+powershell -NoProfile -ExecutionPolicy Bypass -Command "$ErrorActionPreference='Stop'; try { & { . '%ESPIDF_PROFILE%' }; Set-Location '%ESP32_BUILD_DIR%'; & ($env:IDF_PYTHON_ENV_PATH + '\Scripts\python.exe') -m esptool --chip %ESP32_TARGET% -p '%PORT%' -b 460800 --before default-reset --after no-reset write-flash '@flash_args'; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE } } catch { Write-Host ('[flash] ERROR: ' + $_.Exception.Message); exit 6 }"
 
 :flash_check
 if errorlevel 1 ( set "ERR=6" & goto :fail )
@@ -304,7 +319,17 @@ set "ERR=4" & goto :fail
 
 :no_bin
 echo [flash] ERROR: firmware binary not found: %BIN%
-echo [flash] ERROR: build the firmware first: scripts\espview_build.bat -esp32 -b %ESP32_PROFILE%
+echo [flash] ERROR: build the firmware first: scripts\espview_build.bat -esp32 -b %ESP32_PROFILE% -t %ESP32_TARGET%
+set "ERR=5" & goto :fail
+
+:no_sdkconfig
+echo [flash] ERROR: sdkconfig not found: %PROFILE_SDKCONFIG%
+echo [flash] ERROR: build the firmware first (flash never reconfigures)
+set "ERR=5" & goto :fail
+
+:target_mismatch
+echo [flash] ERROR: build dir target does not match -t %ESP32_TARGET%
+echo [flash] ERROR: build with: scripts\espview_build.bat -esp32 -b %ESP32_PROFILE% -t %ESP32_TARGET%
 set "ERR=5" & goto :fail
 
 :no_flash_args

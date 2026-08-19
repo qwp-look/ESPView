@@ -99,3 +99,28 @@ config ESPVIEW_OLED_MAX_REINIT
         冷却期后才会再次尝试 —— 不允许无限重置循环。错误计数只增不减。
 
 endmenu
+
+
+menu "Physical Rendering Pipeline"
+    choice ESPVIEW_RENDER_PIPELINE
+        prompt "Physical rendering pipeline quality (M8-C C4)"
+        default ESPVIEW_RENDER_PIPELINE_FAST
+        help
+            M8-C C1/C4: RGB565 -> Mono1 physical rendering pipeline
+            algorithm composition (shared/render pipeline factory).
+            fast    = FastScaleThresholdStage (2/5 nearest-neighbor +
+                      center crop + threshold pass-through; classic
+                      ESP32 low CPU / low RAM).
+            quality = Luminance + bilinear scale + center crop + 4x4
+                      Bayer ordered dither (ESP32-S3, optional PSRAM).
+            Selection is profile-driven (scripts/espview_profiles.py
+            render attribute) and takes effect at pipeline construction
+            time; no runtime hot-switch.
+
+        config ESPVIEW_RENDER_PIPELINE_FAST
+            bool "Fast (classic ESP32 baseline)"
+
+        config ESPVIEW_RENDER_PIPELINE_QUALITY
+            bool "Quality (ESP32-S3 / PSRAM)"
+    endchoice
+endmenu

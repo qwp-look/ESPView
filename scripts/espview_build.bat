@@ -123,8 +123,16 @@ if defined DO_ESP32 (
     "%ESPVIEW_PYTHON%" "%ROOT%\scripts\espview_profile_sdkconfig.py" --show %ESP32_PROFILE%
     if errorlevel 1 goto :prof_tool_fail
 )
-set "PROFILE_SDKCONFIG=%ROOT%\esp32\build\%ESP32_PROFILE%\sdkconfig"
-if defined DO_ESP32 echo [esp32] profile sdkconfig: %PROFILE_SDKCONFIG%  ^(isolated; shared esp32\sdkconfig untouched^)
+REM M8-C C4: per-target build dir (esp32\build\<target>\<profile>) - the same
+REM profile name never shares a build dir / sdkconfig across IDF targets,
+REM so target drift is impossible (build dir is fully traceable).
+set "ESP32_BUILD_DIR=%ROOT%\esp32\build\%ESP32_TARGET%\%ESP32_PROFILE%"
+set "PROFILE_SDKCONFIG=%ESP32_BUILD_DIR%\sdkconfig"
+if defined DO_ESP32 (
+    echo [esp32] traceability: target=%ESP32_TARGET% profile=%ESP32_PROFILE%
+    echo [esp32] build dir  : %ESP32_BUILD_DIR%
+    echo [esp32] sdkconfig  : %PROFILE_SDKCONFIG%  ^(isolated; shared esp32\sdkconfig untouched^)
+)
 
 REM ---- dry-run: print plan only ------------------------------
 if not defined DRY_RUN goto :not_dry
@@ -134,7 +142,7 @@ if defined DO_HOST echo   host   : scripts\verify_host.bat
 if defined DO_QT   echo   qt     : scripts\verify_qt.bat
 if defined DO_ESP32 (
     echo   esp32  : "%ESPVIEW_PYTHON%" scripts\espview_profile_sdkconfig.py --apply %ESP32_PROFILE% --sdkconfig "%PROFILE_SDKCONFIG%" --target %ESP32_TARGET%
-    echo   esp32  : idf.py -B build\%ESP32_PROFILE% -D SDKCONFIG=%PROFILE_SDKCONFIG% build
+    echo   esp32  : idf.py -B build\%ESP32_TARGET%\%ESP32_PROFILE% -D SDKCONFIG=%PROFILE_SDKCONFIG% build
 )
 echo.
 echo [build] DRY-RUN: plan printed, nothing executed.
@@ -179,7 +187,7 @@ if errorlevel 1 ( set "ERR=1" & goto :fail )
 :esp32
 if not defined DO_ESP32 goto :done
 echo.
-echo [3/3] ESP32 firmware build (profile=%ESP32_PROFILE%, dir=esp32\build\%ESP32_PROFILE%)
+echo [3/3] ESP32 firmware build (target=%ESP32_TARGET%, profile=%ESP32_PROFILE%, dir=esp32\build\%ESP32_TARGET%\%ESP32_PROFILE%)
 REM M7-G: prepare the profile's own isolated sdkconfig (seed once from
 REM esp32\sdkconfig without inspecting it, then force-apply the profile's
 REM whitelisted Kconfig keys so no drift is possible). Credentials stay
@@ -188,7 +196,7 @@ REM M8-A7（A7-7）：--target 使 seed/sdkconfig 的 CONFIG_IDF_TARGET 不匹�
 REM 显式失败（防 esp32s3 漂移静默污染 esp32 构建）。
 "%ESPVIEW_PYTHON%" "%ROOT%\scripts\espview_profile_sdkconfig.py" --apply %ESP32_PROFILE% --sdkconfig "%PROFILE_SDKCONFIG%" --seed "%ROOT%\esp32\sdkconfig" --seed-defaults "%ROOT%\esp32\sdkconfig.defaults" --target %ESP32_TARGET%
 if errorlevel 1 goto :prof_tool_fail
-powershell -NoProfile -ExecutionPolicy Bypass -Command "$ErrorActionPreference='Stop'; try { & { . '%ESPIDF_PROFILE%' }; Set-Location '%ROOT%\esp32'; idf.py -B build/%ESP32_PROFILE% -D SDKCONFIG=%PROFILE_SDKCONFIG% build; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE } } catch { Write-Host ('[esp32] ERROR: ' + $_.Exception.Message); exit 1 }"
+powershell -NoProfile -ExecutionPolicy Bypass -Command "$ErrorActionPreference='Stop'; try { & { . '%ESPIDF_PROFILE%' }; Set-Location '%ROOT%\esp32'; idf.py -B build/%ESP32_TARGET%/%ESP32_PROFILE% -D SDKCONFIG=%PROFILE_SDKCONFIG% build; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE } } catch { Write-Host ('[esp32] ERROR: ' + $_.Exception.Message); exit 1 }"
 if errorlevel 1 ( set "ERR=1" & goto :fail )
 
 :done

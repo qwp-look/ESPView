@@ -71,7 +71,7 @@ jobs:
         run: python3 scripts/espview_profile_sdkconfig.py --check ${{ matrix.profile }}
 
       - name: Apply profile sdkconfig
-        run: python3 scripts/espview_profile_sdkconfig.py --apply ${{ matrix.profile }} --sdkconfig "$GITHUB_WORKSPACE/esp32/build/${{ matrix.profile }}/sdkconfig" --seed-defaults "$GITHUB_WORKSPACE/esp32/sdkconfig.defaults.esp32" --target esp32
+        run: python3 scripts/espview_profile_sdkconfig.py --apply ${{ matrix.profile }} --sdkconfig "$GITHUB_WORKSPACE/esp32/build/esp32/${{ matrix.profile }}/sdkconfig" --seed-defaults "$GITHUB_WORKSPACE/esp32/sdkconfig.defaults.esp32" --target esp32
 
       - name: Build firmware
         working-directory: esp32
@@ -79,7 +79,7 @@ jobs:
         run: |
           set -euo pipefail
           . "$IDF_PATH/export.sh" >/dev/null
-          idf.py -B build/${{ matrix.profile }} -D SDKCONFIG="$GITHUB_WORKSPACE/esp32/build/${{ matrix.profile }}/sdkconfig" build 2>&1 | tee build/${{ matrix.profile }}/idf_build.log
+          idf.py -B build/esp32/${{ matrix.profile }} -D SDKCONFIG="$GITHUB_WORKSPACE/esp32/build/esp32/${{ matrix.profile }}/sdkconfig" build 2>&1 | tee build/esp32/${{ matrix.profile }}/idf_build.log
 
       - name: Verify build artifacts
         working-directory: esp32
@@ -87,15 +87,15 @@ jobs:
         run: |
           set -euo pipefail
           . "$IDF_PATH/export.sh" >/dev/null
-          ls -l build/${{ matrix.profile }}/espview_esp32.bin
-          ls -l build/${{ matrix.profile }}/bootloader/bootloader.bin
-          ls -l build/${{ matrix.profile }}/partition_table/partition-table.bin
-          idf.py -B build/${{ matrix.profile }} size
+          ls -l build/esp32/${{ matrix.profile }}/espview_esp32.bin
+          ls -l build/esp32/${{ matrix.profile }}/bootloader/bootloader.bin
+          ls -l build/esp32/${{ matrix.profile }}/partition_table/partition-table.bin
+          idf.py -B build/esp32/${{ matrix.profile }} size
 
       - name: Generate checksums
         working-directory: esp32
         run: |
-          cd build/${{ matrix.profile }}
+          cd build/esp32/${{ matrix.profile }}
           sha256sum espview_esp32.bin bootloader/bootloader.bin partition_table/partition-table.bin > SHA256SUMS.txt
           cat SHA256SUMS.txt
 
@@ -105,18 +105,18 @@ jobs:
         with:
           name: esp32-${{ matrix.profile }}
           path: |
-            esp32/build/${{ matrix.profile }}/espview_esp32.bin
-            esp32/build/${{ matrix.profile }}/bootloader/bootloader.bin
-            esp32/build/${{ matrix.profile }}/partition_table/partition-table.bin
-            esp32/build/${{ matrix.profile }}/SHA256SUMS.txt
+            esp32/build/esp32/${{ matrix.profile }}/espview_esp32.bin
+            esp32/build/esp32/${{ matrix.profile }}/bootloader/bootloader.bin
+            esp32/build/esp32/${{ matrix.profile }}/partition_table/partition-table.bin
+            esp32/build/esp32/${{ matrix.profile }}/SHA256SUMS.txt
           if-no-files-found: error
 
       - name: Print build diagnostics
         if: failure()
         run: |
-          tail -n 120 esp32/build/${{ matrix.profile }}/idf_build.log 2>/dev/null || true
-          tail -n 120 esp32/build/${{ matrix.profile }}/CMakeFiles/CMakeError.log 2>/dev/null || true
-          find esp32/build/${{ matrix.profile }} -maxdepth 2 -type f -name '*.log' -exec tail -n 60 {} \; 2>/dev/null || true
+          tail -n 120 esp32/build/esp32/${{ matrix.profile }}/idf_build.log 2>/dev/null || true
+          tail -n 120 esp32/build/esp32/${{ matrix.profile }}/CMakeFiles/CMakeError.log 2>/dev/null || true
+          find esp32/build/esp32/${{ matrix.profile }} -maxdepth 2 -type f -name '*.log' -exec tail -n 60 {} \; 2>/dev/null || true
 
   # M8-A6 §二十一/§三十八：ESP32-S3 compile portability smoke（experimental）。
   # 只做 configure + compile（不 flash、不做 S3 peripheral integration）；
@@ -147,11 +147,11 @@ jobs:
           set -euo pipefail
           . "$IDF_PATH/export.sh" >/dev/null
           # set-target triggers fullclean, which refuses to touch a non-empty
-          # dir without CMakeCache.txt. Tee the log OUTSIDE build/s3 first, then
+          # dir without CMakeCache.txt. Tee the log OUTSIDE build/esp32s3/smoke first, then
           # move it in after set-target succeeds (a fresh checkout has no dir).
-          idf.py -B build/s3 set-target esp32s3 2>&1 | tee set_target.log
-          mkdir -p build/s3
-          mv set_target.log build/s3/set_target.log
+          idf.py -B build/esp32s3/smoke set-target esp32s3 2>&1 | tee set_target.log
+          mkdir -p build/esp32s3/smoke
+          mv set_target.log build/esp32s3/smoke/set_target.log
 
       - name: Build firmware (esp32s3)
         working-directory: esp32
@@ -159,18 +159,18 @@ jobs:
         run: |
           set -euo pipefail
           . "$IDF_PATH/export.sh" >/dev/null
-          idf.py -B build/s3 build 2>&1 | tee build/s3/idf_build.log
+          idf.py -B build/esp32s3/smoke build 2>&1 | tee build/esp32s3/smoke/idf_build.log
 
       - name: Verify build artifact
         working-directory: esp32
         run: |
-          ls -l build/s3/espview_esp32.bin
-          sha256sum build/s3/espview_esp32.bin
+          ls -l build/esp32s3/smoke/espview_esp32.bin
+          sha256sum build/esp32s3/smoke/espview_esp32.bin
 
       - name: Upload S3 smoke logs
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: esp32s3-smoke-logs
-          path: esp32/build/s3/*.log
+          path: esp32/build/esp32s3/smoke/*.log
           if-no-files-found: warn

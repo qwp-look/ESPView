@@ -43,7 +43,7 @@ scripts\espview_build.bat -esp32 -b uart_hw
 说明：
 
 - `-b <profile>` 选择 ESP32 构建目录（默认 `uart_hw`）；每个 profile 使用自己的
-  `esp32\build\<profile>\sdkconfig`（首次从本地 `esp32\sdkconfig` 引导拷贝），互不漂移。
+  `esp32\build\<target>\<profile>\sdkconfig`（首次从本地 `esp32\sdkconfig` 引导拷贝），互不漂移。
 - `uart_hw` 是当前现成的 UART 验收固件：UART 传输、`ESPVIEW_DEFAULT_MODE=2`（Mirror）、
   OLED、LVGL、TEST hooks（F11/F12 验收钩子）。
 - 退出码：`0` 全过 / `1` 构建或测试失败 / `2` 参数错误 / `3` preflight 失败。

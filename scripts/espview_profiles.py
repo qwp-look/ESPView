@@ -20,7 +20,7 @@ This module performs no file I/O and never reads esp32/sdkconfig.
 from __future__ import annotations
 
 # Six profile attributes, in fixed order (machine-parseable output uses them).
-ATTR_NAMES = ("transport", "oled", "test_switch", "console", "wifi", "display")
+ATTR_NAMES = ("transport", "oled", "test_switch", "console", "wifi", "display", "render")
 
 # M8-A7（A7-5）：支持的 IDF target（profile 与 target 正交；见 DESIGN AS.2 D8）。
 # 新增 target 必须先加入本白名单；profile 键不绑定 target。
@@ -45,6 +45,7 @@ def is_historical(name):
 CHOICE_GROUPS = (
     ("CONFIG_ESPVIEW_TRANSPORT_UART", "CONFIG_ESPVIEW_TRANSPORT_TCP"),
     ("CONFIG_ESPVIEW_APP_LVGL", "CONFIG_ESPVIEW_APP_TESTPATTERN"),
+    ("CONFIG_ESPVIEW_RENDER_PIPELINE_FAST", "CONFIG_ESPVIEW_RENDER_PIPELINE_QUALITY"),
 )
 
 # Hard guard: no profile-controlled key may look like a credential key.
@@ -54,8 +55,9 @@ FORBIDDEN_KEY_PARTS = ("SSID", "PASSWORD", "PSK", "TOKEN", "SECRET")
 PROFILES = {
     "uart": {
         "label": "UART development baseline (OLED + LVGL + F12 test hooks, RF off at boot)",
-        "attrs": ("UART", "ON", "ON", "NONE", "OFF", "LVGL"),
+        "attrs": ("UART", "ON", "ON", "NONE", "OFF", "LVGL", "FAST"),
         "config": {
+            "CONFIG_ESPVIEW_RENDER_PIPELINE_FAST": "y",
             "CONFIG_ESPVIEW_TRANSPORT_UART": "y",
             "CONFIG_ESPVIEW_OLED_ENABLE": "y",
             "CONFIG_ESPVIEW_TEST_TRANSPORT_SWITCH": "y",
@@ -66,8 +68,9 @@ PROFILES = {
     },
     "tcp": {
         "label": "TCP production (Wi-Fi STA + TCP client, OLED + LVGL, no test hooks)",
-        "attrs": ("TCP", "ON", "OFF", "NONE", "ON", "LVGL"),
+        "attrs": ("TCP", "ON", "OFF", "NONE", "ON", "LVGL", "FAST"),
         "config": {
+            "CONFIG_ESPVIEW_RENDER_PIPELINE_FAST": "y",
             "CONFIG_ESPVIEW_TRANSPORT_TCP": "y",
             "CONFIG_ESPVIEW_OLED_ENABLE": "y",
             "CONFIG_ESPVIEW_TEST_TRANSPORT_SWITCH": "n",
@@ -78,8 +81,9 @@ PROFILES = {
     },
     "oled": {
         "label": "OLED focus (UART + OLED + RF on for Wi-Fi scan experiments)",
-        "attrs": ("UART", "ON", "OFF", "NONE", "ON", "LVGL"),
+        "attrs": ("UART", "ON", "OFF", "NONE", "ON", "LVGL", "FAST"),
         "config": {
+            "CONFIG_ESPVIEW_RENDER_PIPELINE_FAST": "y",
             "CONFIG_ESPVIEW_TRANSPORT_UART": "y",
             "CONFIG_ESPVIEW_OLED_ENABLE": "y",
             "CONFIG_ESPVIEW_TEST_TRANSPORT_SWITCH": "n",
@@ -90,8 +94,9 @@ PROFILES = {
     },
     "oled-off": {
         "label": "OLED disabled comparison (UART + no OLED + RF on for scan experiments)",
-        "attrs": ("UART", "OFF", "OFF", "NONE", "ON", "LVGL"),
+        "attrs": ("UART", "OFF", "OFF", "NONE", "ON", "LVGL", "FAST"),
         "config": {
+            "CONFIG_ESPVIEW_RENDER_PIPELINE_FAST": "y",
             "CONFIG_ESPVIEW_TRANSPORT_UART": "y",
             "CONFIG_ESPVIEW_OLED_ENABLE": "n",
             "CONFIG_ESPVIEW_TEST_TRANSPORT_SWITCH": "n",
@@ -102,8 +107,9 @@ PROFILES = {
     },
     "diagnostic": {
         "label": "Diagnostic (UART + OLED + TestPattern deterministic frames, RF off)",
-        "attrs": ("UART", "ON", "OFF", "NONE", "OFF", "TestPattern"),
+        "attrs": ("UART", "ON", "OFF", "NONE", "OFF", "TestPattern", "FAST"),
         "config": {
+            "CONFIG_ESPVIEW_RENDER_PIPELINE_FAST": "y",
             "CONFIG_ESPVIEW_TRANSPORT_UART": "y",
             "CONFIG_ESPVIEW_OLED_ENABLE": "y",
             "CONFIG_ESPVIEW_TEST_TRANSPORT_SWITCH": "n",
@@ -115,8 +121,9 @@ PROFILES = {
     # M7-G G1 harness profiles (task-book section 6): OLED x RF matrix.
     "g1_a": {
         "label": "G1 A: OLED OFF + RF OFF",
-        "attrs": ("UART", "OFF", "OFF", "NONE", "OFF", "LVGL"),
+        "attrs": ("UART", "OFF", "OFF", "NONE", "OFF", "LVGL", "FAST"),
         "config": {
+            "CONFIG_ESPVIEW_RENDER_PIPELINE_FAST": "y",
             "CONFIG_ESPVIEW_TRANSPORT_UART": "y",
             "CONFIG_ESPVIEW_OLED_ENABLE": "n",
             "CONFIG_ESPVIEW_TEST_TRANSPORT_SWITCH": "n",
@@ -127,8 +134,9 @@ PROFILES = {
     },
     "g1_b": {
         "label": "G1 B: OLED ON + RF OFF",
-        "attrs": ("UART", "ON", "OFF", "NONE", "OFF", "LVGL"),
+        "attrs": ("UART", "ON", "OFF", "NONE", "OFF", "LVGL", "FAST"),
         "config": {
+            "CONFIG_ESPVIEW_RENDER_PIPELINE_FAST": "y",
             "CONFIG_ESPVIEW_TRANSPORT_UART": "y",
             "CONFIG_ESPVIEW_OLED_ENABLE": "y",
             "CONFIG_ESPVIEW_TEST_TRANSPORT_SWITCH": "n",
@@ -139,8 +147,9 @@ PROFILES = {
     },
     "g1_c": {
         "label": "G1 C: OLED OFF + RF ON",
-        "attrs": ("UART", "OFF", "OFF", "NONE", "ON", "LVGL"),
+        "attrs": ("UART", "OFF", "OFF", "NONE", "ON", "LVGL", "FAST"),
         "config": {
+            "CONFIG_ESPVIEW_RENDER_PIPELINE_FAST": "y",
             "CONFIG_ESPVIEW_TRANSPORT_UART": "y",
             "CONFIG_ESPVIEW_OLED_ENABLE": "n",
             "CONFIG_ESPVIEW_TEST_TRANSPORT_SWITCH": "n",
@@ -151,8 +160,9 @@ PROFILES = {
     },
     "g1_d": {
         "label": "G1 D: OLED ON + RF ON",
-        "attrs": ("UART", "ON", "OFF", "NONE", "ON", "LVGL"),
+        "attrs": ("UART", "ON", "OFF", "NONE", "ON", "LVGL", "FAST"),
         "config": {
+            "CONFIG_ESPVIEW_RENDER_PIPELINE_FAST": "y",
             "CONFIG_ESPVIEW_TRANSPORT_UART": "y",
             "CONFIG_ESPVIEW_OLED_ENABLE": "y",
             "CONFIG_ESPVIEW_TEST_TRANSPORT_SWITCH": "n",

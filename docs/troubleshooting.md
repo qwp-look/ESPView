@@ -133,7 +133,7 @@ PC 侧 `ReadFile err=5`。
   凭据丢失、需要重新 provisioning；这是凭据 RAM-only 红线的预期行为
   （docs/security.md），不是 bug。
 - **ESP32-S3 相关**：当前只有 compile smoke（CI `esp32s3-smoke`；本地
-  `idf.py -B build/s3 set-target esp32s3` + `idf.py -B build/s3 build`），
+  `idf.py -B build/esp32s3/smoke set-target esp32s3` + `idf.py -B build/esp32s3/smoke build`），
   没有任何 S3 硬件验证；USB CDC / LCD / touch 未实现。
 - **`--no-reset` 烧录**：`espview_flash.bat --no-reset` 走 esptool 直调
   （读 `build\<profile>\flash_args`）；必须先用 `espview_build.bat -esp32`

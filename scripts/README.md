@@ -46,7 +46,7 @@ scripts\espview_verify.bat -lvgl             :: LVGL 验证（含 ESP32 构建�
 scripts\espview_build_flash.bat -esp32 -p COM4 --no-reset
 scripts\espview_build_flash.bat check        :: 构建 preflight + 烧录 dry-run，绝不真烧
 
-scripts\espview_build.bat profile list       :: 白名单 + 6 属性表
+scripts\espview_build.bat profile list       :: 白名单 + 7 属性表
 scripts\check_docs.bat                       :: 静态文档检查
 ```
 
@@ -55,34 +55,42 @@ scripts\check_docs.bat                       :: 静态文档检查
 ### 白名单与 label 表
 
 `-b / --profile` 只接受白名单 profile（`espview_profiles.py` 为唯一事实源），
-每个 profile 回答 6 个属性：**Transport / OLED / Test transport switch / Console /
-Wi-Fi / Display**。`uart_hw` 是 `uart` 的 legacy 别名（保留旧构建目录）。
+每个 profile 回答 7 个属性：**Transport / OLED / Test transport switch / Console /
+Wi-Fi / Display / Render**。`uart_hw` 是 `uart` 的 legacy 别名。
 
-| Profile | Transport | OLED | Test switch | Console | Wi-Fi | Display | 用途 |
-| --- | --- | --- | --- | --- | --- | --- | --- |
-| `uart`（`uart_hw` 别名） | UART | ON | ON | NONE | OFF | LVGL | UART 开发基线（F12 hooks） |
-| `tcp` | TCP | ON | OFF | NONE | ON | LVGL | TCP 生产 |
-| `oled` | UART | ON | OFF | NONE | ON | LVGL | OLED + 扫描实验 |
-| `oled-off` | UART | OFF | OFF | NONE | ON | LVGL | OLED 关对比 |
-| `diagnostic` | UART | ON | OFF | NONE | OFF | TestPattern | 确定性帧回归 |
-| `g1_a` | UART | OFF | OFF | NONE | OFF | LVGL | G1 A：OLED OFF + RF OFF |
-| `g1_b` | UART | ON | OFF | NONE | OFF | LVGL | G1 B：OLED ON + RF OFF |
-| `g1_c` | UART | OFF | OFF | NONE | ON | LVGL | G1 C：OLED OFF + RF ON |
-| `g1_d` | UART | ON | OFF | NONE | ON | LVGL | G1 D：OLED ON + RF ON |
+| Profile | Transport | OLED | Test switch | Console | Wi-Fi | Display | Render | 用途 |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| `uart`（`uart_hw` 别名） | UART | ON | ON | NONE | OFF | LVGL | FAST | UART 开发基线（F12 hooks） |
+| `tcp` | TCP | ON | OFF | NONE | ON | LVGL | FAST | TCP 生产 |
+| `oled` | UART | ON | OFF | NONE | ON | LVGL | FAST | OLED + 扫描实验 |
+| `oled-off` | UART | OFF | OFF | NONE | ON | LVGL | FAST | OLED 关对比 |
+| `diagnostic` | UART | ON | OFF | NONE | OFF | TestPattern | FAST | 确定性帧回归 |
+| `g1_a` | UART | OFF | OFF | NONE | OFF | LVGL | FAST | G1 A：OLED OFF + RF OFF |
+| `g1_b` | UART | ON | OFF | NONE | OFF | LVGL | FAST | G1 B：OLED ON + RF OFF |
+| `g1_c` | UART | OFF | OFF | NONE | ON | LVGL | FAST | G1 C：OLED OFF + RF ON |
+| `g1_d` | UART | ON | OFF | NONE | ON | LVGL | FAST | G1 D：OLED ON + RF ON |
 
 - `Console` 恒为 `NONE`（`CONFIG_ESP_CONSOLE_NONE=y`），所有 profile 一致。
-- `uart_hw` = `uart` 的 legacy 别名：属性相同，构建目录保留 `esp32\build\uart_hw`。
+- `uart_hw` = `uart` 的 legacy 别名：属性相同，构建目录 = `esp32\build\esp32\uart_hw`（M8-C C4 per-target）。
 - 查询：`scripts\espview_build.bat profile list` / `profile show <name>` /
   `profile check <name>`（等价 `espview_flash.bat profile ...`）。
 
 ### 构建产物可识别
 
-每次 `-esp32` 构建前脚本打印 profile summary（label + 6 属性 + 独立 sdkconfig 路径），
-固件产物路径固定为 `esp32\build\<profile>\espview_esp32.bin`。
+每次 `-esp32` 构建前脚本打印 traceability（target + profile + label + 7 属性 +
+独立 sdkconfig + build dir），固件产物路径固定为 `esp32\build\<target>\<profile>\espview_esp32.bin`。
+
+### Build/Flash 隔离（M8-C C4）
+
+- 构建目录 = `esp32\build\<target>\<profile>\`（`-t` 与 `-b` 共同决定）：
+  同一 profile 名称在不同 IDF target 下绝不共享目录/sdkconfig（防 target 漂移）。
+- `espview_flash.bat` 是 **artifact-only**：绝不重新 configure、绝不 apply profile、
+  绝不改写 sdkconfig；只烧录已有构建产物，并对 `CONFIG_IDF_TARGET` 做只读交叉校验
+  （build dir 与 `-t` 不匹配时报错退出）。
 
 ### Profile 完全隔离（防 drift）
 
-- 每个 profile 使用**自己的** `esp32\build\<profile>\sdkconfig`；
+- 每个 profile 使用**自己的** `esp32\build\<target>\<profile>\sdkconfig`；
 - 首次构建/烧录时由 `espview_profile_sdkconfig.py --apply` 从本地
   `esp32\sdkconfig`（或 `sdkconfig.defaults`）**整文件拷贝引导**（不检查内容，
   凭据/引脚原样保留），随后强制应用该 profile 的白名单 Kconfig 键；
@@ -100,8 +108,8 @@ Wi-Fi / Display**。`uart_hw` 是 `uart` 的 legacy 别名（保留旧构建目�
   （未跟踪、含硬编码真凭据）**不再被任何脚本调用**——TCP profile 的凭据
   通过整文件引导拷贝保留在 profile 自己的 sdkconfig 中。
 - 如需为 TCP profile 配置凭据：先 `espview_build.bat -esp32 -b tcp` 构建一次，
-  再 `idf.py -B build\tcp menuconfig` 设置 SSID/password，重新构建即可
-  （凭据只落在 `esp32\build\tcp\sdkconfig`）。
+  再 `idf.py -B build\esp32\tcp menuconfig` 设置 SSID/password，重新构建即可
+  （凭据只落在 `esp32\build\esp32\tcp\sdkconfig`）。
 
 ## espview_build.bat
 

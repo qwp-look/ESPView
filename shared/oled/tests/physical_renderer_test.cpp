@@ -735,6 +735,77 @@ void goldenWhiteBlack() {
     }
 }
 
+
+// ---- M8-C C4: quality mono pipeline（整帧语义）----
+
+std::vector<uint8_t> makeGradientFrame() {
+    std::vector<uint8_t> f(kFrameBytes, 0);
+    for (int y = 0; y < kSrcH; ++y) {
+        for (int x = 0; x < kSrcW; ++x) {
+            const uint8_t g = static_cast<uint8_t>((x + y) * 255 / (kSrcW + kSrcH - 2));
+            const uint16_t v = static_cast<uint16_t>((((g >> 3) << 11) | ((g >> 2) << 5) | (g >> 3)));
+            const size_t off = (static_cast<size_t>(y) * kSrcW + static_cast<size_t>(x)) * 2u;
+            f[off] = static_cast<uint8_t>(v & 0xFFu);
+            f[off + 1] = static_cast<uint8_t>(v >> 8);
+        }
+    }
+    return f;
+}
+
+void qualityFullFrameWhiteBlack() {
+    PhysicalRenderer r(128, 64, 128, true);  // quality
+    {
+        OledFb fb;
+        const std::vector<uint8_t> frame = makeFrame(kWhite);
+        r.renderFrame(fb, kSrcW, kSrcH, frame.data(), RenderRect{0, 0, kSrcW, kSrcH});
+        uint8_t expected[OledFb::kSizeBytes];
+        std::memset(expected, 0xFF, OledFb::kSizeBytes);
+        CHECK(std::memcmp(fb.data(), expected, OledFb::kSizeBytes) == 0);
+    }
+    {
+        OledFb fb;
+        const std::vector<uint8_t> frame = makeFrame(kBlack);
+        r.renderFrame(fb, kSrcW, kSrcH, frame.data(), RenderRect{0, 0, kSrcW, kSrcH});
+        uint8_t expected[OledFb::kSizeBytes];
+        std::memset(expected, 0x00, OledFb::kSizeBytes);
+        CHECK(std::memcmp(fb.data(), expected, OledFb::kSizeBytes) == 0);
+    }
+}
+
+void qualityFullFrameDeterministicAndDiffersFromFast() {
+    const std::vector<uint8_t> grad = makeGradientFrame();
+    PhysicalRenderer fastR;
+    PhysicalRenderer qualR(128, 64, 128, true);
+    OledFb fastFb, q1, q2;
+    fastR.renderFrame(fastFb, kSrcW, kSrcH, grad.data(), RenderRect{0, 0, kSrcW, kSrcH});
+    qualR.renderFrame(q1, kSrcW, kSrcH, grad.data(), RenderRect{0, 0, kSrcW, kSrcH});
+    qualR.renderFrame(q2, kSrcW, kSrcH, grad.data(), RenderRect{0, 0, kSrcW, kSrcH});
+    CHECK(std::memcmp(q1.data(), q2.data(), OledFb::kSizeBytes) == 0);  // 确定性
+    // 渐变帧下 dither + bilinear 与最近邻 + 阈值必然不同（统计不同字节数 > 0）。
+    size_t diffBytes = 0;
+    for (size_t i = 0; i < OledFb::kSizeBytes; ++i) {
+        if (q1.data()[i] != fastFb.data()[i]) {
+            ++diffBytes;
+        }
+    }
+    CHECK(diffBytes > 0);
+    // 渐变帧质量输出应同时含亮/暗像素（语义保留），且与全白/全黑不同。
+    CHECK(!fbAllBytes(q1, 0x00));
+    CHECK(!fbAllBytes(q1, 0xFF));
+}
+
+void qualityPartialRectNoop() {
+    // quality 模式只支持整帧：部分 rect 一律 no-op（bilinear 需全帧采样）。
+    PhysicalRenderer r(128, 64, 128, true);
+    OledFb fb;
+    const std::vector<uint8_t> frame = makeFrame(kWhite);
+    r.renderFrame(fb, kSrcW, kSrcH, frame.data(), RenderRect{0, 0, 64, 48});
+    CHECK(fbAllBytes(fb, 0x00));  // 保持初始清屏状态
+    // 整帧 rect 正常输出（与 no-op 对照）。
+    r.renderFrame(fb, kSrcW, kSrcH, frame.data(), RenderRect{0, 0, kSrcW, kSrcH});
+    CHECK(fbAllBytes(fb, 0xFF));
+}
+
 }  // namespace
 
 void runPhysicalRendererTests() {
@@ -755,5 +826,8 @@ void runPhysicalRendererTests() {
     determinism();
     goldenCheckerboard();
     goldenWhiteBlack();
+    qualityFullFrameWhiteBlack();
+    qualityFullFrameDeterministicAndDiffersFromFast();
+    qualityPartialRectNoop();
 }
 

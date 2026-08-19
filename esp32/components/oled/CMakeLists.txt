@@ -12,8 +12,13 @@ set(OLED_COMPONENT_SRCS
     "${CMAKE_CURRENT_LIST_DIR}/../../../shared/oled/physical_renderer.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/../../../shared/oled/scene_renderer.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/../../../shared/oled/oled_preview.cpp"
-    # M8-C (C2)：PhysicalRenderer fast pipeline 门面（shared/render 子集）。
+# M8-C (C2)：PhysicalRenderer fast pipeline 门面；C4：quality pipeline（factory + luminance/bilinear/crop/dither）
     "${CMAKE_CURRENT_LIST_DIR}/../../../shared/render/render_pipeline.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/../../../shared/render/pipeline_factory.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/../../../shared/render/stages/luminance_stage.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/../../../shared/render/stages/bilinear_scale_stage.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/../../../shared/render/stages/crop_stage.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/../../../shared/render/stages/ordered_dither_stage.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/../../../shared/render/stages/fast_scale_threshold_stage.cpp"
     "src/oled_i2c.cpp"
     "src/oled_controller.cpp"

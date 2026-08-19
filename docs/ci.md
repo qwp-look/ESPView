@@ -214,6 +214,6 @@ README 只放一个主 badge 的表格，其余用文档链接，不堆 badge）
 
 首次 push 后 3 个 job 失败（bench-smoke 在 push main 按设计 skipped），均已修复并复跑验证：
 
-- `esp32-ci` S3 smoke：`tee build/s3/set_target.log` 在 `idf.py set-target` 启动前就向 build/s3 写入日志，fullclean 因「非空但无 CMakeCache.txt」拒绝清理（exit 2）；修复为日志先落在工作目录、成功后移入 build/s3。本地已按相同错误复现并验证修复路径。
+- `esp32-ci` S3 smoke：`tee build/esp32s3/smoke/set_target.log` 在 `idf.py set-target` 启动前就向 build/esp32s3/smoke 写入日志，fullclean 因「非空但无 CMakeCache.txt」拒绝清理（exit 2）；修复为日志先落在工作目录、成功后移入 build/esp32s3/smoke。本地已按相同错误复现并验证修复路径。
 - `full-ci` fresh-clone：`security_scan.py` 在无 `.git` 的 `git archive` 树中 `git ls-files` 失败（exit 128）；修复为 git 不可用时回退文件系统遍历（跳过 .git / build）。
 - `benchmark` bench-full：提交基线在本机测得，GitHub runner 整体慢 +27%..+60%，绝对 ns 跨机比较无效（任务书 §十八）；修复为 CI 上比较 `--warn-only` + 环境元数据，`stream_encode alloc_count=0` alloc gate 保持硬失败；严格 >25% 时间门槛保留给同机 `run_bench.bat` / `run_bench.sh`。

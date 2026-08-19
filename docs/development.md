@@ -44,7 +44,7 @@ ESPView/
 ├── scripts/                # 一键构建/烧录/验证入口 + 硬件验收 Python 脚本（见 §3/§4）
 ├── docs/                   # DESIGN.md（权威）+ README.md（索引）+ development.md + contributing.md
 ├── README.md               # 项目总览（根）
-└── build/                  # host/Qt 构建输出（gitignored）；ESP32 构建在 esp32/build/<profile>/
+└── build/                  # host/Qt 构建输出（gitignored）；ESP32 构建在 esp32/build/<target>/<profile>/
 ```
 
 要点：
@@ -137,10 +137,10 @@ CLI > QSettings > 默认（TCP / COM4 / 115200 / `0.0.0.0:8765`）；QSettings �
 . 'C:\Espressif\tools\Microsoft.v6.0.2.PowerShell_profile.ps1'
 # 2) 进入 esp32/ 构建（-B 指定 profile 构建目录；-D SDKCONFIG 必须用"空格形式"，见 §8 坑 #1）
 Set-Location esp32
-idf.py -B build\uart_hw -D SDKCONFIG=C:\path\to\ESPView\esp32\build\uart_hw\sdkconfig build
+idf.py -B build\esp32\uart_hw -D SDKCONFIG=C:\path\to\ESPView\esp32\build\esp32\uart_hw\sdkconfig build
 ```
 
-profile 机制：每个 profile = `esp32\build\<name>` 独立构建目录 + 独立 sdkconfig（首次构建/烧录
+profile 机制（M8-C C4 per-target）：每个 profile = `esp32\build\<target>\<name>` 独立构建目录 + 独立 sdkconfig（首次构建
 时从本地 `esp32\sdkconfig` 引导拷贝一份，保留 UART 引脚/波特率与 Wi-Fi 凭据），此后各 profile
 完全隔离，共享的 `esp32\sdkconfig` 永不被构建/烧录覆盖（详见 `scripts/README.md`「M7-F F4」与
 `scripts/espview_build.bat`）。
@@ -265,9 +265,9 @@ YAML lint，始终运行）；另有 tag `v*` 触发的 `release.yml` 与手动 
 
 ## 5. Profile 系统（固件构建目录）
 
-固件行为由 ESP32 Kconfig 决定；**profile = `esp32\build\<name>` 构建目录**，用 `-b <name>`
+固件行为由 ESP32 Kconfig 决定；**profile = `esp32\build\<target>\<name>` 构建目录**，用 `-t <target>` + `-b <name>`
 选择（`espview_build.bat` / `espview_flash.bat` / `espview_build_flash.bat` 通用），构建与
-烧录都使用 `build\<profile>\sdkconfig`（M7-F F4 隔离，见 §3.3）。
+烧录都使用 `build\<target>\<profile>\sdkconfig`（M7-F F4 隔离 + M8-C C4 per-target，见 §3.3）。
 
 命名约定（任务书 §19）：`uart`（UART 验收）、`tcp`（TCP / 生产）、`oled` / `oled-off`
 （OLED 开 / 关对照，M7-E A/B/C 实验所用配置差异）、`diagnostic`（诊断钩子）。

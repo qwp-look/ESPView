@@ -18,14 +18,17 @@
 
 #include "render_color.h"
 
+#include "pipeline_factory.h"
+
 namespace espview {
 namespace oled {
 
 namespace {
 }  // namespace
 
-PhysicalRenderer::PhysicalRenderer(int fbW, int fbH, uint8_t threshold)
-    : fbW_(fbW), fbH_(fbH), threshold_(threshold) {}
+PhysicalRenderer::PhysicalRenderer(int fbW, int fbH, uint8_t threshold,
+                                     bool quality)
+    : fbW_(fbW), fbH_(fbH), threshold_(threshold), quality_(quality) {}
 
 void PhysicalRenderer::clear(OledFb& fb) { fb.clear(); }
 
@@ -40,6 +43,23 @@ uint8_t PhysicalRenderer::thresholded(uint16_t rgb565, uint8_t th) {
 void PhysicalRenderer::ensurePipeline(int srcW, int srcH) {
     if (pipeline_ && lastSrcW_ == srcW && lastSrcH_ == srcH) {
         return;  // 复用已构建 pipeline（run 期零分配）
+    }
+    if (quality_) {
+        // M8-C C4：quality mono pipeline（整帧语义；部分 rect 在 renderFrame 拒绝）。
+        render::MonoPipelineConfig cfg;
+        cfg.srcW = srcW;
+        cfg.srcH = srcH;
+        cfg.targetW = fbW_;
+        cfg.targetH = fbH_;
+        cfg.threshold = threshold_;
+        cfg.quality = true;
+        auto pipe = render::createMonoPipeline(cfg);
+        if (pipe && pipe->build(srcW, srcH)) {
+            pipeline_ = std::move(pipe);
+            lastSrcW_ = srcW;
+            lastSrcH_ = srcH;
+        }
+        return;
     }
     render::FastScaleThresholdParams p;
     p.logicalW = srcW;
@@ -75,6 +95,13 @@ void PhysicalRenderer::renderFrame(OledFb& fb, int srcW, int srcH,
     if (srcRect.x + srcRect.w <= 0 || srcRect.y + srcRect.h <= 0 ||
         srcRect.x >= srcW || srcRect.y >= srcH) {
         return;  // 无交集
+    }
+
+    // quality 模式只支持整帧：bilinear 需要全帧采样，窗口相对映射在部分
+    // rect 下不正确（fast 的 2/5 最近邻每源像素只映射一个 OLED 像素，故无此约束）。
+    if (quality_ && (srcRect.x != 0 || srcRect.y != 0 ||
+                    srcRect.w != srcW || srcRect.h != srcH)) {
+        return;  // no-op（部分 rect 在 quality 模式下被拒绝）
     }
 
     ensurePipeline(srcW, srcH);
